@@ -2040,9 +2040,11 @@ name = "rterm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "eframe",
  "egui",
  "env_logger",
+ "libc",
  "log",
  "nix 0.27.1",
 ]
