@@ -2,14 +2,14 @@
 
 use std::{
     borrow::Cow,
-    os::fd::{AsFd, AsRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, OwnedFd, RawFd},
 };
 
-use crate::ansi;
+use crate::{ansi, pty};
 use ansi::AsciiControl;
 use anyhow::Context;
 use egui::{CentralPanel, Color32, FontId, Key, Rect};
-use log::info;
+use log::{debug, info};
 use nix::errno::Errno;
 
 #[derive(Debug)]
@@ -30,8 +30,18 @@ impl eframe::App for TerminalEmulator {
             if self.char_dimensions.is_none() {
                 self.char_dimensions = Some(get_char_size(ctx, &self.font).into());
             }
-            self.update_win_size(ui)
-                .context("updating window size failed")?;
+
+            let rect = ctx
+                .input(|i| i.viewport().inner_rect)
+                .context("viewport.inner_rect failed")?;
+            if self.window_rect != Some(rect) {
+                let winsz = Self::get_pty_winsize(ctx, self.char_dimensions.unwrap())
+                    .context("updating window size failed")?;
+                self.grid.resize(winsz.ws_row, winsz.ws_col);
+                self.window_rect = Some(rect);
+                pty::update_pty_window_size(self.pty_fd.as_fd(), &winsz)
+                    .context("update_pty_window_size")?;
+            }
 
             self.read_from_pty().context("reading from pty failed")?;
 
@@ -43,44 +53,51 @@ impl eframe::App for TerminalEmulator {
             })
             .context("input handling failed")?;
 
-            self.paint_cursor(ui).context("paint_cursor failed")?;
             self.write_to_pty().context("writing to pty failed")?;
-
             self.render(ctx, ui);
+
+            self.paint_cursor(ui).context("paint_cursor failed")?;
             Ok(())
         });
     }
 }
 
 impl TerminalEmulator {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+    pub fn new(cc: &eframe::CreationContext<'_>, pty_fd: OwnedFd) -> anyhow::Result<Self> {
+        let font = FontId::monospace(22.0);
         cc.egui_ctx.style_mut(|style| {
-            style.override_font_id = Some(FontId::monospace(22.0));
+            // style.override_text_style = Some(egui::TextStyle::Monospace);
+            style.override_font_id = Some(font.clone());
         });
-        let pty_fd = pty::create_pty().context("create_pty failed")?;
-        let pty_winsz =
-            pty::get_pty_window_size(pty_fd.as_fd()).context("get_pty_window_size failed")?;
-        pty::set_nonblocking(pty_fd.as_fd()).context("pty: set_nonblocking mode failed")?;
+        // cc.egui_ctx.set_pixels_per_point(2.0);
+
         Ok(Self {
             scrollback: LineBuffer::with_capacity(10),
             buffered_input: String::new(),
-            grid: AnsiGrid::new(pty_winsz.ws_row as usize, pty_winsz.ws_col as usize),
+            grid: AnsiGrid::new(0, 0),
             pty_fd,
             window_rect: None,
             char_dimensions: None,
-            font: FontId::monospace(22.0),
+            font,
             parser: ansi::Parser::new(),
         })
     }
 
     pub fn render(&self, _ctx: &egui::Context, ui: &mut egui::Ui) {
-        ui.label(self.scrollback.as_str());
+        for line in self.grid.lines() {
+            ui.label(line);
+        }
     }
 
     pub fn read_from_pty(&mut self) -> anyhow::Result<()> {
         let mut buf = [0u8; 1024];
         match nix::unistd::read(self.pty_fd.as_raw_fd(), &mut buf) {
             Ok(num_read) => {
+                debug!(
+                    "read {} bytes from pty: {as_str:?}",
+                    num_read,
+                    as_str = std::str::from_utf8(&buf[..num_read])
+                );
                 self.parser.push_bytes(&buf[..num_read]);
 
                 let mut dst = [0u8; 10];
@@ -140,41 +157,44 @@ impl TerminalEmulator {
                 self.buffered_input += txt;
             }
             egui::Event::Key {
+                key: Key::Tab,
+                pressed: true,
+                repeat: false,
+                ..
+            } => self.buffered_input.push(AsciiControl::Tab.into()),
+            egui::Event::Key {
+                key: Key::Backspace,
+                pressed: true,
+                repeat: false,
+                ..
+            } => self.buffered_input.push(AsciiControl::Backspace.into()),
+            egui::Event::Key {
                 key: Key::Enter,
                 pressed: true,
                 repeat: false,
                 ..
-            } => {
-                self.buffered_input += "\n";
-            }
+            } => self.buffered_input.push(AsciiControl::LineFeed.into()),
             _ => (),
         };
         Ok(())
     }
 
-    pub fn update_win_size(&mut self, ui: &mut egui::Ui) -> anyhow::Result<()> {
-        let rect = ui
-            .ctx()
+    pub fn get_pty_winsize(
+        ctx: &egui::Context,
+        char_dimensions: egui::Vec2,
+    ) -> anyhow::Result<nix::pty::Winsize> {
+        let rect = ctx
             .input(|i| i.viewport().inner_rect)
             .context("viewport.inner_rect failed")?;
-        if self.window_rect != Some(rect) {
-            let (char_width, char_height) = get_char_size(ui.ctx(), &self.font);
-            let num_chars_x = rect.width() / char_width;
-            let num_chars_y = rect.height() / char_height;
-            let winsz = nix::pty::Winsize {
-                ws_row: num_chars_x.ceil() as u16,
-                ws_col: num_chars_y.ceil() as u16,
-                ws_xpixel: rect.width().ceil() as u16,
-                ws_ypixel: rect.height().ceil() as u16,
-            };
-            pty::update_pty_window_size(self.pty_fd.as_fd(), &winsz)
-                .context("update_pty_window_size")?;
-            self.grid.resize(winsz.ws_row, winsz.ws_col);
-            self.window_rect = Some(rect);
-            self.char_dimensions = Some(egui::vec2(char_width, char_height));
-        }
-
-        Ok(())
+        let (char_width, char_height) = char_dimensions.into();
+        let num_chars_x = rect.width() / char_width;
+        let num_chars_y = rect.height() / char_height;
+        Ok(nix::pty::Winsize {
+            ws_row: num_chars_y.floor() as u16,
+            ws_col: (num_chars_x.floor() as u16).saturating_sub(1),
+            ws_xpixel: rect.width().ceil() as u16,
+            ws_ypixel: rect.height().ceil() as u16,
+        })
     }
 
     pub fn paint_cursor(&self, ui: &mut egui::Ui) -> anyhow::Result<()> {
@@ -182,12 +202,12 @@ impl TerminalEmulator {
         let (cursor_row, cursor_col) = self.grid.cursor_position;
         let rect = Rect::from_min_size(
             egui::pos2(
-                cursor_col as f32 * char_dims.x,
-                cursor_row as f32 * char_dims.y,
+                (cursor_col as f32 * char_dims.x) + 14.0,
+                (cursor_row as f32 * char_dims.y) + 8.0,
             ),
             char_dims,
         );
-        ui.painter().rect_filled(rect, 0.0, Color32::GOLD);
+        ui.painter().rect_filled(rect, 5.0, Color32::GOLD);
         Ok(())
     }
 }
@@ -232,110 +252,44 @@ impl AnsiGrid {
             cur_row * self.num_cols + cur_col
         };
 
-        let max_idx = self.cells.len().saturating_sub(1) as isize;
-        let mut move_horiz = |steps: isize| {
-            let prev = cur_idx;
-            cur_idx = (cur_idx as isize + steps).clamp(0, max_idx) as usize;
-            prev
-        };
-
         match token {
             Char(ch) => {
-                self.cells[move_horiz(1)] = *ch;
+                self.cells[cur_idx] = *ch;
+                cur_idx += 1;
             }
             AsciiControl(AsciiControl::Backspace) => {
-                move_horiz(-1);
+                cur_idx -= 1;
             }
             AsciiControl(AsciiControl::Tab) => {
-                move_horiz(8);
+                cur_idx += 4;
             }
             AsciiControl(AsciiControl::LineFeed) => {
-                move_horiz(self.num_cols as isize);
+                cur_idx += self.num_cols;
             }
             AsciiControl(AsciiControl::CarriageReturn) => {
-                move_horiz(self.cursor_position.1 as isize * -1);
+                cur_idx -= self.cursor_position.1;
             }
             EraseControl(EraseControl::Screen) => self.cells.fill(' '),
             ignored => info!("ignoring ansii token: {ignored:?}"),
         }
 
-        self.cursor_position = (cur_idx / self.num_cols, cur_idx % self.num_cols);
-    }
-}
-
-macro_rules! cstr {
-    ($lit:literal) => {
-        std::ffi::CStr::from_bytes_with_nul($lit.as_bytes()).expect("invalid CStr literal")
-    };
-    ( $( $lit:literal ), + ) => {
-        &[
-            $(
-                std::ffi::CStr::from_bytes_with_nul($lit.as_bytes()).expect("invalid CStr literal"),
-             )+
-        ]
-    };
-}
-
-mod pty {
-    use std::os::fd::{AsRawFd, OwnedFd};
-
-    use anyhow::Context;
-    use nix::unistd::ForkResult;
-
-    pub fn create_pty() -> anyhow::Result<OwnedFd> {
-        let winsize = None;
-        let termios = None;
-        let res = unsafe { nix::pty::forkpty(winsize, termios).context("forkpty failed")? };
-        match res.fork_result {
-            ForkResult::Parent { .. } => Ok(res.master),
-            ForkResult::Child => {
-                let _ = nix::unistd::execve(
-                    cstr!["/bin/zsh\x00"],
-                    cstr!["--login\x00", "--no-rcs\x00"],
-                    cstr!["TERM=xterm\x00", "PS1=$ \x00"],
-                )
-                .expect("execve failed");
-                unreachable!();
-            }
+        let max_idx = self.cells.len().saturating_sub(1);
+        self.cursor_position = if cur_idx > max_idx {
+            let num_lines_to_scroll = (cur_idx / self.num_cols) - self.num_rows + 1;
+            self.cells
+                .copy_within(num_lines_to_scroll * self.num_cols.., 0);
+            let last_n_lines = self.cells.len() - (self.num_cols * num_lines_to_scroll)..;
+            self.cells[last_n_lines].fill(' ');
+            (self.num_rows - 1, cur_idx % self.num_cols)
+        } else {
+            (cur_idx / self.num_cols, cur_idx % self.num_cols)
         }
     }
 
-    nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, nix::pty::Winsize);
-
-    pub fn get_pty_window_size(fd: impl AsRawFd) -> anyhow::Result<nix::pty::Winsize> {
-        let mut winsz = nix::pty::Winsize {
-            ws_row: 0,
-            ws_col: 0,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        let res = unsafe { tiocgwinsz(fd.as_raw_fd(), &mut winsz as *mut _) };
-        match res {
-            Ok(_) => Ok(winsz),
-            Err(err) => Err(anyhow::format_err!("{err}")),
-        }
-    }
-
-    pub fn set_nonblocking(fd: impl AsRawFd) -> anyhow::Result<()> {
-        use nix::fcntl::{fcntl, FcntlArg, OFlag};
-
-        let bits = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFL).context("fcntl F_GETFL failed")?;
-        let mut flags = OFlag::from_bits(bits).unwrap_or(OFlag::empty());
-        flags.set(OFlag::O_NONBLOCK, true);
-        fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(flags)).context("fcntl F_SETFL failed")?;
-        Ok(())
-    }
-
-    nix::ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, nix::pty::Winsize);
-
-    pub fn update_pty_window_size(
-        fd: impl AsRawFd,
-        winsz: &nix::pty::Winsize,
-    ) -> anyhow::Result<()> {
-        match unsafe { tiocswinsz(fd.as_raw_fd(), winsz as *const _) } {
-            Ok(_) => Ok(()),
-            Err(err) => Err(anyhow::format_err!("tiocswinsz failed: {err}")),
-        }
+    fn lines<'a>(&'a self) -> impl Iterator<Item = String> + 'a {
+        self.cells
+            .chunks_exact(self.num_cols)
+            .map(|line_chars| String::from_iter(line_chars))
     }
 }
 
@@ -364,7 +318,7 @@ impl LineBuffer {
 }
 
 // See: https://github.com/sphaerophoria/termie/blob/934f23bfe9ff9ff5a8168ba2bc7ac46e8b64bcfa/src/gui.rs#L26C1-L44C2
-pub fn get_char_size(ctx: &egui::Context, font_id: &egui::FontId) -> (f32, f32) {
+fn get_char_size(ctx: &egui::Context, font_id: &egui::FontId) -> (f32, f32) {
     ctx.fonts(move |fonts| {
         // NOTE: Glyph width seems to be a little too wide
         let width = fonts
@@ -379,6 +333,6 @@ pub fn get_char_size(ctx: &egui::Context, font_id: &egui::FontId) -> (f32, f32) 
 
         let height = fonts.row_height(font_id);
 
-        (width, height + 5.0)
+        (width, height + 3.3)
     })
 }

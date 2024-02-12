@@ -321,6 +321,12 @@ impl TryFrom<char> for AsciiControl {
     }
 }
 
+impl From<AsciiControl> for char {
+    fn from(value: AsciiControl) -> Self {
+        value as u8 as char
+    }
+}
+
 #[derive(Debug)]
 enum ParserState {
     ExpectingChar,

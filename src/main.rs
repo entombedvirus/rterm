@@ -1,11 +1,16 @@
+use std::os::fd::AsFd;
+
 use crate::terminal_emulator::TerminalEmulator;
-use anyhow::Context;
 
 mod ansi;
+mod pty;
 mod terminal_emulator;
 
 fn main() {
     env_logger::init();
+
+    let pty_fd = pty::create_pty().expect("create_pty failed");
+    pty::set_nonblocking(pty_fd.as_fd()).expect("pty: set_nonblocking mode failed");
 
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
@@ -13,9 +18,7 @@ fn main() {
         native_options,
         Box::new(|cc| {
             Box::new(
-                TerminalEmulator::new(cc)
-                    .context("TerminalEmulator initialization failed")
-                    .unwrap(),
+                TerminalEmulator::new(cc, pty_fd).expect("TerminalEmulator initialization failed"),
             )
         }),
     )
