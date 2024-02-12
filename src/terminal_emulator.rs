@@ -177,6 +177,26 @@ impl TerminalEmulator {
                 repeat: false,
                 ..
             } => self.buffered_input.push(AsciiControl::LineFeed.into()),
+            egui::Event::Key {
+                key: Key::ArrowUp,
+                pressed: true,
+                ..
+            } => self.buffered_input.push_str("\u{1b}[A"),
+            egui::Event::Key {
+                key: Key::ArrowDown,
+                pressed: true,
+                ..
+            } => self.buffered_input.push_str("\u{1b}[B"),
+            egui::Event::Key {
+                key: Key::ArrowRight,
+                pressed: true,
+                ..
+            } => self.buffered_input.push_str("\u{1b}[C"),
+            egui::Event::Key {
+                key: Key::ArrowLeft,
+                pressed: true,
+                ..
+            } => self.buffered_input.push_str("\u{1b}[D"),
             _ => (),
         };
         Ok(())
