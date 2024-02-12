@@ -5,7 +5,10 @@ use std::{
     os::fd::{AsFd, AsRawFd, OwnedFd, RawFd},
 };
 
-use crate::{ansi, pty};
+use crate::{
+    ansi::{self, CursorControl},
+    pty,
+};
 use ansi::AsciiControl;
 use anyhow::Context;
 use egui::{CentralPanel, Color32, FontId, Key, Rect};
@@ -246,6 +249,7 @@ impl AnsiGrid {
     fn update(&mut self, token: &ansi::AnsiToken) {
         use ansi::AnsiToken::*;
         use ansi::AsciiControl;
+        use ansi::CursorControl;
         use ansi::EraseControl;
         let mut cur_idx = {
             let (cur_row, cur_col) = self.cursor_position;
@@ -269,7 +273,15 @@ impl AnsiGrid {
             AsciiControl(AsciiControl::CarriageReturn) => {
                 cur_idx -= self.cursor_position.1;
             }
+            CursorControl(CursorControl::MoveTo { line, col }) => {
+                let line = line.saturating_sub(1);
+                let col = col.saturating_sub(1);
+                cur_idx = line * self.num_cols + col;
+            }
             EraseControl(EraseControl::Screen) => self.cells.fill(' '),
+            EraseControl(EraseControl::FromCursorToEndOfScreen) => {
+                self.cells[cur_idx..].fill(' ');
+            }
             ignored => info!("ignoring ansii token: {ignored:?}"),
         }
 
