@@ -298,9 +298,18 @@ impl AnsiGrid {
                 let col = col.saturating_sub(1);
                 cur_idx = line * self.num_cols + col;
             }
+            CursorControl(CursorControl::MoveLineUp) => {
+                let last_row_start = self.cells.len() - self.num_cols;
+                self.cells.copy_within(..last_row_start, self.num_cols);
+                self.cells[..self.num_cols].fill(' ');
+            }
             EraseControl(EraseControl::Screen) => self.cells.fill(' '),
             EraseControl(EraseControl::FromCursorToEndOfScreen) => {
                 self.cells[cur_idx..].fill(' ');
+            }
+            EraseControl(EraseControl::FromCursorToEndOfLine) => {
+                let line_end_idx = (self.cursor_position.0 + 1) * self.num_cols;
+                self.cells[cur_idx..line_end_idx].fill(' ');
             }
             ignored => info!("ignoring ansii token: {ignored:?}"),
         }

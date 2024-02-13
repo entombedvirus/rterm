@@ -11,7 +11,6 @@ rterm|80-column dumb tty,
 	cr=\r,
 	cub1=\b,
 	cud1=\n,
-	ind=\n,
 # clr_eol                     el        ce     clear to end of line (P)
 	el=\E[K,
 # clr_eos                     ed        cd     clear to end of screen (P*)
@@ -22,6 +21,8 @@ rterm|80-column dumb tty,
 	cup=\E[%i%p1%d;%p2%dH,
 # scroll_reverse              ri        sr     scroll text down (P)
 	ri=\EM,
+# scroll_forward              ind       sf     scroll text up (P)
+	ind=\n,
 # xn, da, db, ut
 # ll=???,
 # al=???,
