@@ -1,12 +1,27 @@
 #	Reconstructed via infocmp from file: /run/current-system/sw/share/terminfo/d/dumb
+# https://man7.org/linux/man-pages/man5/terminfo.5.html
 rterm|80-column dumb tty,
 	am,
-	colors#8,
+# colors#8,
 	cols#80,
+	lines#24,
 	bel=^G,
-	clear=\E[H\E[J,
+# clear_screen                clear     cl     clear screen and home cursor (P*)
+	clear=\E[H\E[2J,
 	cr=\r,
-	cub1=^H,
+	cub1=\b,
 	cud1=\n,
 	ind=\n,
-
+# clr_eol                     el        ce     clear to end of line (P)
+	el=\E[K,
+# clr_eos                     ed        cd     clear to end of screen (P*)
+	ed=\E[J,
+# cursor_home                 home      ho     home cursor (if no cup)
+	home=\E[H,
+# cursor_address              cup       cm     move to row #1 columns #2
+	cup=\E[%i%p1%d;%p2%dH,
+# scroll_reverse              ri        sr     scroll text down (P)
+	ri=\EM,
+# xn, da, db, ut
+# ll=???,
+# al=???,
