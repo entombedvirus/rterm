@@ -2,6 +2,7 @@
 
 use std::{
     borrow::Cow,
+    collections::BTreeMap,
     os::fd::{AsFd, AsRawFd, OwnedFd, RawFd},
 };
 
@@ -50,7 +51,8 @@ impl eframe::App for TerminalEmulator {
 
             ui.input(|input_state| -> anyhow::Result<()> {
                 for event in &input_state.events {
-                    self.handle_event(event).context("handling event failed")?;
+                    self.handle_event(input_state, event)
+                        .context("handling event failed")?;
                 }
                 Ok(())
             })
@@ -154,7 +156,11 @@ impl TerminalEmulator {
         Ok(())
     }
 
-    pub fn handle_event(&mut self, event: &egui::Event) -> anyhow::Result<()> {
+    pub fn handle_event(
+        &mut self,
+        input_state: &egui::InputState,
+        event: &egui::Event,
+    ) -> anyhow::Result<()> {
         match event {
             egui::Event::Text(txt) => {
                 self.buffered_input += txt;
@@ -197,6 +203,32 @@ impl TerminalEmulator {
                 pressed: true,
                 ..
             } => self.buffered_input.push_str("\u{1b}[D"),
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers: egui::Modifiers::CTRL,
+                ..
+            } => {
+                match key {
+                    Key::A => self.buffered_input.push_str("\u{01}"),
+                    Key::B => self.buffered_input.push_str("\u{02}"),
+                    // mapts to ascii end of text
+                    Key::C => self.buffered_input.push_str("\u{03}"),
+                    // mapts to ascii end of transmission
+                    Key::D => self.buffered_input.push_str("\u{04}"),
+                    Key::E => self.buffered_input.push_str("\u{05}"),
+                    // mapts to ascii form feed 0xc
+                    Key::L => self.buffered_input.push_str("\u{0c}"),
+                    // mapts to ascii data link escape
+                    Key::P => self.buffered_input.push_str("\u{10}"),
+                    // mapts to ascii device control 2
+                    Key::R => self.buffered_input.push_str("\u{12}"),
+                    // mapts to ascii end of transmission block
+                    Key::W => self.buffered_input.push_str("\u{17}"),
+                    Key::X => self.buffered_input.push_str("\u{18}"),
+                    _ => (),
+                }
+            }
             _ => (),
         };
         Ok(())

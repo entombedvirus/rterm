@@ -418,5 +418,11 @@ mod tests {
             parser.push_bytes(byte_stream.as_bytes());
             assert_eq!(expected, parser.tokens().collect::<Vec<_>>());
         }
+
+        parser.push_bytes(b"\x1b[A");
+        assert_eq!(
+            vec![AnsiToken::CursorControl(CursorControl::MoveUp { lines: 1 })],
+            parser.tokens().collect::<Vec<_>>()
+        );
     }
 }

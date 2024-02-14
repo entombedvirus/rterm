@@ -9,8 +9,27 @@ rterm|80-column dumb tty,
 # clear_screen                clear     cl     clear screen and home cursor (P*)
 	clear=\E[H\E[2J,
 	cr=\r,
-	cub1=\b,
+
+# key_up                      kcuu1     ku     up-arrow key
+	cuu=\E[%p1%dA,
+	cuu1=\E[A,
+	kcuu1=\E[A,
+
+# key_down                    kcud1     kd     down-arrow key
+	cud=\E[%p1%dB,
 	cud1=\n,
+	kcud1=\E[B,
+
+# key_right                   kcuf1     kr     right-arrow key
+	cuf=\E[%p1%dC,
+	cuf1=\E[C,
+	kcuf1=\E[C,
+
+# key_left                    kcub1     kl     left-arrow key
+	cub=\E[%p1%dD,
+	cub1=\b,
+	kcub1=\E[D,
+
 # clr_eol                     el        ce     clear to end of line (P)
 	el=\E[K,
 # clr_eos                     ed        cd     clear to end of screen (P*)
@@ -23,6 +42,3 @@ rterm|80-column dumb tty,
 	ri=\EM,
 # scroll_forward              ind       sf     scroll text up (P)
 	ind=\n,
-# xn, da, db, ut
-# ll=???,
-# al=???,
