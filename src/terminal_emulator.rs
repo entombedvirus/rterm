@@ -35,12 +35,9 @@ impl eframe::App for TerminalEmulator {
                 self.char_dimensions = Some(get_char_size(ctx, &self.font).into());
             }
 
-            let rect = ctx
-                .input(|i| i.viewport().inner_rect)
-                .context("viewport.inner_rect failed")?;
+            let rect = ui.available_rect_before_wrap();
             if self.window_rect != Some(rect) {
-                let winsz = Self::get_pty_winsize(ctx, self.char_dimensions.unwrap())
-                    .context("updating window size failed")?;
+                let winsz = Self::get_pty_winsize(rect.size(), self.char_dimensions.unwrap());
                 self.grid.resize(winsz.ws_row, winsz.ws_col);
                 self.window_rect = Some(rect);
                 pty::update_pty_window_size(self.pty_fd.as_fd(), &winsz)
@@ -59,9 +56,10 @@ impl eframe::App for TerminalEmulator {
             .context("input handling failed")?;
 
             self.write_to_pty().context("writing to pty failed")?;
-            self.render(ctx, ui);
 
             self.paint_cursor(ui).context("paint_cursor failed")?;
+            self.render(ctx, ui);
+
             Ok(())
         });
     }
@@ -235,34 +233,36 @@ impl TerminalEmulator {
     }
 
     pub fn get_pty_winsize(
-        ctx: &egui::Context,
+        egui::Vec2 {
+            x: rect_width,
+            y: rect_height,
+        }: egui::Vec2,
         char_dimensions: egui::Vec2,
-    ) -> anyhow::Result<nix::pty::Winsize> {
-        let rect = ctx
-            .input(|i| i.viewport().inner_rect)
-            .context("viewport.inner_rect failed")?;
+    ) -> nix::pty::Winsize {
         let (char_width, char_height) = char_dimensions.into();
-        let num_chars_x = rect.width() / char_width;
-        let num_chars_y = rect.height() / char_height;
-        Ok(nix::pty::Winsize {
+        let num_chars_x = rect_width / char_width;
+        let num_chars_y = rect_height / char_height;
+        nix::pty::Winsize {
             ws_row: num_chars_y.floor() as u16,
-            ws_col: (num_chars_x.floor() as u16).saturating_sub(1),
-            ws_xpixel: rect.width().ceil() as u16,
-            ws_ypixel: rect.height().ceil() as u16,
-        })
+            ws_col: (num_chars_x.floor() as u16),
+            ws_xpixel: rect_width.floor() as u16,
+            ws_ypixel: rect_height.floor() as u16,
+        }
     }
 
     pub fn paint_cursor(&self, ui: &mut egui::Ui) -> anyhow::Result<()> {
+        let rect = ui.available_rect_before_wrap();
+        let spacing = ui.spacing();
         let char_dims = self.char_dimensions.unwrap_or(egui::vec2(12.0, 12.0));
         let (cursor_row, cursor_col) = self.grid.cursor_position;
         let rect = Rect::from_min_size(
             egui::pos2(
-                (cursor_col as f32 * char_dims.x) + 14.0,
-                (cursor_row as f32 * char_dims.y) + 8.0,
-            ),
+                (cursor_col as f32 * char_dims.x),
+                (cursor_row as f32 * char_dims.y),
+            ) + rect.min.to_vec2(),
             char_dims,
         );
-        ui.painter().rect_filled(rect, 5.0, Color32::GOLD);
+        ui.painter().rect_filled(rect, 0.0, Color32::GOLD);
         Ok(())
     }
 }
