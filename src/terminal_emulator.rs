@@ -282,6 +282,8 @@ struct AnsiGrid {
 // }
 
 impl AnsiGrid {
+    const FILL_CHAR: char = '-';
+
     fn new(num_rows: usize, num_cols: usize) -> Self {
         let cursor_position = (0, 0);
         Self {
@@ -295,7 +297,8 @@ impl AnsiGrid {
     fn resize(&mut self, ws_row: u16, ws_col: u16) {
         self.num_rows = ws_row as usize;
         self.num_cols = ws_col as usize;
-        self.cells.resize(self.num_rows * self.num_cols, ' ');
+        self.cells
+            .resize(self.num_rows * self.num_cols, Self::FILL_CHAR);
     }
 
     fn update(&mut self, token: &ansi::AnsiToken) {
@@ -333,15 +336,15 @@ impl AnsiGrid {
             CursorControl(CursorControl::MoveLineUp) => {
                 let last_row_start = self.cells.len() - self.num_cols;
                 self.cells.copy_within(..last_row_start, self.num_cols);
-                self.cells[..self.num_cols].fill(' ');
+                self.cells[..self.num_cols].fill(Self::FILL_CHAR);
             }
-            EraseControl(EraseControl::Screen) => self.cells.fill(' '),
+            EraseControl(EraseControl::Screen) => self.cells.fill(Self::FILL_CHAR),
             EraseControl(EraseControl::FromCursorToEndOfScreen) => {
-                self.cells[cur_idx..].fill(' ');
+                self.cells[cur_idx..].fill(Self::FILL_CHAR);
             }
             EraseControl(EraseControl::FromCursorToEndOfLine) => {
                 let line_end_idx = (self.cursor_position.0 + 1) * self.num_cols;
-                self.cells[cur_idx..line_end_idx].fill(' ');
+                self.cells[cur_idx..line_end_idx].fill(Self::FILL_CHAR);
             }
             ignored => info!("ignoring ansii token: {ignored:?}"),
         }
@@ -352,7 +355,7 @@ impl AnsiGrid {
             self.cells
                 .copy_within(num_lines_to_scroll * self.num_cols.., 0);
             let last_n_lines = self.cells.len() - (self.num_cols * num_lines_to_scroll)..;
-            self.cells[last_n_lines].fill(' ');
+            self.cells[last_n_lines].fill(Self::FILL_CHAR);
             (self.num_rows - 1, cur_idx % self.num_cols)
         } else {
             (cur_idx / self.num_cols, cur_idx % self.num_cols)
