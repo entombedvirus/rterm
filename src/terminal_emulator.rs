@@ -18,7 +18,6 @@ use nix::errno::Errno;
 
 #[derive(Debug)]
 pub struct TerminalEmulator {
-    scrollback: LineBuffer,
     parser: ansi::Parser,
     pty_fd: OwnedFd,
     window_rect: Option<Rect>,
@@ -75,7 +74,6 @@ impl TerminalEmulator {
         // cc.egui_ctx.set_pixels_per_point(2.0);
 
         Ok(Self {
-            scrollback: LineBuffer::with_capacity(10),
             buffered_input: String::new(),
             grid: AnsiGrid::new(0, 0),
             pty_fd,
@@ -106,18 +104,6 @@ impl TerminalEmulator {
                 let mut dst = [0u8; 10];
                 for token in self.parser.tokens() {
                     self.grid.update(&token);
-                    match token {
-                        ansi::AnsiToken::AsciiControl(
-                            ctrl @ (AsciiControl::CarriageReturn | AsciiControl::LineFeed),
-                        ) => {
-                            dst[0] = ctrl as u8;
-                            self.scrollback.push_bytes(&dst[0..1])
-                        }
-                        ansi::AnsiToken::Char(ch) => self
-                            .scrollback
-                            .push_bytes(ch.encode_utf8(&mut dst).as_bytes()),
-                        _ => (),
-                    }
                 }
                 Ok(())
             }
@@ -344,9 +330,11 @@ impl AnsiGrid {
         };
 
         match token {
-            Char(ch) => {
-                self.cells[cur_idx] = *ch;
-                cur_idx += 1;
+            Text(txt) => {
+                for ch in txt.chars() {
+                    self.cells[cur_idx] = ch;
+                    cur_idx += 1;
+                }
             }
             AsciiControl(AsciiControl::Backspace) => {
                 cur_idx -= 1;

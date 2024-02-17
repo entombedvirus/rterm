@@ -44,55 +44,75 @@ impl Parser {
         // std::str::Utf8Error.
 
         // ---
-        let decoded = String::from_utf8_lossy(&self.stream);
-        let mut char_stream = decoded.chars().peekable();
-        let mut state = ExpectingChar;
-
         let mut to_advance = 0;
         let mut push = |token: AnsiToken, token_byte_len: usize| {
             self.parsed_tokens.push_back(token);
             to_advance += token_byte_len;
         };
 
-        while let Some(next_char) = char_stream.next() {
-            if next_char == REPLACEMENT_CHARACTER && char_stream.peek().is_none() {
-                // last replacement char is likely due to incomplete byte stream. instead of
-                // treating it as an error, exit early and wait for more input
-                break;
-            }
+        let decoded = String::from_utf8_lossy(&self.stream);
+        // ignore any incomplete multi-byte utf-8 char at the end
+        let mut remaining = decoded.trim_end_matches(REPLACEMENT_CHARACTER);
+
+        let mut state = ExpectingChar;
+        while !remaining.is_empty() {
             match state {
                 ExpectingChar => {
-                    let token = if let Ok(ascii_control) = AsciiControl::try_from(next_char) {
-                        if ascii_control == AsciiControl::Escape {
-                            state = ExpectingEscapeSequence;
-                            continue;
+                    let segment = remaining
+                        .split_inclusive(|ch: char| ch.is_ascii_control())
+                        .next()
+                        .expect("remaining is not empty, so this should not happen");
+                    let last_byte = segment.as_bytes().last().copied().expect("yeah...");
+                    if let Ok(control) = AsciiControl::try_from(last_byte) {
+                        let normal_text = &segment[..segment.len() - 1];
+                        if !normal_text.is_empty() {
+                            push(AnsiToken::Text(normal_text.to_string()), normal_text.len());
                         }
-                        AnsiToken::AsciiControl(ascii_control)
+                        if let AsciiControl::Escape = control {
+                            state = ExpectingEscapeSequence;
+                        } else {
+                            push(AnsiToken::AsciiControl(control), 1);
+                        }
                     } else {
-                        AnsiToken::Char(next_char)
-                    };
-                    push(token, next_char.len_utf8());
+                        push(AnsiToken::Text(segment.to_string()), segment.len());
+                    }
+                    remaining = &remaining[segment.len()..];
+                    continue;
                 }
                 ExpectingEscapeSequence => {
                     use CursorControl::*;
-                    let token = match next_char {
-                        '[' => {
-                            state = ExpectingCSI { args: Vec::new() };
+                    let token = match remaining.as_bytes()[0] {
+                        b'[' => {
+                            state = ExpectingCSI {
+                                args: String::new(),
+                            };
+                            remaining = &remaining[1..];
                             continue;
                         }
-                        'M' => AnsiToken::CursorControl(MoveLineUp),
-                        '7' => AnsiToken::CursorControl(SavePositionDEC),
-                        '8' => AnsiToken::CursorControl(RestorePositionDEC),
-                        other => AnsiToken::Unknown(vec!['\x1b', other]),
+                        b'M' => AnsiToken::CursorControl(MoveLineUp),
+                        b'7' => AnsiToken::CursorControl(SavePositionDEC),
+                        b'8' => AnsiToken::CursorControl(RestorePositionDEC),
+                        other => AnsiToken::Unknown(format!("\u{1b}{other}")),
                     };
-                    push(token, 1 + next_char.len_utf8());
+                    push(token, 1 + 1);
+                    remaining = &remaining[1..];
+                    state = ExpectingChar;
+                    continue;
                 }
                 ExpectingCSI { ref mut args } => {
                     use CursorControl::*;
                     use EraseControl::*;
-                    let separated_args = String::from_iter(args.iter().copied());
-                    let mut separated_args = separated_args.split(';');
+                    let mut separated_args = args.split(';');
+                    let next_char = remaining.as_bytes()[0] as char;
                     let token = match next_char {
+                        //  "parameter bytes" in the range 0x30–0x3F (ASCII 0–9:;<=>?), then by any
+                        //  number of "intermediate bytes" in the range 0x20–0x2F (ASCII space and
+                        //  !"#$%&'()*+,-./)
+                        param @ ('\x30'..='\x3f' | '\x20'..='\x2f') => {
+                            args.push(param);
+                            remaining = &remaining[1..];
+                            continue;
+                        }
                         'A' => {
                             let lines: usize = next_usize(&mut separated_args, 1);
                             AnsiToken::CursorControl(MoveUp { lines })
@@ -131,47 +151,22 @@ impl Parser {
                             1 => AnsiToken::EraseControl(FromCursorToStartOfScreen),
                             2 => AnsiToken::EraseControl(Screen),
                             3 => AnsiToken::EraseControl(ScreenAndScrollback),
-                            _unknown => {
-                                let mut seq = vec!['\x1b', '['];
-                                seq.extend_from_slice(args);
-                                seq.push('J');
-                                AnsiToken::Unknown(seq)
-                            }
+                            _unknown => AnsiToken::Unknown(format!("\u{1b}[{args}J")),
                         },
                         'K' => match next_usize(&mut separated_args, 0) {
                             0 => AnsiToken::EraseControl(FromCursorToEndOfLine),
                             1 => AnsiToken::EraseControl(FromCursortoStartOfLine),
                             2 => AnsiToken::EraseControl(Line),
-                            _unknown => {
-                                let mut seq = vec!['\x1b', '['];
-                                seq.extend_from_slice(args);
-                                seq.push('K');
-                                AnsiToken::Unknown(seq)
-                            }
+                            _unknown => AnsiToken::Unknown(format!("\u{1b}[{args}K")),
                         },
                         'm' => AnsiToken::SGR(SgrControl::from(next_usize(&mut separated_args, 0))),
-                        //  "parameter bytes" in the range 0x30–0x3F (ASCII 0–9:;<=>?), then by any
-                        //  number of "intermediate bytes" in the range 0x20–0x2F (ASCII space and
-                        //  !"#$%&'()*+,-./)
-                        param @ ('\x30'..='\x3f' | '\x20'..='\x2f') => {
-                            args.push(param);
-                            continue;
-                        }
-                        unknown => {
-                            let mut seq = vec!['\x1b', '['];
-                            seq.extend_from_slice(args);
-                            seq.push(unknown);
-                            AnsiToken::Unknown(seq)
-                        }
+                        unknown => AnsiToken::Unknown(format!("\u{1b}[{args}{unknown}")),
                     };
-                    push(
-                        token,
-                        2 + args.iter().map(|ch| ch.len_utf8()).sum::<usize>()
-                            + next_char.len_utf8(),
-                    );
+                    push(token, 1 + 1 + args.len() + 1);
+                    state = ExpectingChar;
+                    remaining = &remaining[1..];
                 }
-            };
-            state = ExpectingChar;
+            }
         }
         self.stream.advance(to_advance);
     }
@@ -185,12 +180,12 @@ fn next_usize<'a>(mut iter: impl Iterator<Item = &'a str>, default: usize) -> us
 // See: https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnsiToken {
-    Char(char),
+    Text(String),
     AsciiControl(AsciiControl),
     CursorControl(CursorControl),
     EraseControl(EraseControl),
     SGR(SgrControl),
-    Unknown(Vec<char>),
+    Unknown(String),
 }
 
 #[allow(unused)]
@@ -310,11 +305,21 @@ pub enum AsciiControl {
 impl TryFrom<char> for AsciiControl {
     type Error = anyhow::Error;
 
-    fn try_from(value: char) -> std::prelude::v1::Result<Self, Self::Error> {
+    fn try_from(value: char) -> Result<Self, Self::Error> {
+        u8::try_from(value)
+            .map_err(|err| anyhow::format_err!("char is not ascii: {err}"))
+            .and_then(AsciiControl::try_from)
+    }
+}
+
+impl TryFrom<u8> for AsciiControl {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
         if value.is_ascii_control() {
             // SAFETY: enum is repr(u8) and range is mapped exactly to the one checked in
             // is_ascii_control
-            Ok(unsafe { std::mem::transmute(value as u8) })
+            Ok(unsafe { std::mem::transmute(value) })
         } else {
             bail!("invalid ascii control char: {value}")
         }
@@ -331,7 +336,7 @@ impl From<AsciiControl> for char {
 enum ParserState {
     ExpectingChar,
     ExpectingEscapeSequence,
-    ExpectingCSI { args: Vec<char> },
+    ExpectingCSI { args: String },
 }
 
 impl Iterator for Parser {
@@ -365,9 +370,7 @@ mod tests {
             parser.next(),
             Some(AnsiToken::CursorControl(MoveTo { line: 1, col: 1 }))
         );
-        assert_eq!(parser.next(), Some(AnsiToken::Char('h')));
-        assert_eq!(parser.next(), Some(AnsiToken::Char('i')));
-        assert_eq!(parser.next(), Some(AnsiToken::Char('!')));
+        assert_eq!(parser.next(), Some(AnsiToken::Text("hi!".to_string())));
         assert_eq!(parser.next(), None);
     }
 
@@ -382,12 +385,12 @@ mod tests {
             vec![
                 AnsiToken::SGR(SgrControl::Bold),
                 AnsiToken::SGR(SgrControl::Invert),
-                AnsiToken::Char('%'),
+                AnsiToken::Text('%'.to_string()),
                 AnsiToken::SGR(SgrControl::NotInverted),
                 AnsiToken::SGR(SgrControl::Bold),
                 AnsiToken::SGR(SgrControl::Reset),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
-                AnsiToken::Char(' '),
+                AnsiToken::Text(' '.to_string()),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
             ],
             vec![
@@ -396,20 +399,18 @@ mod tests {
                 AnsiToken::SGR(SgrControl::NotInverted),
                 AnsiToken::SGR(SgrControl::NotUnderlined),
                 AnsiToken::EraseControl(FromCursorToEndOfScreen),
-                AnsiToken::Char('$'),
-                AnsiToken::Char(' '),
+                AnsiToken::Text("$ ".to_string()),
             ],
             vec![
                 AnsiToken::EraseControl(FromCursorToEndOfLine),
-                AnsiToken::Unknown(vec!['\x1b', '[', '?', '2', '0', '0', '4', 'h']),
+                AnsiToken::Unknown("\u{1b}[?2004h".to_string()),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::SGR(SgrControl::Reset),
                 AnsiToken::SGR(SgrControl::NotInverted),
                 AnsiToken::SGR(SgrControl::NotUnderlined),
                 AnsiToken::EraseControl(FromCursorToEndOfScreen),
-                AnsiToken::Char('$'),
-                AnsiToken::Char(' '),
+                AnsiToken::Text("$ ".to_string()),
             ],
         ];
 
