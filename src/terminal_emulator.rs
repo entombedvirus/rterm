@@ -161,7 +161,39 @@ impl TerminalEmulator {
     ) -> anyhow::Result<()> {
         match event {
             egui::Event::Text(txt) => {
-                self.buffered_input += txt;
+                self.buffered_input += if input_state.modifiers.alt {
+                    match txt.as_str() {
+                        "å" => "\u{1b}a",
+                        "∫" => "\u{1b}b",
+                        "ç" => "\u{1b}c",
+                        "∂" => "\u{1b}d",
+                        "e" => "\u{1b}e",
+                        "ƒ" => "\u{1b}f",
+                        "©" => "\u{1b}g",
+                        "˙" => "\u{1b}h",
+                        "i" => "\u{1b}i",
+                        "∆" => "\u{1b}j",
+                        "˚" => "\u{1b}k",
+                        "¬" => "\u{1b}l",
+                        "µ" => "\u{1b}m",
+                        "n" => "\u{1b}n",
+                        "ø" => "\u{1b}o",
+                        "π" => "\u{1b}p",
+                        "œ" => "\u{1b}q",
+                        "®" => "\u{1b}r",
+                        "ß" => "\u{1b}s",
+                        "†" => "\u{1b}t",
+                        "u" => "\u{1b}u",
+                        "√" => "\u{1b}v",
+                        "∑" => "\u{1b}w",
+                        "≈" => "\u{1b}x",
+                        "¥" => "\u{1b}y",
+                        "Ω" => "\u{1b}z",
+                        _ => txt,
+                    }
+                } else {
+                    txt
+                };
             }
             egui::Event::Key {
                 key: Key::Tab,
