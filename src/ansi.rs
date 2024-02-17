@@ -1,4 +1,4 @@
-use anyhow::bail;
+use anyhow::{bail, Context};
 use bytes::{Buf, BytesMut};
 use std::char::REPLACEMENT_CHARACTER;
 use std::collections::VecDeque;
@@ -84,7 +84,7 @@ impl Parser {
                     let token = match remaining.as_bytes()[0] {
                         b'[' => {
                             state = ExpectingCSI {
-                                args: String::new(),
+                                params: String::new(),
                             };
                             remaining = &remaining[1..];
                             continue;
@@ -99,70 +99,95 @@ impl Parser {
                     state = ExpectingChar;
                     continue;
                 }
-                ExpectingCSI { ref mut args } => {
+                ExpectingCSI { ref mut params } => {
                     use CursorControl::*;
                     use EraseControl::*;
-                    let mut separated_args = args.split(';');
                     let next_char = remaining.as_bytes()[0] as char;
                     let token = match next_char {
                         //  "parameter bytes" in the range 0x30–0x3F (ASCII 0–9:;<=>?), then by any
                         //  number of "intermediate bytes" in the range 0x20–0x2F (ASCII space and
                         //  !"#$%&'()*+,-./)
                         param @ ('\x30'..='\x3f' | '\x20'..='\x2f') => {
-                            args.push(param);
+                            params.push(param);
                             remaining = &remaining[1..];
                             continue;
                         }
                         'A' => {
-                            let lines: usize = next_usize(&mut separated_args, 1);
+                            let lines: usize = extract_param(&params, 0).unwrap_or(1);
                             AnsiToken::CursorControl(MoveUp { lines })
                         }
                         'B' => {
-                            let lines: usize = next_usize(&mut separated_args, 1);
+                            let lines: usize = extract_param(&params, 0).unwrap_or(1);
                             AnsiToken::CursorControl(MoveDown { lines })
                         }
                         'C' => {
-                            let cols: usize = next_usize(&mut separated_args, 1);
+                            let cols: usize = extract_param(&params, 0).unwrap_or(1);
                             AnsiToken::CursorControl(MoveRight { cols })
                         }
                         'D' => {
-                            let cols: usize = next_usize(&mut separated_args, 1);
+                            let cols: usize = extract_param(&params, 0).unwrap_or(1);
                             AnsiToken::CursorControl(MoveLeft { cols })
                         }
                         'E' => {
-                            let lines: usize = next_usize(&mut separated_args, 1);
+                            let lines: usize = extract_param(&params, 0).unwrap_or(1);
                             AnsiToken::CursorControl(MoveLineBeginDown { lines })
                         }
                         'F' => {
-                            let lines: usize = next_usize(&mut separated_args, 1);
+                            let lines: usize = extract_param(&params, 0).unwrap_or(1);
                             AnsiToken::CursorControl(MoveLineBeginUp { lines })
                         }
                         'G' => {
-                            let col: usize = next_usize(&mut separated_args, 1);
+                            let col: usize = extract_param(&params, 0).unwrap_or(1);
                             AnsiToken::CursorControl(MoveColumn { col })
                         }
                         'H' | 'f' => {
-                            let line: usize = next_usize(&mut separated_args, 1);
-                            let col: usize = next_usize(&mut separated_args, 1);
+                            let line: usize = extract_param(&params, 0).unwrap_or(1);
+                            let col: usize = extract_param(&params, 1).unwrap_or(1);
                             AnsiToken::CursorControl(MoveTo { line, col })
                         }
-                        'J' => match next_usize(&mut separated_args, 0) {
+                        'J' => match extract_param(&params, 0).unwrap_or(0) {
                             0 => AnsiToken::EraseControl(FromCursorToEndOfScreen),
                             1 => AnsiToken::EraseControl(FromCursorToStartOfScreen),
                             2 => AnsiToken::EraseControl(Screen),
                             3 => AnsiToken::EraseControl(ScreenAndScrollback),
-                            _unknown => AnsiToken::Unknown(format!("\u{1b}[{args}J")),
+                            _unknown => AnsiToken::Unknown(format!("\u{1b}[{params}J")),
                         },
-                        'K' => match next_usize(&mut separated_args, 0) {
+                        'K' => match extract_param(&params, 0).unwrap_or(0) {
                             0 => AnsiToken::EraseControl(FromCursorToEndOfLine),
                             1 => AnsiToken::EraseControl(FromCursortoStartOfLine),
                             2 => AnsiToken::EraseControl(Line),
-                            _unknown => AnsiToken::Unknown(format!("\u{1b}[{args}K")),
+                            _unknown => AnsiToken::Unknown(format!("\u{1b}[{params}K")),
                         },
-                        'm' => AnsiToken::SGR(SgrControl::from(next_usize(&mut separated_args, 0))),
-                        unknown => AnsiToken::Unknown(format!("\u{1b}[{args}{unknown}")),
+                        'm' => {
+                            if params.is_empty() {
+                                AnsiToken::SGR(SgrControl::Reset)
+                            } else {
+                                for param in params.split(';') {
+                                    let sgr = param
+                                        .parse::<usize>()
+                                        .map_err(|err| {
+                                            anyhow::format_err!("sgr parse error: {err}")
+                                        })
+                                        .and_then(SgrControl::from_params)
+                                        .unwrap_or_else(|_| {
+                                            SgrControl::Unimplemented(format!("\u{1b}[{param}m"))
+                                        });
+                                    push(AnsiToken::SGR(sgr), 0);
+                                }
+                                AnsiToken::SGR(SgrControl::Unimplemented(
+                                    "HACK: dummy token to make shit work".to_string(),
+                                ))
+                            }
+                        }
+                        unknown => AnsiToken::Unknown(format!("\u{1b}[{params}{unknown}")),
                     };
-                    push(token, 1 + 1 + args.len() + 1);
+                    if token
+                        != AnsiToken::SGR(SgrControl::Unimplemented(
+                            "HACK: dummy token to make shit work".to_string(),
+                        ))
+                    {
+                        push(token, 1 + 1 + params.len() + 1);
+                    }
                     state = ExpectingChar;
                     remaining = &remaining[1..];
                 }
@@ -172,11 +197,15 @@ impl Parser {
     }
 }
 
-fn next_usize<'a>(mut iter: impl Iterator<Item = &'a str>, default: usize) -> usize {
-    iter.next()
-        .and_then(|item| item.parse().ok())
-        .unwrap_or(default)
+fn extract_param<'a>(params: &'a str, num: usize) -> Option<usize> {
+    let p = params.split(';').nth(num)?;
+    if p.is_empty() {
+        None
+    } else {
+        p.parse().ok()
+    }
 }
+
 // See: https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnsiToken {
@@ -221,7 +250,7 @@ pub enum EraseControl {
 
 #[allow(unused)]
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SgrControl {
     Reset = 0,
     Bold,
@@ -237,28 +266,37 @@ pub enum SgrControl {
     AlternativeFont(u8),
     NotUnderlined = 24,
     NotInverted = 27,
-    Unimplemented(usize),
+    ForgroundColor(Color),
+    BackgroundColor(Color),
+    Unimplemented(String),
 }
-
-impl From<usize> for SgrControl {
-    fn from(value: usize) -> Self {
+impl SgrControl {
+    fn from_params(param: usize) -> anyhow::Result<SgrControl> {
         use SgrControl::*;
-        match value {
-            0 => Reset,
-            1 => Bold,
-            2 => Dim,
-            3 => Italic,
-            4 => Underline,
-            5 => SlowBlink,
-            6 => RapidBlink,
-            7 => Invert,
-            8 => Conceal,
-            9 => Strike,
-            10 => PrimaryFont,
-            24 => NotUnderlined,
-            27 => NotInverted,
-            num @ 11..=19 => AlternativeFont(num as u8),
-            unknown => Unimplemented(unknown),
+        match param {
+            0 => Ok(Reset),
+            1 => Ok(Bold),
+            2 => Ok(Dim),
+            3 => Ok(Italic),
+            4 => Ok(Underline),
+            5 => Ok(SlowBlink),
+            6 => Ok(RapidBlink),
+            7 => Ok(Invert),
+            8 => Ok(Conceal),
+            9 => Ok(Strike),
+            10 => Ok(PrimaryFont),
+            num @ 11..=19 => Ok(AlternativeFont(num as u8)),
+            24 => Ok(NotUnderlined),
+            27 => Ok(NotInverted),
+            num @ (30..=37 | 90..=97) => Ok(ForgroundColor(
+                Color::from_sgr_num(num)
+                    .with_context(|| format!("invalid SGR foreground color param: {num}"))?,
+            )),
+            num @ (40..=47 | 100..=107) => Ok(BackgroundColor(
+                Color::from_sgr_num(num)
+                    .with_context(|| format!("invalid SGR foreground color param: {num}"))?,
+            )),
+            _unknown => Err(anyhow::format_err!("unknown sgr param: {param}")),
         }
     }
 }
@@ -336,7 +374,7 @@ impl From<AsciiControl> for char {
 enum ParserState {
     ExpectingChar,
     ExpectingEscapeSequence,
-    ExpectingCSI { args: String },
+    ExpectingCSI { params: String },
 }
 
 impl Iterator for Parser {
@@ -344,6 +382,49 @@ impl Iterator for Parser {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.parsed_tokens.pop_front()
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Color {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite,
+}
+impl Color {
+    fn from_sgr_num(num: usize) -> Option<Color> {
+        Some(match num {
+            30 | 40 => Color::Black,
+            31 | 41 => Color::Red,
+            32 | 42 => Color::Green,
+            33 | 43 => Color::Yellow,
+            34 | 44 => Color::Blue,
+            35 | 45 => Color::Magenta,
+            36 | 46 => Color::Cyan,
+            37 | 47 => Color::White,
+            90 | 100 => Color::BrightBlack,
+            91 | 101 => Color::BrightRed,
+            92 | 102 => Color::BrightGreen,
+            93 | 103 => Color::BrightYellow,
+            94 | 104 => Color::BrightBlue,
+            95 | 105 => Color::BrightMagenta,
+            96 | 106 => Color::BrightCyan,
+            97 | 107 => Color::BrightWhite,
+            _other => return None,
+        })
     }
 }
 
@@ -425,5 +506,17 @@ mod tests {
             vec![AnsiToken::CursorControl(CursorControl::MoveUp { lines: 1 })],
             parser.tokens().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_extract_params() {
+        let stream = b"\x1b[;20H";
+        let mut parser = Parser::new();
+        parser.push_bytes(stream);
+        assert_eq!(
+            parser.next(),
+            Some(AnsiToken::CursorControl(MoveTo { line: 1, col: 20 }))
+        );
+        assert_eq!(parser.next(), None);
     }
 }
