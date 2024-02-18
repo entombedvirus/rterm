@@ -350,53 +350,56 @@ impl AnsiGrid {
         use ansi::AsciiControl;
         use ansi::CursorControl;
         use ansi::EraseControl;
-        let mut cur_idx = {
-            let (cur_row, cur_col) = self.cursor_position;
-            cur_row * self.num_cols + cur_col
-        };
 
         match token {
             Text(txt) => {
                 for ch in txt.chars() {
-                    self.cells[cur_idx] = ch;
-                    self.text_format[cur_idx] = self.current_text_format;
-                    cur_idx += 1;
+                    self.update_cursor_cell(ch);
+                    self.move_cursor_relative(0, 1);
                 }
             }
             AsciiControl(AsciiControl::Backspace) => {
-                cur_idx -= 1;
+                self.move_cursor_relative(0, -1);
+                self.update_cursor_cell(Self::FILL_CHAR);
             }
             AsciiControl(AsciiControl::Tab) => {
-                cur_idx += 4;
+                self.move_cursor_relative(0, 4);
             }
             AsciiControl(AsciiControl::LineFeed) => {
-                cur_idx += self.num_cols;
+                self.move_cursor_relative(1, 0);
             }
             AsciiControl(AsciiControl::CarriageReturn) => {
-                cur_idx -= self.cursor_position.1;
+                self.move_cursor(self.cursor_position.0, 0);
             }
             CursorControl(CursorControl::MoveTo { line, col }) => {
-                let line = line.saturating_sub(1);
-                let col = col.saturating_sub(1);
-                cur_idx = line * self.num_cols + col;
+                self.move_cursor(line.saturating_sub(1), col.saturating_sub(1));
             }
             CursorControl(CursorControl::MoveLineUp) => {
-                let last_row_start = self.cells.len() - self.num_cols;
-                self.cells.copy_within(..last_row_start, self.num_cols);
-                self.text_format
-                    .copy_within(..last_row_start, self.num_cols);
-                self.cells[..self.num_cols].fill(Self::FILL_CHAR);
-                self.text_format[..self.num_cols].fill(TextFormat::default());
+                let (cursor_row, _) = self.cursor_position;
+                if cursor_row > 0 {
+                    // no need to scroll
+                    self.move_cursor_relative(-1, 0);
+                } else {
+                    // shift all lines down by one line
+                    let last_row_start = self.cells.len() - self.num_cols;
+                    self.cells.copy_within(..last_row_start, self.num_cols);
+                    self.text_format
+                        .copy_within(..last_row_start, self.num_cols);
+                    self.cells[..self.num_cols].fill(Self::FILL_CHAR);
+                    self.text_format[..self.num_cols].fill(TextFormat::default());
+                }
             }
             EraseControl(EraseControl::Screen) => {
                 self.cells.fill(Self::FILL_CHAR);
                 self.text_format.fill(TextFormat::default());
             }
             EraseControl(EraseControl::FromCursorToEndOfScreen) => {
+                let cur_idx = self.cursor_position_to_buf_pos();
                 self.cells[cur_idx..].fill(Self::FILL_CHAR);
                 self.text_format[cur_idx..].fill(TextFormat::default());
             }
             EraseControl(EraseControl::FromCursorToEndOfLine) => {
+                let cur_idx = self.cursor_position_to_buf_pos();
                 let line_end_idx = (self.cursor_position.0 + 1) * self.num_cols;
                 self.cells[cur_idx..line_end_idx].fill(Self::FILL_CHAR);
                 self.text_format[cur_idx..line_end_idx].fill(TextFormat::default());
@@ -412,7 +415,15 @@ impl AnsiGrid {
             }
             ignored => info!("ignoring ansii token: {ignored:?}"),
         }
+    }
 
+    fn cursor_position_to_buf_pos(&self) -> usize {
+        let (r, c) = self.cursor_position;
+        r * self.num_cols + c
+    }
+
+    fn move_cursor(&mut self, new_row: usize, new_col: usize) {
+        let cur_idx = new_row * self.num_cols + new_col;
         let max_idx = self.cells.len().saturating_sub(1);
         self.cursor_position = if cur_idx > max_idx {
             let num_lines_to_scroll = (cur_idx / self.num_cols) - self.num_rows + 1;
@@ -427,6 +438,19 @@ impl AnsiGrid {
         } else {
             (cur_idx / self.num_cols, cur_idx % self.num_cols)
         }
+    }
+
+    fn move_cursor_relative(&mut self, dr: isize, dc: isize) {
+        let (r, c) = self.cursor_position;
+        let new_row = (r as isize) + dr;
+        let new_col = (c as isize) + dc;
+        self.move_cursor(new_row as usize, new_col as usize)
+    }
+
+    fn update_cursor_cell(&mut self, new_ch: char) {
+        let cur_idx = self.cursor_position_to_buf_pos();
+        self.cells[cur_idx] = new_ch;
+        self.text_format[cur_idx] = self.current_text_format;
     }
 
     fn lines<'a>(&'a self) -> impl Iterator<Item = (&'a [char], &'a [TextFormat])> + 'a {
