@@ -7,12 +7,12 @@ use std::{
 };
 
 use crate::{
-    ansi::{self, CursorControl},
+    ansi::{self, CursorControl, SgrControl},
     pty,
 };
 use ansi::AsciiControl;
 use anyhow::Context;
-use egui::{CentralPanel, Color32, FontId, Key, Rect};
+use egui::{text::LayoutJob, CentralPanel, Color32, FontId, Key, Rect};
 use log::{debug, info};
 use nix::errno::Errno;
 
@@ -24,14 +24,14 @@ pub struct TerminalEmulator {
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
     grid: AnsiGrid,
-    pub font: egui::FontId,
+    pub regular_font: egui::FontId,
 }
 
 impl eframe::App for TerminalEmulator {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         CentralPanel::default().show(ctx, |ui| -> anyhow::Result<()> {
             if self.char_dimensions.is_none() {
-                self.char_dimensions = Some(get_char_size(ctx, &self.font).into());
+                self.char_dimensions = Some(get_char_size(ctx, &self.regular_font).into());
             }
 
             let rect = ui.available_rect_before_wrap();
@@ -66,10 +66,10 @@ impl eframe::App for TerminalEmulator {
 
 impl TerminalEmulator {
     pub fn new(cc: &eframe::CreationContext<'_>, pty_fd: OwnedFd) -> anyhow::Result<Self> {
-        let font = FontId::monospace(22.0);
+        let regular_font = FontId::monospace(22.0);
         cc.egui_ctx.style_mut(|style| {
             // style.override_text_style = Some(egui::TextStyle::Monospace);
-            style.override_font_id = Some(font.clone());
+            style.override_font_id = Some(regular_font.clone());
         });
         // cc.egui_ctx.set_pixels_per_point(2.0);
 
@@ -79,14 +79,34 @@ impl TerminalEmulator {
             pty_fd,
             window_rect: None,
             char_dimensions: None,
-            font,
+            regular_font,
             parser: ansi::Parser::new(),
         })
     }
 
     pub fn render(&self, _ctx: &egui::Context, ui: &mut egui::Ui) {
-        for line in self.grid.lines() {
-            ui.label(line);
+        for (line_chars, formats) in self.grid.lines() {
+            let mut layout = LayoutJob::default();
+            for (&ch, format) in line_chars.into_iter().zip(formats) {
+                let byte_range = layout.text.len()..layout.text.len() + ch.len_utf8();
+                layout.text.push(ch);
+                let format = egui::text::TextFormat {
+                    font_id: self.regular_font.clone(),
+                    color: if format.bold {
+                        ansi::Color::brighter(format.fg_color).into()
+                    } else {
+                        format.fg_color.into()
+                    },
+                    ..Default::default()
+                };
+                let section = egui::text::LayoutSection {
+                    leading_space: 0.0,
+                    byte_range,
+                    format,
+                };
+                layout.sections.push(section);
+            }
+            ui.label(layout);
         }
     }
 
@@ -100,8 +120,8 @@ impl TerminalEmulator {
                     as_str = std::str::from_utf8(&buf[..num_read])
                 );
                 self.parser.push_bytes(&buf[..num_read]);
+                debug!("parsed_tokens: {:?}", &self.parser.parsed_tokens);
 
-                let mut dst = [0u8; 10];
                 for token in self.parser.tokens() {
                     self.grid.update(&token);
                 }
@@ -290,7 +310,9 @@ struct AnsiGrid {
     num_rows: usize,
     num_cols: usize,
     cells: Vec<char>,
+    text_format: Vec<TextFormat>,
     cursor_position: (usize, usize),
+    current_text_format: TextFormat,
 }
 
 // impl Default for AnsiCell {
@@ -308,7 +330,9 @@ impl AnsiGrid {
             num_rows,
             num_cols,
             cells: Vec::new(),
+            text_format: vec![TextFormat::default(); num_rows * num_cols],
             cursor_position,
+            current_text_format: TextFormat::default(),
         }
     }
 
@@ -317,6 +341,8 @@ impl AnsiGrid {
         self.num_cols = ws_col as usize;
         self.cells
             .resize(self.num_rows * self.num_cols, Self::FILL_CHAR);
+        self.text_format
+            .resize(self.num_rows * self.num_cols, TextFormat::default());
     }
 
     fn update(&mut self, token: &ansi::AnsiToken) {
@@ -333,6 +359,7 @@ impl AnsiGrid {
             Text(txt) => {
                 for ch in txt.chars() {
                     self.cells[cur_idx] = ch;
+                    self.text_format[cur_idx] = self.current_text_format;
                     cur_idx += 1;
                 }
             }
@@ -356,15 +383,32 @@ impl AnsiGrid {
             CursorControl(CursorControl::MoveLineUp) => {
                 let last_row_start = self.cells.len() - self.num_cols;
                 self.cells.copy_within(..last_row_start, self.num_cols);
+                self.text_format
+                    .copy_within(..last_row_start, self.num_cols);
                 self.cells[..self.num_cols].fill(Self::FILL_CHAR);
+                self.text_format[..self.num_cols].fill(TextFormat::default());
             }
-            EraseControl(EraseControl::Screen) => self.cells.fill(Self::FILL_CHAR),
+            EraseControl(EraseControl::Screen) => {
+                self.cells.fill(Self::FILL_CHAR);
+                self.text_format.fill(TextFormat::default());
+            }
             EraseControl(EraseControl::FromCursorToEndOfScreen) => {
                 self.cells[cur_idx..].fill(Self::FILL_CHAR);
+                self.text_format[cur_idx..].fill(TextFormat::default());
             }
             EraseControl(EraseControl::FromCursorToEndOfLine) => {
                 let line_end_idx = (self.cursor_position.0 + 1) * self.num_cols;
                 self.cells[cur_idx..line_end_idx].fill(Self::FILL_CHAR);
+                self.text_format[cur_idx..line_end_idx].fill(TextFormat::default());
+            }
+            SGR(SgrControl::Bold) => {
+                self.current_text_format.bold = true;
+            }
+            SGR(SgrControl::ForgroundColor(color)) => {
+                self.current_text_format.fg_color = *color;
+            }
+            SGR(SgrControl::Reset) => {
+                self.current_text_format = TextFormat::default();
             }
             ignored => info!("ignoring ansii token: {ignored:?}"),
         }
@@ -374,18 +418,21 @@ impl AnsiGrid {
             let num_lines_to_scroll = (cur_idx / self.num_cols) - self.num_rows + 1;
             self.cells
                 .copy_within(num_lines_to_scroll * self.num_cols.., 0);
+            self.text_format
+                .copy_within(num_lines_to_scroll * self.num_cols.., 0);
             let last_n_lines = self.cells.len() - (self.num_cols * num_lines_to_scroll)..;
-            self.cells[last_n_lines].fill(Self::FILL_CHAR);
+            self.cells[last_n_lines.clone()].fill(Self::FILL_CHAR);
+            self.text_format[last_n_lines].fill(TextFormat::default());
             (self.num_rows - 1, cur_idx % self.num_cols)
         } else {
             (cur_idx / self.num_cols, cur_idx % self.num_cols)
         }
     }
 
-    fn lines<'a>(&'a self) -> impl Iterator<Item = String> + 'a {
+    fn lines<'a>(&'a self) -> impl Iterator<Item = (&'a [char], &'a [TextFormat])> + 'a {
         self.cells
             .chunks_exact(self.num_cols)
-            .map(|line_chars| String::from_iter(line_chars))
+            .zip(self.text_format.chunks_exact(self.num_cols))
     }
 }
 
@@ -431,4 +478,19 @@ fn get_char_size(ctx: &egui::Context, font_id: &egui::FontId) -> (f32, f32) {
 
         (width, height + 3.3)
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextFormat {
+    fg_color: ansi::Color,
+    bold: bool,
+}
+
+impl Default for TextFormat {
+    fn default() -> Self {
+        Self {
+            fg_color: ansi::Color::BrightBlack,
+            bold: false,
+        }
+    }
 }

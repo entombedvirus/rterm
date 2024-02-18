@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 #[derive(Debug)]
 pub struct Parser {
     stream: BytesMut,
-    parsed_tokens: VecDeque<AnsiToken>,
+    pub(crate) parsed_tokens: VecDeque<AnsiToken>,
 }
 
 impl Parser {
@@ -44,9 +44,14 @@ impl Parser {
         // std::str::Utf8Error.
 
         // ---
+        let sentinel_hack = AnsiToken::SGR(SgrControl::Unimplemented(
+            "HACK: dummy token to make shit work".to_string(),
+        ));
         let mut to_advance = 0;
         let mut push = |token: AnsiToken, token_byte_len: usize| {
-            self.parsed_tokens.push_back(token);
+            if token != sentinel_hack {
+                self.parsed_tokens.push_back(token);
+            }
             to_advance += token_byte_len;
         };
 
@@ -174,20 +179,12 @@ impl Parser {
                                         });
                                     push(AnsiToken::SGR(sgr), 0);
                                 }
-                                AnsiToken::SGR(SgrControl::Unimplemented(
-                                    "HACK: dummy token to make shit work".to_string(),
-                                ))
+                                sentinel_hack.clone()
                             }
                         }
                         unknown => AnsiToken::Unknown(format!("\u{1b}[{params}{unknown}")),
                     };
-                    if token
-                        != AnsiToken::SGR(SgrControl::Unimplemented(
-                            "HACK: dummy token to make shit work".to_string(),
-                        ))
-                    {
-                        push(token, 1 + 1 + params.len() + 1);
-                    }
+                    push(token, 1 + 1 + params.len() + 1);
                     state = ExpectingChar;
                     remaining = &remaining[1..];
                 }
@@ -425,6 +422,43 @@ impl Color {
             97 | 107 => Color::BrightWhite,
             _other => return None,
         })
+    }
+
+    pub fn brighter(color: Color) -> Self {
+        match color {
+            Color::Black => Color::BrightBlack,
+            Color::Red => Color::BrightRed,
+            Color::Green => Color::BrightGreen,
+            Color::Yellow => Color::BrightYellow,
+            Color::Blue => Color::BrightBlue,
+            Color::Magenta => Color::BrightMagenta,
+            Color::Cyan => Color::BrightCyan,
+            Color::White => Color::BrightWhite,
+            already_bright => already_bright,
+        }
+    }
+}
+
+impl From<Color> for egui::Color32 {
+    fn from(value: Color) -> Self {
+        match value {
+            Color::Black => egui::Color32::BLACK,
+            Color::Red => egui::Color32::RED,
+            Color::Green => egui::Color32::GREEN,
+            Color::Yellow => egui::Color32::YELLOW,
+            Color::Blue => egui::Color32::BLUE,
+            Color::Magenta => egui::Color32::from_rgb(128, 0, 128),
+            Color::Cyan => egui::Color32::from_rgb(0, 170, 170),
+            Color::White => egui::Color32::WHITE,
+            Color::BrightBlack => egui::Color32::from_rgb(0x5f, 0x5f, 0x5f),
+            Color::BrightRed => egui::Color32::from_rgb(0xd7, 0x87, 0x87),
+            Color::BrightGreen => egui::Color32::from_rgb(0x87, 0xd7, 0x87),
+            Color::BrightYellow => egui::Color32::from_rgb(0xd7, 0xd7, 0x87),
+            Color::BrightBlue => egui::Color32::from_rgb(0x87, 0x87, 0xd7),
+            Color::BrightMagenta => egui::Color32::from_rgb(0xd7, 0x87, 0xd7),
+            Color::BrightCyan => egui::Color32::from_rgb(0x87, 0xd7, 0xd7),
+            Color::BrightWhite => egui::Color32::from_rgb(0xd7, 0xd7, 0xd7),
+        }
     }
 }
 
