@@ -208,6 +208,12 @@ impl TerminalEmulator {
                 };
             }
             egui::Event::Key {
+                key: Key::Escape,
+                pressed: true,
+                repeat: false,
+                ..
+            } => self.buffered_input.push(AsciiControl::Escape.into()),
+            egui::Event::Key {
                 key: Key::Tab,
                 pressed: true,
                 repeat: false,
@@ -268,6 +274,10 @@ impl TerminalEmulator {
                     // mapts to ascii end of transmission block
                     Key::W => self.buffered_input.push_str("\u{17}"),
                     Key::X => self.buffered_input.push_str("\u{18}"),
+                    Key::Z => self.buffered_input.push_str("\u{1a}"),
+                    Key::OpenBracket => self.buffered_input.push_str("\u{1b}"),
+                    Key::Backslash => self.buffered_input.push_str("\u{1c}"),
+                    Key::CloseBracket => self.buffered_input.push_str("\u{1d}"),
                     _ => (),
                 }
             }
