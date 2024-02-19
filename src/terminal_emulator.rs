@@ -36,11 +36,15 @@ impl eframe::App for TerminalEmulator {
 
             let rect = ui.available_rect_before_wrap();
             if self.window_rect != Some(rect) {
-                let winsz = Self::get_pty_winsize(rect.size(), self.char_dimensions.unwrap());
-                self.grid.resize(winsz.ws_row, winsz.ws_col);
                 self.window_rect = Some(rect);
-                pty::update_pty_window_size(self.pty_fd.as_fd(), &winsz)
-                    .context("update_pty_window_size")?;
+                let winsz = Self::get_pty_winsize(rect.size(), self.char_dimensions.unwrap());
+                if self
+                    .grid
+                    .resize(winsz.ws_row as usize, winsz.ws_col as usize)
+                {
+                    pty::update_pty_window_size(self.pty_fd.as_fd(), &winsz)
+                        .context("update_pty_window_size")?;
+                }
             }
 
             self.read_from_pty().context("reading from pty failed")?;
@@ -75,7 +79,7 @@ impl TerminalEmulator {
 
         Ok(Self {
             buffered_input: String::new(),
-            grid: AnsiGrid::new(0, 0),
+            grid: AnsiGrid::new(24, 80),
             pty_fd,
             window_rect: None,
             char_dimensions: None,
@@ -87,6 +91,7 @@ impl TerminalEmulator {
     pub fn render(&self, _ctx: &egui::Context, ui: &mut egui::Ui) {
         for (line_chars, formats) in self.grid.lines() {
             let mut layout = LayoutJob::default();
+            layout.wrap = egui::text::TextWrapping::no_max_width();
             for (&ch, format) in line_chars.into_iter().zip(formats) {
                 let byte_range = layout.text.len()..layout.text.len() + ch.len_utf8();
                 layout.text.push(ch);
@@ -106,7 +111,8 @@ impl TerminalEmulator {
                 };
                 layout.sections.push(section);
             }
-            ui.label(layout);
+            let galley = ui.fonts(|fonts| fonts.layout_job(layout));
+            ui.label(galley);
         }
     }
 
@@ -282,7 +288,7 @@ impl TerminalEmulator {
         let num_chars_y = rect_height / char_height;
         nix::pty::Winsize {
             ws_row: num_chars_y.floor() as u16,
-            ws_col: (num_chars_x.floor() as u16),
+            ws_col: num_chars_x.floor() as u16,
             ws_xpixel: rect_width.floor() as u16,
             ws_ypixel: rect_height.floor() as u16,
         }
@@ -315,12 +321,6 @@ struct AnsiGrid {
     current_text_format: TextFormat,
 }
 
-// impl Default for AnsiCell {
-//     fn default() -> Self {
-//         Self::Char(' ')
-//     }
-// }
-
 impl AnsiGrid {
     const FILL_CHAR: char = '-';
 
@@ -329,20 +329,43 @@ impl AnsiGrid {
         Self {
             num_rows,
             num_cols,
-            cells: Vec::new(),
+            cells: vec![Self::FILL_CHAR; num_rows * num_cols],
             text_format: vec![TextFormat::default(); num_rows * num_cols],
             cursor_position,
             current_text_format: TextFormat::default(),
         }
     }
 
-    fn resize(&mut self, ws_row: u16, ws_col: u16) {
-        self.num_rows = ws_row as usize;
-        self.num_cols = ws_col as usize;
-        self.cells
-            .resize(self.num_rows * self.num_cols, Self::FILL_CHAR);
-        self.text_format
-            .resize(self.num_rows * self.num_cols, TextFormat::default());
+    fn resize(&mut self, new_num_rows: usize, new_num_cols: usize) -> bool {
+        if self.num_rows == new_num_rows && self.num_cols == new_num_cols {
+            return false;
+        }
+        eprintln!(
+            "resize: {} x {} -> {new_num_rows} x {new_num_cols}",
+            self.num_rows, self.num_cols
+        );
+        let mut new_cells = vec![Self::FILL_CHAR; new_num_rows * new_num_cols];
+        let mut new_format = vec![TextFormat::default(); new_num_rows * new_num_cols];
+        let line_len = self.num_cols.min(new_num_cols);
+        for (line_no, (old_cells, old_formats)) in self
+            .cells
+            .chunks_exact(self.num_cols)
+            .zip(self.text_format.chunks_exact(self.num_cols))
+            .enumerate()
+        {
+            if line_no >= new_num_rows {
+                break;
+            }
+            let new_line_start = line_no * new_num_cols;
+            let copy_range = new_line_start..new_line_start + line_len;
+            new_cells[copy_range.clone()].copy_from_slice(&old_cells[..line_len]);
+            new_format[copy_range.clone()].copy_from_slice(&old_formats[..line_len]);
+        }
+        self.cells = new_cells;
+        self.text_format = new_format;
+        self.num_rows = new_num_rows;
+        self.num_cols = new_num_cols;
+        true
     }
 
     fn update(&mut self, token: &ansi::AnsiToken) {
