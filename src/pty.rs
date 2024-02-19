@@ -77,3 +77,19 @@ pub fn update_pty_window_size(fd: impl AsRawFd, winsz: &nix::pty::Winsize) -> an
         Err(err) => Err(anyhow::format_err!("tiocswinsz failed: {err}")),
     }
 }
+
+pub fn compute_winsize(
+    rect_width: f32,
+    rect_height: f32,
+    char_width: f32,
+    char_height: f32,
+) -> nix::pty::Winsize {
+    let num_chars_x = rect_width / char_width;
+    let num_chars_y = rect_height / char_height;
+    nix::pty::Winsize {
+        ws_row: num_chars_y.floor() as u16,
+        ws_col: num_chars_x.floor() as u16,
+        ws_xpixel: rect_width.floor() as u16,
+        ws_ypixel: rect_height.floor() as u16,
+    }
+}
