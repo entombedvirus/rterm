@@ -394,6 +394,9 @@ impl AnsiGrid {
             AsciiControl(AsciiControl::CarriageReturn) => {
                 self.move_cursor(self.cursor_position.0, 0);
             }
+            CursorControl(CursorControl::MoveRight { cols }) => {
+                self.move_cursor_relative(0, *cols as isize);
+            }
             CursorControl(CursorControl::MoveTo { line, col }) => {
                 self.move_cursor(line.saturating_sub(1), col.saturating_sub(1));
             }
