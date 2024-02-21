@@ -1,6 +1,5 @@
-use anyhow::{bail, Context};
+use anyhow::Context;
 use bytes::{Buf, BytesMut};
-use std::char::REPLACEMENT_CHARACTER;
 use std::collections::VecDeque;
 
 #[derive(Debug)]
@@ -24,7 +23,6 @@ impl Parser {
     }
 
     pub fn push_bytes(&mut self, incoming: &[u8]) {
-        use ParserState::*;
         self.stream.extend_from_slice(incoming);
 
         // Things to handle:
@@ -37,160 +35,157 @@ impl Parser {
         // a chance that the next read will bring in more bytes to complete the sequence.
         //
         // in case of invalid cases, push a AnsiToken::Unknown and continue parsing.
+        let mut buf = self.stream.as_ref();
+        while let Some((rem, token)) =
+            parse_normal_text(buf).or_else(|| parse_control_sequence(buf))
+        {
+            self.parsed_tokens.push_back(token);
+            buf = rem;
+        }
 
-        // Ansi escape sequences are ascii and therefore also valid utf-8. So if we try to decode
-        // the stream as str and it fails, it's one of two possibilities: the sequence is not
-        // complete or it is invalid. We can determine which by introspecting the
-        // std::str::Utf8Error.
+        let consumed = self.stream.len() - buf.len();
+        if consumed == 0 && self.stream.len() > 10 {
+            log::warn!(
+                "stream is not making progress: {stream:?}",
+                stream = self.stream
+            )
+        }
+        self.stream.advance(consumed);
+    }
+}
 
-        // ---
-        let sentinel_hack = AnsiToken::SGR(SgrControl::Unimplemented(
-            "HACK: dummy token to make shit work".to_string(),
-        ));
-        let mut to_advance = 0;
-        let mut push = |token: AnsiToken, token_byte_len: usize| {
-            if token != sentinel_hack {
-                self.parsed_tokens.push_back(token);
+fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
+    use CursorControl::*;
+    use EraseControl::*;
+    let params: String = buf
+        .iter()
+        .map(|b| *b as char)
+        .take_while(|ch| matches!(*ch, '\x30'..='\x3f' | '\x20'..='\x2f'))
+        .collect();
+    match &buf[params.len()..] {
+        [] => None, // need more data
+        [b'A', rem @ ..] => {
+            let lines: usize = extract_param(&params, 0).unwrap_or(1);
+            Some((rem, AnsiToken::CursorControl(MoveUp { lines })))
+        }
+        [b'B', rem @ ..] => {
+            let lines: usize = extract_param(&params, 0).unwrap_or(1);
+            Some((rem, AnsiToken::CursorControl(MoveDown { lines })))
+        }
+        [b'C', rem @ ..] => {
+            let cols: usize = extract_param(&params, 0).unwrap_or(1);
+            Some((rem, AnsiToken::CursorControl(MoveRight { cols })))
+        }
+        [b'D', rem @ ..] => {
+            let cols: usize = extract_param(&params, 0).unwrap_or(1);
+            Some((rem, AnsiToken::CursorControl(MoveLeft { cols })))
+        }
+        [b'E', rem @ ..] => {
+            let lines: usize = extract_param(&params, 0).unwrap_or(1);
+            Some((rem, AnsiToken::CursorControl(MoveLineBeginDown { lines })))
+        }
+        [b'F', rem @ ..] => {
+            let lines: usize = extract_param(&params, 0).unwrap_or(1);
+            Some((rem, AnsiToken::CursorControl(MoveLineBeginUp { lines })))
+        }
+        [b'G', rem @ ..] => {
+            let col: usize = extract_param(&params, 0).unwrap_or(1);
+            Some((rem, AnsiToken::CursorControl(MoveColumn { col })))
+        }
+        [b'H', rem @ ..] => {
+            let line: usize = extract_param(&params, 0).unwrap_or(1);
+            let col: usize = extract_param(&params, 1).unwrap_or(1);
+            Some((rem, AnsiToken::CursorControl(MoveTo { line, col })))
+        }
+        [b'J', rem @ ..] => Some((
+            rem,
+            match extract_param(&params, 0).unwrap_or(0) {
+                0 => AnsiToken::EraseControl(FromCursorToEndOfScreen),
+                1 => AnsiToken::EraseControl(FromCursorToStartOfScreen),
+                2 => AnsiToken::EraseControl(Screen),
+                3 => AnsiToken::EraseControl(ScreenAndScrollback),
+                _unknown => AnsiToken::Unknown(format!("\u{1b}[{params}J")),
+            },
+        )),
+        [b'K', rem @ ..] => Some((
+            rem,
+            match extract_param(&params, 0).unwrap_or(0) {
+                0 => AnsiToken::EraseControl(FromCursorToEndOfLine),
+                1 => AnsiToken::EraseControl(FromCursortoStartOfLine),
+                2 => AnsiToken::EraseControl(Line),
+                _unknown => AnsiToken::Unknown(format!("\u{1b}[{params}K")),
+            },
+        )),
+        [b'm', rem @ ..] => Some((rem, {
+            if params.is_empty() {
+                return Some((rem, AnsiToken::SGR(vec![SgrControl::Reset])));
             }
-            to_advance += token_byte_len;
-        };
+            let params = params.split(';').map(|p| {
+                p.parse::<usize>()
+                    .map_err(|err| anyhow::format_err!("sgr parse error: {err}"))
+                    .and_then(SgrControl::from_params)
+                    .unwrap_or(SgrControl::Unimplemented(format!("\u{1b}[{p}m")))
+            });
+            AnsiToken::SGR(params.collect())
+        })),
+        [unknown, rem @ ..] => Some((
+            rem,
+            AnsiToken::Unknown(format!("\u{1b}[{params}{ch}", ch = *unknown as char)),
+        )),
+    }
+}
 
-        let decoded = String::from_utf8_lossy(&self.stream);
-        // ignore any incomplete multi-byte utf-8 char at the end
-        let mut remaining = decoded.trim_end_matches(REPLACEMENT_CHARACTER);
+fn parse_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
+    use CursorControl::*;
+    match buf {
+        [b'[', rem @ ..] => parse_csi_escape_sequence(rem),
+        [b'M', rem @ ..] => Some((rem, AnsiToken::CursorControl(MoveLineUp))),
+        [b'7', rem @ ..] => Some((rem, AnsiToken::CursorControl(SavePositionDEC))),
+        [b'8', rem @ ..] => Some((rem, AnsiToken::CursorControl(RestorePositionDEC))),
+        [other, rem @ ..] => Some((rem, AnsiToken::Unknown(format!("\u{1b}{other}")))),
+        _ => None,
+    }
+}
 
-        let mut state = ExpectingChar;
-        while !remaining.is_empty() {
-            match state {
-                ExpectingChar => {
-                    let segment = remaining
-                        .split_inclusive(|ch: char| ch.is_ascii_control())
-                        .next()
-                        .expect("remaining is not empty, so this should not happen");
-                    let last_byte = segment.as_bytes().last().copied().expect("yeah...");
-                    if let Ok(control) = AsciiControl::try_from(last_byte) {
-                        let normal_text = &segment[..segment.len() - 1];
-                        if !normal_text.is_empty() {
-                            push(AnsiToken::Text(normal_text.to_string()), normal_text.len());
-                        }
-                        if let AsciiControl::Escape = control {
-                            state = ExpectingEscapeSequence;
-                        } else {
-                            push(AnsiToken::AsciiControl(control), 1);
-                        }
-                    } else {
-                        push(AnsiToken::Text(segment.to_string()), segment.len());
-                    }
-                    remaining = &remaining[segment.len()..];
-                    continue;
+fn parse_control_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
+    match buf {
+        [b'\x1b', rem @ ..] => parse_escape_sequence(rem),
+        [first_byte, rem @ ..] if first_byte.is_ascii_control() => {
+            let token = AnsiToken::AsciiControl(
+                AsciiControl::try_from(*first_byte).expect("already checked"),
+            );
+            Some((rem, token))
+        }
+        _other => None,
+    }
+}
+
+fn parse_normal_text(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
+    let segment = buf.split(|ch: &u8| ch.is_ascii_control()).next()?;
+    if segment.is_empty() {
+        return None;
+    }
+    match std::str::from_utf8(segment) {
+        Ok(txt) => Some((&buf[segment.len()..], AnsiToken::Text(txt.to_string()))),
+        Err(err) => {
+            match err.error_len() {
+                Some(invalid_len) => {
+                    // invalid utf-8 in the middle
+                    //  - assemble that valid bytes, add a repalcement char and then return the
+                    //  remainder as unprocessed.
+                    let mut txt = String::new();
+                    let (valid, after_valid) = segment.split_at(err.valid_up_to());
+                    txt.push_str(unsafe { std::str::from_utf8_unchecked(valid) });
+                    txt.push(std::char::REPLACEMENT_CHARACTER);
+                    Some((&after_valid[invalid_len..], AnsiToken::Text(txt)))
                 }
-                ExpectingEscapeSequence => {
-                    use CursorControl::*;
-                    let token = match remaining.as_bytes()[0] {
-                        b'[' => {
-                            state = ExpectingCSI {
-                                params: String::new(),
-                            };
-                            remaining = &remaining[1..];
-                            continue;
-                        }
-                        b'M' => AnsiToken::CursorControl(MoveLineUp),
-                        b'7' => AnsiToken::CursorControl(SavePositionDEC),
-                        b'8' => AnsiToken::CursorControl(RestorePositionDEC),
-                        other => AnsiToken::Unknown(format!("\u{1b}{other}")),
-                    };
-                    push(token, 1 + 1);
-                    remaining = &remaining[1..];
-                    state = ExpectingChar;
-                    continue;
-                }
-                ExpectingCSI { ref mut params } => {
-                    use CursorControl::*;
-                    use EraseControl::*;
-                    let next_char = remaining.as_bytes()[0] as char;
-                    let token = match next_char {
-                        //  "parameter bytes" in the range 0x30–0x3F (ASCII 0–9:;<=>?), then by any
-                        //  number of "intermediate bytes" in the range 0x20–0x2F (ASCII space and
-                        //  !"#$%&'()*+,-./)
-                        param @ ('\x30'..='\x3f' | '\x20'..='\x2f') => {
-                            params.push(param);
-                            remaining = &remaining[1..];
-                            continue;
-                        }
-                        'A' => {
-                            let lines: usize = extract_param(&params, 0).unwrap_or(1);
-                            AnsiToken::CursorControl(MoveUp { lines })
-                        }
-                        'B' => {
-                            let lines: usize = extract_param(&params, 0).unwrap_or(1);
-                            AnsiToken::CursorControl(MoveDown { lines })
-                        }
-                        'C' => {
-                            let cols: usize = extract_param(&params, 0).unwrap_or(1);
-                            AnsiToken::CursorControl(MoveRight { cols })
-                        }
-                        'D' => {
-                            let cols: usize = extract_param(&params, 0).unwrap_or(1);
-                            AnsiToken::CursorControl(MoveLeft { cols })
-                        }
-                        'E' => {
-                            let lines: usize = extract_param(&params, 0).unwrap_or(1);
-                            AnsiToken::CursorControl(MoveLineBeginDown { lines })
-                        }
-                        'F' => {
-                            let lines: usize = extract_param(&params, 0).unwrap_or(1);
-                            AnsiToken::CursorControl(MoveLineBeginUp { lines })
-                        }
-                        'G' => {
-                            let col: usize = extract_param(&params, 0).unwrap_or(1);
-                            AnsiToken::CursorControl(MoveColumn { col })
-                        }
-                        'H' | 'f' => {
-                            let line: usize = extract_param(&params, 0).unwrap_or(1);
-                            let col: usize = extract_param(&params, 1).unwrap_or(1);
-                            AnsiToken::CursorControl(MoveTo { line, col })
-                        }
-                        'J' => match extract_param(&params, 0).unwrap_or(0) {
-                            0 => AnsiToken::EraseControl(FromCursorToEndOfScreen),
-                            1 => AnsiToken::EraseControl(FromCursorToStartOfScreen),
-                            2 => AnsiToken::EraseControl(Screen),
-                            3 => AnsiToken::EraseControl(ScreenAndScrollback),
-                            _unknown => AnsiToken::Unknown(format!("\u{1b}[{params}J")),
-                        },
-                        'K' => match extract_param(&params, 0).unwrap_or(0) {
-                            0 => AnsiToken::EraseControl(FromCursorToEndOfLine),
-                            1 => AnsiToken::EraseControl(FromCursortoStartOfLine),
-                            2 => AnsiToken::EraseControl(Line),
-                            _unknown => AnsiToken::Unknown(format!("\u{1b}[{params}K")),
-                        },
-                        'm' => {
-                            if params.is_empty() {
-                                AnsiToken::SGR(SgrControl::Reset)
-                            } else {
-                                for param in params.split(';') {
-                                    let sgr = param
-                                        .parse::<usize>()
-                                        .map_err(|err| {
-                                            anyhow::format_err!("sgr parse error: {err}")
-                                        })
-                                        .and_then(SgrControl::from_params)
-                                        .unwrap_or_else(|_| {
-                                            SgrControl::Unimplemented(format!("\u{1b}[{param}m"))
-                                        });
-                                    push(AnsiToken::SGR(sgr), 0);
-                                }
-                                sentinel_hack.clone()
-                            }
-                        }
-                        unknown => AnsiToken::Unknown(format!("\u{1b}[{params}{unknown}")),
-                    };
-                    push(token, 1 + 1 + params.len() + 1);
-                    state = ExpectingChar;
-                    remaining = &remaining[1..];
+                None => {
+                    // incomplete multi-byte utf8 sequence
+                    // wait for more data
+                    None
                 }
             }
         }
-        self.stream.advance(to_advance);
     }
 }
 
@@ -210,7 +205,7 @@ pub enum AnsiToken {
     AsciiControl(AsciiControl),
     CursorControl(CursorControl),
     EraseControl(EraseControl),
-    SGR(SgrControl),
+    SGR(Vec<SgrControl>),
     Unknown(String),
 }
 
@@ -251,48 +246,23 @@ pub enum EraseControl {
 pub enum SgrControl {
     Reset = 0,
     Bold,
-    Dim,
-    Italic,
-    Underline,
-    SlowBlink,
-    RapidBlink,
-    Invert,
-    Conceal,
-    Strike,
-    PrimaryFont,
-    AlternativeFont(u8),
-    NotUnderlined = 24,
-    NotInverted = 27,
     ForgroundColor(Color),
-    BackgroundColor(Color),
     Unimplemented(String),
 }
 impl SgrControl {
-    fn from_params(param: usize) -> anyhow::Result<SgrControl> {
+    pub fn from_params(param: usize) -> anyhow::Result<SgrControl> {
         use SgrControl::*;
         match param {
             0 => Ok(Reset),
             1 => Ok(Bold),
-            2 => Ok(Dim),
-            3 => Ok(Italic),
-            4 => Ok(Underline),
-            5 => Ok(SlowBlink),
-            6 => Ok(RapidBlink),
-            7 => Ok(Invert),
-            8 => Ok(Conceal),
-            9 => Ok(Strike),
-            10 => Ok(PrimaryFont),
-            num @ 11..=19 => Ok(AlternativeFont(num as u8)),
-            24 => Ok(NotUnderlined),
-            27 => Ok(NotInverted),
             num @ (30..=37 | 90..=97) => Ok(ForgroundColor(
                 Color::from_sgr_num(num)
                     .with_context(|| format!("invalid SGR foreground color param: {num}"))?,
             )),
-            num @ (40..=47 | 100..=107) => Ok(BackgroundColor(
-                Color::from_sgr_num(num)
-                    .with_context(|| format!("invalid SGR foreground color param: {num}"))?,
-            )),
+            // num @ (40..=47 | 100..=107) => Ok(BackgroundColor(
+            //     Color::from_sgr_num(num)
+            //         .with_context(|| format!("invalid SGR foreground color param: {num}"))?,
+            // )),
             _unknown => Err(anyhow::format_err!("unknown sgr param: {param}")),
         }
     }
@@ -356,7 +326,7 @@ impl TryFrom<u8> for AsciiControl {
             // is_ascii_control
             Ok(unsafe { std::mem::transmute(value) })
         } else {
-            bail!("invalid ascii control char: {value}")
+            Err(anyhow::anyhow!("invalid ascii control char: {value}"))
         }
     }
 }
@@ -365,13 +335,6 @@ impl From<AsciiControl> for char {
     fn from(value: AsciiControl) -> Self {
         value as u8 as char
     }
-}
-
-#[derive(Debug)]
-enum ParserState {
-    ExpectingChar,
-    ExpectingEscapeSequence,
-    ExpectingCSI { params: String },
 }
 
 impl Iterator for Parser {
@@ -492,27 +455,23 @@ mod tests {
     #[test]
     fn test_real_ansi_input() {
         let byte_streams = [
-            "\u{1b}[1m\u{1b}[7m%\u{1b}[27m\u{1b}[1m\u{1b}[0m\r \r",
-            "\r\u{1b}[0m\u{1b}[27m\u{1b}[24m\u{1b}[J$ \u{1b}",
-            "[K\u{1b}[?2004h\r\r\u{1b}[0m\u{1b}[27m\u{1b}[24m\u{1b}[J$ ",
+            "\u{1b}[1m%\u{1b}[1m\u{1b}[0m\r \r",
+            "\r\u{1b}[0m\u{1b}[J$ \u{1b}",
+            "[K\u{1b}[?2004h\r\r\u{1b}[0m\u{1b}[J$ ",
         ];
         let expected = [
             vec![
-                AnsiToken::SGR(SgrControl::Bold),
-                AnsiToken::SGR(SgrControl::Invert),
+                AnsiToken::SGR(vec![SgrControl::Bold]),
                 AnsiToken::Text('%'.to_string()),
-                AnsiToken::SGR(SgrControl::NotInverted),
-                AnsiToken::SGR(SgrControl::Bold),
-                AnsiToken::SGR(SgrControl::Reset),
+                AnsiToken::SGR(vec![SgrControl::Bold]),
+                AnsiToken::SGR(vec![SgrControl::Reset]),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::Text(' '.to_string()),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
             ],
             vec![
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
-                AnsiToken::SGR(SgrControl::Reset),
-                AnsiToken::SGR(SgrControl::NotInverted),
-                AnsiToken::SGR(SgrControl::NotUnderlined),
+                AnsiToken::SGR(vec![SgrControl::Reset]),
                 AnsiToken::EraseControl(FromCursorToEndOfScreen),
                 AnsiToken::Text("$ ".to_string()),
             ],
@@ -521,9 +480,7 @@ mod tests {
                 AnsiToken::Unknown("\u{1b}[?2004h".to_string()),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
-                AnsiToken::SGR(SgrControl::Reset),
-                AnsiToken::SGR(SgrControl::NotInverted),
-                AnsiToken::SGR(SgrControl::NotUnderlined),
+                AnsiToken::SGR(vec![SgrControl::Reset]),
                 AnsiToken::EraseControl(FromCursorToEndOfScreen),
                 AnsiToken::Text("$ ".to_string()),
             ],
@@ -552,5 +509,51 @@ mod tests {
             Some(AnsiToken::CursorControl(MoveTo { line: 1, col: 20 }))
         );
         assert_eq!(parser.next(), None);
+    }
+
+    #[test]
+    fn test_multiple_params_sgr() {
+        use SgrControl::*;
+        let stream = b"\x1b[1;31;2mhello";
+        let mut parser = Parser::new();
+        parser.push_bytes(stream);
+        assert_eq!(
+            parser.next(),
+            Some(AnsiToken::SGR(vec![
+                Bold,
+                ForgroundColor(Color::Red),
+                Unimplemented("\u{1b}[2m".to_string())
+            ]))
+        );
+        assert_eq!(parser.next(), Some(AnsiToken::Text("hello".to_string())));
+    }
+
+    #[test]
+    fn test_partial_utf8_parsing() {
+        let emoji = "he\u{1f605}llo".as_bytes();
+
+        let mut parser = Parser::new();
+        parser.push_bytes(&emoji[0..4]);
+        assert_eq!(parser.next(), None);
+
+        parser.push_bytes(&emoji[4..]);
+        assert_eq!(
+            parser.next(),
+            Some(AnsiToken::Text("he\u{1f605}llo".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_partial_escape_sequence_parsing() {
+        let payload = "he\u{1b}[1mllo".as_bytes();
+
+        let mut parser = Parser::new();
+        parser.push_bytes(&payload[0..3]);
+        assert_eq!(parser.next(), Some(AnsiToken::Text("he".to_string())));
+        assert_eq!(parser.next(), None);
+
+        parser.push_bytes(&payload[3..]);
+        assert_eq!(parser.next(), Some(AnsiToken::SGR(vec![SgrControl::Bold])));
+        assert_eq!(parser.next(), Some(AnsiToken::Text("llo".to_string())));
     }
 }

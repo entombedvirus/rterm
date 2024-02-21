@@ -415,14 +415,23 @@ impl AnsiGrid {
                 self.cells[cur_idx..line_end_idx].fill(Self::FILL_CHAR);
                 self.text_format[cur_idx..line_end_idx].fill(TextFormat::default());
             }
-            SGR(SgrControl::Bold) => {
-                self.current_text_format.bold = true;
-            }
-            SGR(SgrControl::ForgroundColor(color)) => {
-                self.current_text_format.fg_color = *color;
-            }
-            SGR(SgrControl::Reset) => {
-                self.current_text_format = TextFormat::default();
+            SGR(params) => {
+                for sgr in params {
+                    match sgr {
+                        SgrControl::Bold => {
+                            self.current_text_format.bold = true;
+                        }
+                        SgrControl::ForgroundColor(color) => {
+                            self.current_text_format.fg_color = *color;
+                        }
+                        SgrControl::Reset => {
+                            self.current_text_format = TextFormat::default();
+                        }
+                        SgrControl::Unimplemented(_) => {
+                            // noop
+                        }
+                    }
+                }
             }
             ignored => info!("ignoring ansii token: {ignored:?}"),
         }
