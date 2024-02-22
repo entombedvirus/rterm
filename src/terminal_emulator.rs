@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     os::fd::{AsFd, AsRawFd, OwnedFd},
     sync::{mpsc, Arc},
 };
@@ -10,14 +11,14 @@ use crate::{
 use ansi::AsciiControl;
 use anyhow::Context;
 use egui::{text::LayoutJob, CentralPanel, Color32, FontId, Key, Rect};
-use log::{debug, info};
+use log::info;
 use nix::errno::Errno;
 
 #[derive(Debug)]
 pub struct TerminalEmulator {
-    io_thread: std::thread::JoinHandle<()>,
+    _io_thread: std::thread::JoinHandle<()>,
     pty_fd: Arc<OwnedFd>,
-    token_stream: mpsc::Receiver<ansi::AnsiToken>,
+    token_stream: mpsc::Receiver<VecDeque<ansi::AnsiToken>>,
     window_rect: Option<Rect>,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
@@ -47,8 +48,10 @@ impl eframe::App for TerminalEmulator {
 
             loop {
                 match self.token_stream.try_recv() {
-                    Ok(token) => {
-                        self.grid.update(&token);
+                    Ok(tokens) => {
+                        for token in tokens {
+                            self.grid.update(&token);
+                        }
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -83,7 +86,7 @@ impl TerminalEmulator {
 
         let io_fd = Arc::clone(&pty_fd);
         let ctx = cc.egui_ctx.clone();
-        let io_thread = std::thread::Builder::new()
+        let _io_thread = std::thread::Builder::new()
             .name("rterm i/o thread".to_string())
             .spawn(move || {
                 terminal_input::input_loop(ctx, io_fd, tx);
@@ -98,7 +101,7 @@ impl TerminalEmulator {
         // cc.egui_ctx.set_pixels_per_point(2.0);
 
         Ok(Self {
-            io_thread,
+            _io_thread,
             buffered_input: String::new(),
             grid: AnsiGrid::new(24, 80),
             pty_fd,

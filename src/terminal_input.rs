@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     os::fd::{AsRawFd, OwnedFd},
     sync::{mpsc, Arc},
 };
@@ -57,7 +58,7 @@ pub fn alt(txt: &str, dst: &mut String) {
     });
 }
 
-pub fn input_loop(ctx: egui::Context, pty_fd: Arc<OwnedFd>, tx: mpsc::Sender<AnsiToken>) {
+pub fn input_loop(ctx: egui::Context, pty_fd: Arc<OwnedFd>, tx: mpsc::Sender<VecDeque<AnsiToken>>) {
     let mut parser = ansi::Parser::new();
     let mut buf = [0u8; 1024];
     loop {
@@ -75,11 +76,11 @@ pub fn input_loop(ctx: egui::Context, pty_fd: Arc<OwnedFd>, tx: mpsc::Sender<Ans
                 parser.push_bytes(&buf[..num_read]);
                 log::debug!("parsed_tokens: {:?}", &parser.parsed_tokens);
 
-                for token in parser.tokens() {
-                    tx.send(token)
+                if parser.has_tokens() {
+                    tx.send(parser.tokens())
                         .expect("send to never fail, unless on app shutdown");
+                    ctx.request_repaint();
                 }
-                ctx.request_repaint();
             }
             Err(unexpected) => {
                 log::warn!("read failed: {}", unexpected);

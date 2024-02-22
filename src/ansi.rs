@@ -18,8 +18,8 @@ impl Parser {
         }
     }
 
-    pub fn tokens<'a>(&'a mut self) -> impl Iterator<Item = AnsiToken> + 'a {
-        self.parsed_tokens.drain(..)
+    pub fn tokens<'a>(&'a mut self) -> VecDeque<AnsiToken> {
+        std::mem::take(&mut self.parsed_tokens)
     }
 
     pub fn push_bytes(&mut self, incoming: &[u8]) {
@@ -51,6 +51,10 @@ impl Parser {
             )
         }
         self.stream.advance(consumed);
+    }
+
+    pub(crate) fn has_tokens(&self) -> bool {
+        !self.parsed_tokens.is_empty()
     }
 }
 
