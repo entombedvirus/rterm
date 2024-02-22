@@ -2,7 +2,7 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 
 use crate::{
     ansi::{self, SgrControl},
-    pty,
+    pty, terminal_input,
 };
 use ansi::AsciiControl;
 use anyhow::Context;
@@ -167,40 +167,18 @@ impl TerminalEmulator {
     ) -> anyhow::Result<()> {
         match event {
             egui::Event::Text(txt) => {
-                self.buffered_input += if input_state.modifiers.alt {
-                    match txt.as_str() {
-                        "å" => "\u{1b}a",
-                        "∫" => "\u{1b}b",
-                        "ç" => "\u{1b}c",
-                        "∂" => "\u{1b}d",
-                        "e" => "\u{1b}e",
-                        "ƒ" => "\u{1b}f",
-                        "©" => "\u{1b}g",
-                        "˙" => "\u{1b}h",
-                        "i" => "\u{1b}i",
-                        "∆" => "\u{1b}j",
-                        "˚" => "\u{1b}k",
-                        "¬" => "\u{1b}l",
-                        "µ" => "\u{1b}m",
-                        "n" => "\u{1b}n",
-                        "ø" => "\u{1b}o",
-                        "π" => "\u{1b}p",
-                        "œ" => "\u{1b}q",
-                        "®" => "\u{1b}r",
-                        "ß" => "\u{1b}s",
-                        "†" => "\u{1b}t",
-                        "u" => "\u{1b}u",
-                        "√" => "\u{1b}v",
-                        "∑" => "\u{1b}w",
-                        "≈" => "\u{1b}x",
-                        "¥" => "\u{1b}y",
-                        "Ω" => "\u{1b}z",
-                        _ => txt,
-                    }
+                if input_state.modifiers.alt {
+                    terminal_input::alt(txt, &mut self.buffered_input);
                 } else {
-                    txt
+                    self.buffered_input.push_str(&txt);
                 };
             }
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers: egui::Modifiers::CTRL,
+                ..
+            } => terminal_input::ctrl(key.name(), &mut self.buffered_input),
             egui::Event::Key {
                 key: Key::Escape,
                 pressed: true,
@@ -245,37 +223,7 @@ impl TerminalEmulator {
                 pressed: true,
                 ..
             } => self.buffered_input.push_str("\u{1b}[D"),
-            egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers: egui::Modifiers::CTRL,
-                ..
-            } => {
-                match key {
-                    Key::A => self.buffered_input.push_str("\u{01}"),
-                    Key::B => self.buffered_input.push_str("\u{02}"),
-                    // mapts to ascii end of text
-                    Key::C => self.buffered_input.push_str("\u{03}"),
-                    // mapts to ascii end of transmission
-                    Key::D => self.buffered_input.push_str("\u{04}"),
-                    Key::E => self.buffered_input.push_str("\u{05}"),
-                    // mapts to ascii form feed 0xc
-                    Key::L => self.buffered_input.push_str("\u{0c}"),
-                    // mapts to ascii data link escape
-                    Key::P => self.buffered_input.push_str("\u{10}"),
-                    // mapts to ascii device control 2
-                    Key::R => self.buffered_input.push_str("\u{12}"),
-                    // mapts to ascii end of transmission block
-                    Key::W => self.buffered_input.push_str("\u{17}"),
-                    Key::X => self.buffered_input.push_str("\u{18}"),
-                    Key::Z => self.buffered_input.push_str("\u{1a}"),
-                    Key::OpenBracket => self.buffered_input.push_str("\u{1b}"),
-                    Key::Backslash => self.buffered_input.push_str("\u{1c}"),
-                    Key::CloseBracket => self.buffered_input.push_str("\u{1d}"),
-                    _ => (),
-                }
-            }
-            _ => (),
+            _ => log::info!("unhandled event: {event:?}"),
         };
         Ok(())
     }
@@ -368,7 +316,6 @@ impl AnsiGrid {
             }
             AsciiControl(AsciiControl::Backspace) => {
                 self.move_cursor_relative(0, -1);
-                self.update_cursor_cell(Self::FILL_CHAR);
             }
             AsciiControl(AsciiControl::Tab) => {
                 self.move_cursor_relative(0, 4);

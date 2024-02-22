@@ -5,6 +5,7 @@ use crate::terminal_emulator::TerminalEmulator;
 mod ansi;
 mod pty;
 mod terminal_emulator;
+mod terminal_input;
 
 fn main() {
     env_logger::init();
