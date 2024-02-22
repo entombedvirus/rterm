@@ -1,4 +1,5 @@
 [X] less verbose ctrl + alt key handling code
 [X] move I/O to a different thread
+[X] exit app when shell exits
 [ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
 [ ] support for scrolling

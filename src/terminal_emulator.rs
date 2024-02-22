@@ -45,8 +45,17 @@ impl eframe::App for TerminalEmulator {
                 }
             }
 
-            while let Ok(token) = self.token_stream.try_recv() {
-                self.grid.update(&token);
+            loop {
+                match self.token_stream.try_recv() {
+                    Ok(token) => {
+                        self.grid.update(&token);
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        anyhow::bail!("shell exit");
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                }
             }
 
             ui.input(|input_state| -> anyhow::Result<()> {

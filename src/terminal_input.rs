@@ -62,6 +62,10 @@ pub fn input_loop(ctx: egui::Context, pty_fd: Arc<OwnedFd>, tx: mpsc::Sender<Ans
     let mut buf = [0u8; 1024];
     loop {
         match nix::unistd::read(pty_fd.as_raw_fd(), &mut buf) {
+            Ok(0) => {
+                // eof, process exit
+                return;
+            }
             Ok(num_read) => {
                 log::debug!(
                     "read {} bytes from pty: {as_str:?}",
@@ -77,7 +81,10 @@ pub fn input_loop(ctx: egui::Context, pty_fd: Arc<OwnedFd>, tx: mpsc::Sender<Ans
                 }
                 ctx.request_repaint();
             }
-            Err(unexpected) => panic!("read failed: {}", unexpected),
+            Err(unexpected) => {
+                log::warn!("read failed: {}", unexpected);
+                break;
+            }
         }
     }
 }
