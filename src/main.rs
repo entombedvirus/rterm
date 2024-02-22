@@ -1,4 +1,7 @@
-use std::os::fd::AsFd;
+use std::{
+    os::fd::AsFd,
+    sync::{mpsc, Arc},
+};
 
 use crate::terminal_emulator::TerminalEmulator;
 
@@ -11,7 +14,8 @@ fn main() {
     env_logger::init();
 
     let pty_fd = pty::create_pty().expect("create_pty failed");
-    pty::set_nonblocking(pty_fd.as_fd()).expect("pty: set_nonblocking mode failed");
+    let pty_fd = Arc::new(pty_fd);
+    // pty::set_nonblocking(pty_fd.as_fd()).expect("pty: set_nonblocking mode failed");
 
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(

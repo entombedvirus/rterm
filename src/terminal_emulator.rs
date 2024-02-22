@@ -1,4 +1,7 @@
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::{
+    os::fd::{AsFd, AsRawFd, OwnedFd},
+    sync::{mpsc, Arc},
+};
 
 use crate::{
     ansi::{self, SgrControl},
@@ -12,8 +15,9 @@ use nix::errno::Errno;
 
 #[derive(Debug)]
 pub struct TerminalEmulator {
-    parser: ansi::Parser,
-    pty_fd: OwnedFd,
+    io_thread: std::thread::JoinHandle<()>,
+    pty_fd: Arc<OwnedFd>,
+    token_stream: mpsc::Receiver<ansi::AnsiToken>,
     window_rect: Option<Rect>,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
@@ -41,7 +45,9 @@ impl eframe::App for TerminalEmulator {
                 }
             }
 
-            self.read_from_pty().context("reading from pty failed")?;
+            while let Ok(token) = self.token_stream.try_recv() {
+                self.grid.update(&token);
+            }
 
             ui.input(|input_state| -> anyhow::Result<()> {
                 for event in &input_state.events {
@@ -63,7 +69,18 @@ impl eframe::App for TerminalEmulator {
 }
 
 impl TerminalEmulator {
-    pub fn new(cc: &eframe::CreationContext<'_>, pty_fd: OwnedFd) -> anyhow::Result<Self> {
+    pub fn new(cc: &eframe::CreationContext<'_>, pty_fd: Arc<OwnedFd>) -> anyhow::Result<Self> {
+        let (tx, rx) = mpsc::channel();
+
+        let io_fd = Arc::clone(&pty_fd);
+        let ctx = cc.egui_ctx.clone();
+        let io_thread = std::thread::Builder::new()
+            .name("rterm i/o thread".to_string())
+            .spawn(move || {
+                terminal_input::input_loop(ctx, io_fd, tx);
+            })
+            .expect("Failed to spawn input_loop thread");
+
         let regular_font = FontId::monospace(22.0);
         cc.egui_ctx.style_mut(|style| {
             // style.override_text_style = Some(egui::TextStyle::Monospace);
@@ -72,13 +89,14 @@ impl TerminalEmulator {
         // cc.egui_ctx.set_pixels_per_point(2.0);
 
         Ok(Self {
+            io_thread,
             buffered_input: String::new(),
             grid: AnsiGrid::new(24, 80),
             pty_fd,
+            token_stream: rx,
             window_rect: None,
             char_dimensions: None,
             regular_font,
-            parser: ansi::Parser::new(),
         })
     }
 
@@ -107,31 +125,6 @@ impl TerminalEmulator {
             }
             let galley = ui.fonts(|fonts| fonts.layout_job(layout));
             ui.label(galley);
-        }
-    }
-
-    pub fn read_from_pty(&mut self) -> anyhow::Result<()> {
-        let mut buf = [0u8; 1024];
-        match nix::unistd::read(self.pty_fd.as_raw_fd(), &mut buf) {
-            Ok(num_read) => {
-                debug!(
-                    "read {} bytes from pty: {as_str:?}",
-                    num_read,
-                    as_str = std::str::from_utf8(&buf[..num_read])
-                );
-                self.parser.push_bytes(&buf[..num_read]);
-                debug!("parsed_tokens: {:?}", &self.parser.parsed_tokens);
-
-                for token in self.parser.tokens() {
-                    self.grid.update(&token);
-                }
-                Ok(())
-            }
-            Err(Errno::EAGAIN) => {
-                // No data available
-                Ok(())
-            }
-            Err(unexpected) => Err(anyhow::format_err!("read failed: {}", unexpected)),
         }
     }
 

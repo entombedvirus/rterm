@@ -1,3 +1,4 @@
 [X] less verbose ctrl + alt key handling code
+[X] move I/O to a different thread
 [ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
-[ ] move I/O to a different thread
+[ ] support for scrolling

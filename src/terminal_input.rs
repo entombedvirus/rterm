@@ -1,3 +1,10 @@
+use std::{
+    os::fd::{AsRawFd, OwnedFd},
+    sync::{mpsc, Arc},
+};
+
+use crate::ansi::{self, AnsiToken};
+
 pub fn ctrl(key_name: &str, dst: &mut String) {
     match key_name.as_bytes() {
         [] => (),
@@ -48,4 +55,29 @@ pub fn alt(txt: &str, dst: &mut String) {
             return;
         }
     });
+}
+
+pub fn input_loop(ctx: egui::Context, pty_fd: Arc<OwnedFd>, tx: mpsc::Sender<AnsiToken>) {
+    let mut parser = ansi::Parser::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match nix::unistd::read(pty_fd.as_raw_fd(), &mut buf) {
+            Ok(num_read) => {
+                log::debug!(
+                    "read {} bytes from pty: {as_str:?}",
+                    num_read,
+                    as_str = std::str::from_utf8(&buf[..num_read])
+                );
+                parser.push_bytes(&buf[..num_read]);
+                log::debug!("parsed_tokens: {:?}", &parser.parsed_tokens);
+
+                for token in parser.tokens() {
+                    tx.send(token)
+                        .expect("send to never fail, unless on app shutdown");
+                }
+                ctx.request_repaint();
+            }
+            Err(unexpected) => panic!("read failed: {}", unexpected),
+        }
+    }
 }
