@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    ops::Range,
     os::fd::{AsFd, AsRawFd, OwnedFd},
     sync::{mpsc, Arc},
 };
@@ -52,6 +53,12 @@ impl eframe::App for TerminalEmulator {
                         for token in tokens {
                             self.grid.update(&token);
                         }
+                        log::debug!(
+                            "move_cursor: ({}, {}), visible_line: {}",
+                            self.grid.cursor_position.0,
+                            self.grid.cursor_position.1,
+                            self.grid.first_visible_line_no
+                        );
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -72,10 +79,24 @@ impl eframe::App for TerminalEmulator {
 
             self.write_to_pty().context("writing to pty failed")?;
 
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size([0.0, 0.0].into(), ui.available_size()),
+                0.0,
+                Color32::BLACK,
+            );
             self.paint_cursor(ui).context("paint_cursor failed")?;
-            self.render(ctx, ui);
-
+            self.render(ctx, ui, 0..0);
             Ok(())
+            // let char_height = ctx.fonts(|fonts| fonts.row_height(&self.regular_font));
+            // egui::ScrollArea::vertical().stick_to_bottom(true).show(
+            //     ui,
+            //     // char_height,
+            //     // self.grid.num_current_rows(),
+            //     // |ui, visible_rows| -> anyhow::Result<()> {
+            //     |ui| -> anyhow::Result<()> {
+            //     },
+            // );
+            // Ok(())
         });
     }
 }
@@ -103,7 +124,7 @@ impl TerminalEmulator {
         Ok(Self {
             _io_thread,
             buffered_input: String::new(),
-            grid: AnsiGrid::new(24, 80),
+            grid: AnsiGrid::new(24, 80, 5000),
             pty_fd,
             token_stream: rx,
             window_rect: None,
@@ -112,8 +133,8 @@ impl TerminalEmulator {
         })
     }
 
-    pub fn render(&self, _ctx: &egui::Context, ui: &mut egui::Ui) {
-        for (line_chars, formats) in self.grid.lines() {
+    pub fn render(&self, _ctx: &egui::Context, ui: &mut egui::Ui, visible_rows: Range<usize>) {
+        for (line_chars, formats) in self.grid.lines(visible_rows) {
             let mut layout = LayoutJob::default();
             layout.wrap = egui::text::TextWrapping::no_max_width();
             for (&ch, format) in line_chars.into_iter().zip(formats) {
@@ -187,25 +208,21 @@ impl TerminalEmulator {
             egui::Event::Key {
                 key: Key::Escape,
                 pressed: true,
-                repeat: false,
                 ..
             } => self.buffered_input.push(AsciiControl::Escape.into()),
             egui::Event::Key {
                 key: Key::Tab,
                 pressed: true,
-                repeat: false,
                 ..
             } => self.buffered_input.push(AsciiControl::Tab.into()),
             egui::Event::Key {
                 key: Key::Backspace,
                 pressed: true,
-                repeat: false,
                 ..
             } => self.buffered_input.push(AsciiControl::Backspace.into()),
             egui::Event::Key {
                 key: Key::Enter,
                 pressed: true,
-                repeat: false,
                 ..
             } => self.buffered_input.push(AsciiControl::LineFeed.into()),
             egui::Event::Key {
@@ -228,7 +245,13 @@ impl TerminalEmulator {
                 pressed: true,
                 ..
             } => self.buffered_input.push_str("\u{1b}[D"),
-            _ => log::info!("unhandled event: {event:?}"),
+            egui::Event::Key { pressed: false, .. } => (),
+            egui::Event::PointerMoved { .. } => (),
+            egui::Event::PointerGone { .. } => (),
+            egui::Event::WindowFocused { .. } => (),
+            egui::Event::Scroll { .. } => (),
+            egui::Event::MouseWheel { .. } => (),
+            _ => log::debug!("unhandled event: {event:?}"),
         };
         Ok(())
     }
@@ -253,6 +276,8 @@ impl TerminalEmulator {
 struct AnsiGrid {
     num_rows: usize,
     num_cols: usize,
+    max_rows_scrollback: usize,
+    first_visible_line_no: usize,
     cells: Vec<char>,
     text_format: Vec<TextFormat>,
     cursor_position: (usize, usize),
@@ -262,11 +287,16 @@ struct AnsiGrid {
 impl AnsiGrid {
     const FILL_CHAR: char = '-';
 
-    fn new(num_rows: usize, num_cols: usize) -> Self {
+    fn new(num_rows: usize, num_cols: usize, max_rows_scrollback: usize) -> Self {
+        // scrollback has to be at least num_rows
+        let max_rows_scrollback = max_rows_scrollback.max(num_rows);
         let cursor_position = (0, 0);
+        let first_visible_line_no = 0;
         Self {
             num_rows,
             num_cols,
+            max_rows_scrollback,
+            first_visible_line_no,
             cells: vec![Self::FILL_CHAR; num_rows * num_cols],
             text_format: vec![TextFormat::default(); num_rows * num_cols],
             cursor_position,
@@ -278,12 +308,14 @@ impl AnsiGrid {
         if self.num_rows == new_num_rows && self.num_cols == new_num_cols {
             return false;
         }
-        eprintln!(
+        log::info!(
             "resize: {} x {} -> {new_num_rows} x {new_num_cols}",
-            self.num_rows, self.num_cols
+            self.num_rows,
+            self.num_cols
         );
-        let mut new_cells = vec![Self::FILL_CHAR; new_num_rows * new_num_cols];
-        let mut new_format = vec![TextFormat::default(); new_num_rows * new_num_cols];
+        let new_len = (self.first_visible_line_no + new_num_rows) * new_num_cols;
+        let mut new_cells = vec![Self::FILL_CHAR; new_len];
+        let mut new_format = vec![TextFormat::default(); new_len];
         let line_len = self.num_cols.min(new_num_cols);
         for (line_no, (old_cells, old_formats)) in self
             .cells
@@ -291,13 +323,14 @@ impl AnsiGrid {
             .zip(self.text_format.chunks_exact(self.num_cols))
             .enumerate()
         {
-            if line_no >= new_num_rows {
-                break;
-            }
             let new_line_start = line_no * new_num_cols;
             let copy_range = new_line_start..new_line_start + line_len;
-            new_cells[copy_range.clone()].copy_from_slice(&old_cells[..line_len]);
-            new_format[copy_range.clone()].copy_from_slice(&old_formats[..line_len]);
+            if let Some(dst) = new_cells.get_mut(copy_range.clone()) {
+                dst.copy_from_slice(&old_cells[..line_len]);
+            }
+            if let Some(dst) = new_format.get_mut(copy_range) {
+                dst.copy_from_slice(&old_formats[..line_len]);
+            }
         }
         self.cells = new_cells;
         self.text_format = new_format;
@@ -343,27 +376,36 @@ impl AnsiGrid {
                     // no need to scroll
                     self.move_cursor_relative(-1, 0);
                 } else {
-                    // shift all lines down by one line
-                    let last_row_start = self.cells.len() - self.num_cols;
-                    self.cells.copy_within(..last_row_start, self.num_cols);
-                    self.text_format
-                        .copy_within(..last_row_start, self.num_cols);
-                    self.cells[..self.num_cols].fill(Self::FILL_CHAR);
-                    self.text_format[..self.num_cols].fill(TextFormat::default());
+                    self.first_visible_line_no = self.first_visible_line_no.saturating_sub(1);
+                    // // shift last num_rows lines down by one line
+                    // let last_row_start = self.cells.len() - self.num_cols;
+                    // let visible_start = self.cursor_position_to_buf_pos(&(0, 0));
+                    // self.cells
+                    //     .copy_within(visible_start..last_row_start, self.num_cols);
+                    // self.text_format
+                    //     .copy_within(visible_start..last_row_start, self.num_cols);
+                    // self.cells[visible_start..self.num_cols].fill(Self::FILL_CHAR);
+                    // self.text_format[visible_start..self.num_cols].fill(TextFormat::default());
                 }
             }
             EraseControl(EraseControl::Screen) => {
-                self.cells.fill(Self::FILL_CHAR);
-                self.text_format.fill(TextFormat::default());
+                let visible_start = self.cursor_position_to_buf_pos(&(0, 0));
+                let visible_end =
+                    self.cursor_position_to_buf_pos(&(self.num_rows - 1, self.num_cols - 1));
+                self.cells[visible_start..visible_end].fill(Self::FILL_CHAR);
+                self.text_format[visible_start..visible_end].fill(TextFormat::default());
             }
             EraseControl(EraseControl::FromCursorToEndOfScreen) => {
-                let cur_idx = self.cursor_position_to_buf_pos();
-                self.cells[cur_idx..].fill(Self::FILL_CHAR);
-                self.text_format[cur_idx..].fill(TextFormat::default());
+                let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_position);
+                let visible_end =
+                    self.cursor_position_to_buf_pos(&(self.num_rows - 1, self.num_cols - 1));
+                self.cells[cur_idx..visible_end].fill(Self::FILL_CHAR);
+                self.text_format[cur_idx..visible_end].fill(TextFormat::default());
             }
             EraseControl(EraseControl::FromCursorToEndOfLine) => {
-                let cur_idx = self.cursor_position_to_buf_pos();
-                let line_end_idx = (self.cursor_position.0 + 1) * self.num_cols;
+                let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_position);
+                let line_end_idx =
+                    self.cursor_position_to_buf_pos(&(self.cursor_position.0 + 1, 0));
                 self.cells[cur_idx..line_end_idx].fill(Self::FILL_CHAR);
                 self.text_format[cur_idx..line_end_idx].fill(TextFormat::default());
             }
@@ -389,46 +431,68 @@ impl AnsiGrid {
         }
     }
 
-    fn cursor_position_to_buf_pos(&self) -> usize {
-        let (r, c) = self.cursor_position;
-        r * self.num_cols + c
+    fn cursor_position_to_buf_pos(&self, (r, c): &(usize, usize)) -> usize {
+        let start = self.first_visible_line_no * self.num_cols;
+        let offset = r * self.num_cols + c;
+        start + offset
     }
 
     fn move_cursor(&mut self, new_row: usize, new_col: usize) {
-        let cur_idx = new_row * self.num_cols + new_col;
-        let max_idx = self.cells.len().saturating_sub(1);
-        self.cursor_position = if cur_idx > max_idx {
-            let num_lines_to_scroll = (cur_idx / self.num_cols) - self.num_rows + 1;
-            self.cells
-                .copy_within(num_lines_to_scroll * self.num_cols.., 0);
-            self.text_format
-                .copy_within(num_lines_to_scroll * self.num_cols.., 0);
-            let last_n_lines = self.cells.len() - (self.num_cols * num_lines_to_scroll)..;
-            self.cells[last_n_lines.clone()].fill(Self::FILL_CHAR);
-            self.text_format[last_n_lines].fill(TextFormat::default());
-            (self.num_rows - 1, cur_idx % self.num_cols)
-        } else {
-            (cur_idx / self.num_cols, cur_idx % self.num_cols)
+        assert!(new_col < self.num_cols);
+        // new position is within bounds
+        if new_row < self.num_rows {
+            self.cursor_position = (new_row, new_col);
+            return;
         }
+
+        let num_new_lines = new_row - self.num_rows + 1;
+        if self.cells.len() >= self.max_rows_scrollback * self.num_cols {
+            // if we can't grow the buffer, create room at the end by shifting everything up
+            let _ = self.cells.drain(0..num_new_lines * self.num_cols);
+            let _ = self.text_format.drain(0..num_new_lines * self.num_cols);
+        } else {
+            // otherwise, grow the buffer and move the visible area forward
+            self.first_visible_line_no += new_row - self.num_rows + 1;
+        }
+
+        // we can grow to accomodate
+        let new_len = self.cells.len() + num_new_lines * self.num_cols;
+        self.cells.resize(new_len, Self::FILL_CHAR);
+        self.text_format.resize(new_len, TextFormat::default());
+        self.cursor_position = (self.num_rows - 1, new_col);
     }
 
     fn move_cursor_relative(&mut self, dr: isize, dc: isize) {
         let (r, c) = self.cursor_position;
-        let new_row = (r as isize) + dr;
-        let new_col = (c as isize) + dc;
-        self.move_cursor(new_row as usize, new_col as usize)
+        let mut new_row = ((r as isize) + dr) as usize;
+        let mut new_col = ((c as isize) + dc) as usize;
+        new_row += new_col / self.num_cols;
+        new_col %= self.num_cols;
+        self.move_cursor(new_row, new_col)
     }
 
     fn update_cursor_cell(&mut self, new_ch: char) {
-        let cur_idx = self.cursor_position_to_buf_pos();
+        let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_position);
         self.cells[cur_idx] = new_ch;
         self.text_format[cur_idx] = self.current_text_format;
     }
 
-    fn lines<'a>(&'a self) -> impl Iterator<Item = (&'a [char], &'a [TextFormat])> + 'a {
-        self.cells
+    fn lines<'a>(
+        &'a self,
+        visible_rows: Range<usize>,
+    ) -> impl Iterator<Item = (&'a [char], &'a [TextFormat])> + 'a {
+        let start = self.cursor_position_to_buf_pos(&(0, 0));
+        let end = start + (self.num_rows * self.num_cols);
+        self.cells[start..end]
             .chunks_exact(self.num_cols)
-            .zip(self.text_format.chunks_exact(self.num_cols))
+            .zip(self.text_format[start..end].chunks_exact(self.num_cols))
+        // .skip(visible_rows.start)
+        // .take(visible_rows.len())
+    }
+
+    fn num_current_rows(&self) -> usize {
+        self.cells.len() / self.num_cols
+        // self.num_rows
     }
 }
 
