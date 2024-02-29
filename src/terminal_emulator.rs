@@ -7,11 +7,12 @@ use std::{
 
 use crate::{
     ansi::{self, SgrControl},
+    config::{self, Config},
     pty, terminal_input,
 };
 use ansi::AsciiControl;
 use anyhow::Context;
-use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, FontId, Key, Rect};
+use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, FontId, Key, NumExt, Rect};
 use log::info;
 use nix::errno::Errno;
 
@@ -45,16 +46,19 @@ impl ChildProcess {
 }
 #[derive(Debug)]
 pub struct TerminalEmulator {
+    ctx: egui::Context,
+    config: Config,
     child_process: Option<ChildProcess>,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
     grid: AnsiGrid,
-    pub regular_font: egui::FontId,
     enable_debug_render: bool,
 }
 
 impl eframe::App for TerminalEmulator {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.set_pixels_per_point(self.config.pixels_per_point.at_least(1.0));
+        let regular_font = self.regular_font();
         let panel_response = CentralPanel::default().show(ctx, |ui| -> anyhow::Result<()> {
             if self.enable_debug_render {
                 ctx.debug_painter()
@@ -69,8 +73,8 @@ impl eframe::App for TerminalEmulator {
                 .char_dimensions
                 .insert({
                     let dims = ctx.fonts(|fonts| {
-                        let width = fonts.glyph_width(&self.regular_font, 'M');
-                        let height = fonts.row_height(&self.regular_font);
+                        let width = fonts.glyph_width(&regular_font, 'M');
+                        let height = fonts.row_height(&regular_font);
                         (width, height).into()
                     });
                     // needed to avoid floating point errors when multiplying
@@ -164,28 +168,45 @@ impl eframe::App for TerminalEmulator {
         });
 
         panel_response.response.context_menu(|ui| {
-            ui.horizontal(|ui| {
-                ui.label("Font Size:");
-                ui.add(DragValue::new(&mut self.regular_font.size).clamp_range(2.0..=88.0));
-            });
-            ui.checkbox(&mut self.enable_debug_render, "Enable Debug Renderer");
+            self.settings_ui(ui);
         });
+    }
+
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        config::set(&self.ctx, self.config.clone());
     }
 }
 
 impl TerminalEmulator {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
-        let regular_font = FontId::monospace(24.0);
-        // cc.egui_ctx.set_pixels_per_point(2.0);
+    pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+        let ctx = cc.egui_ctx.clone();
+        let config = config::get(&ctx);
 
         Ok(Self {
+            ctx,
+            config,
             child_process: None,
             buffered_input: String::new(),
             grid: AnsiGrid::new(24, 80, 5000),
             char_dimensions: None,
-            regular_font,
             enable_debug_render: false,
         })
+    }
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Font Size:");
+            ui.add(DragValue::new(&mut self.config.font_size).clamp_range(2.0..=88.0));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Pixels Per Point");
+            ui.add(
+                DragValue::new(&mut self.config.pixels_per_point)
+                    .clamp_range(1.0..=4.0)
+                    .speed(1.0),
+            );
+        });
+        ui.checkbox(&mut self.enable_debug_render, "Enable Debug Renderer");
     }
 
     pub fn render(
@@ -194,7 +215,7 @@ impl TerminalEmulator {
         ui: &mut egui::Ui,
         visible_rows: Range<usize>,
     ) -> Vec<egui::Response> {
-        ui.style_mut().override_font_id = Some(self.regular_font.clone());
+        ui.style_mut().override_font_id = Some(self.regular_font());
         let mut label_responses = Vec::new();
         for (line_chars, formats) in self.grid.lines(visible_rows) {
             let mut layout = LayoutJob::default();
@@ -203,7 +224,7 @@ impl TerminalEmulator {
                 let byte_range = layout.text.len()..layout.text.len() + ch.len_utf8();
                 layout.text.push(ch);
                 let format = egui::text::TextFormat {
-                    font_id: self.regular_font.clone(),
+                    font_id: self.regular_font(),
                     color: if format.bold {
                         ansi::Color::brighter(format.fg_color).into()
                     } else {
@@ -369,6 +390,10 @@ impl TerminalEmulator {
             }
             Err(mpsc::TryRecvError::Empty) => Ok(false),
         }
+    }
+
+    fn regular_font(&self) -> FontId {
+        egui::FontId::new(self.config.font_size, self.config.regular_font.clone())
     }
 }
 

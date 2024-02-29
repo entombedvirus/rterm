@@ -2409,6 +2409,7 @@ dependencies = [
  "libc",
  "log",
  "nix 0.27.1",
+ "serde",
 ]
 
 [[package]]

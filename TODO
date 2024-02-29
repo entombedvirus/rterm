@@ -4,6 +4,7 @@
 [X] send batches of tokens between IO and UI threads instead of one-by-one
 [X] support for scrolling
 [X] remember window size and position through restarts
+[X] remember font size through restarts
 [ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
 [ ] configuration / preferences pane based colors / fonts
 [ ] use small vec for passing terminal output

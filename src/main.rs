@@ -1,6 +1,7 @@
 use terminal_emulator::TerminalEmulator;
 
 mod ansi;
+mod config;
 mod pty;
 mod terminal_emulator;
 mod terminal_input;
