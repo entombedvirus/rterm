@@ -2,8 +2,8 @@
 [X] move I/O to a different thread
 [X] exit app when shell exits
 [X] send batches of tokens between IO and UI threads instead of one-by-one
+[X] support for scrolling
 [ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
-[ ] support for scrolling
 [ ] configuration based colors / fonts
 [ ] SIMD based ansi escape parsing
 [ ] make neovim run okay

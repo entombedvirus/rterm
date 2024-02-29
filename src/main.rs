@@ -1,9 +1,6 @@
-use std::{
-    os::fd::AsFd,
-    sync::{mpsc, Arc},
-};
+use std::sync::Arc;
 
-use crate::terminal_emulator::TerminalEmulator;
+use terminal_emulator::TerminalEmulator;
 
 mod ansi;
 mod pty;

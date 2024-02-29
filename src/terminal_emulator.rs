@@ -20,7 +20,6 @@ pub struct TerminalEmulator {
     _io_thread: std::thread::JoinHandle<()>,
     pty_fd: Arc<OwnedFd>,
     token_stream: mpsc::Receiver<VecDeque<ansi::AnsiToken>>,
-    window_rect: Option<Rect>,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
     grid: AnsiGrid,
@@ -42,7 +41,6 @@ impl eframe::App for TerminalEmulator {
 
             let char_dims = self
                 .char_dimensions
-                // .get_or_insert_with(|| get_char_size(ctx, &self.regular_font).into());
                 .insert({
                     let dims = ctx.fonts(|fonts| {
                         let width = fonts.glyph_width(&self.regular_font, 'M');
@@ -77,17 +75,17 @@ impl eframe::App for TerminalEmulator {
             })
             .context("input handling failed")?;
 
-            self.read_from_pty(ctx).context("reading from pty failed")?;
+            let read_input = self.read_from_pty(ctx).context("reading from pty failed")?;
             self.write_to_pty().context("writing to pty failed")?;
 
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::TOP), |ui| {
                 ui.set_height(self.grid.num_rows as f32 * char_dims.y);
+                ui.set_width(self.grid.num_cols as f32 * char_dims.x);
                 if self.enable_debug_render {
                     ctx.debug_painter()
                         .debug_rect(ui.max_rect(), Color32::GREEN, "layout");
                 }
 
-                let old_visible_first_line = self.grid.first_visible_line_no;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
@@ -120,15 +118,12 @@ impl eframe::App for TerminalEmulator {
                                     }
                                 }
                             }
-                            self.paint_cursor(ui, &visible_rows)
+                            let cursor_rect = self
+                                .paint_cursor(ui, &visible_rows)
                                 .context("paint_cursor failed")?;
-                            let label_respones = self.render(ctx, ui, visible_rows);
-                            if self.grid.first_visible_line_no < old_visible_first_line {
-                                // the grid scrolled up and we have to make egui match
-                                let num_lines_to_scroll =
-                                    old_visible_first_line - self.grid.first_visible_line_no;
-
-                                // label_respones[2].scroll_to_me(Some(egui::Align::TOP));
+                            self.render(ctx, ui, visible_rows);
+                            if read_input && !ui.clip_rect().contains_rect(cursor_rect) {
+                                ui.scroll_to_rect(cursor_rect, None);
                             }
                             Ok(())
                         },
@@ -136,9 +131,6 @@ impl eframe::App for TerminalEmulator {
             });
             Ok(())
         });
-
-        // Ok(())
-        // });
 
         panel_response.response.context_menu(|ui| {
             ui.horizontal(|ui| {
@@ -172,7 +164,6 @@ impl TerminalEmulator {
             grid: AnsiGrid::new(24, 80, 5000),
             pty_fd,
             token_stream: rx,
-            window_rect: None,
             char_dimensions: None,
             regular_font,
             enable_debug_render: false,
@@ -314,18 +305,11 @@ impl TerminalEmulator {
         &self,
         ui: &mut egui::Ui,
         visible_rows: &Range<usize>,
-    ) -> anyhow::Result<()> {
-        if self.enable_debug_render {
-            ui.ctx().debug_painter().debug_rect(
-                ui.max_rect(),
-                Color32::BLUE,
-                "cursor ui max".to_string(),
-            );
-        }
+    ) -> anyhow::Result<egui::Rect> {
         let (cursor_row_in_screen_space, cursor_col) = self.grid.cursor_position;
         let cursor_row_in_scrollback_space =
-            self.grid.first_visible_line_no + cursor_row_in_screen_space;
-        let num_rows_from_top = cursor_row_in_scrollback_space - visible_rows.start;
+            self.grid.first_visible_line_no() + cursor_row_in_screen_space;
+        let num_rows_from_top = cursor_row_in_scrollback_space.saturating_sub(visible_rows.start);
         let char_dims = self.char_dimensions.unwrap_or(egui::vec2(12.0, 12.0));
         let cursor_rect = Rect::from_min_size(
             egui::pos2(
@@ -335,29 +319,26 @@ impl TerminalEmulator {
             char_dims,
         );
         ui.painter().rect_filled(cursor_rect, 0.0, Color32::GOLD);
-        Ok(())
+        Ok(cursor_rect)
     }
 
-    fn read_from_pty(&mut self, ctx: &egui::Context) -> anyhow::Result<()> {
-        loop {
-            match self.token_stream.try_recv() {
-                Ok(tokens) => {
-                    for token in tokens {
-                        self.grid.update(&token);
-                    }
-                    log::debug!(
-                        "move_cursor: ({}, {}), visible_line: {}",
-                        self.grid.cursor_position.0,
-                        self.grid.cursor_position.1,
-                        self.grid.first_visible_line_no
-                    );
+    fn read_from_pty(&mut self, ctx: &egui::Context) -> anyhow::Result<bool> {
+        match self.token_stream.try_recv() {
+            Ok(tokens) => {
+                for token in tokens {
+                    self.grid.update(&token);
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    anyhow::bail!("shell exit");
-                }
-                Err(mpsc::TryRecvError::Empty) => break Ok(()),
+                // keep requesting painting a new frame as long as we keep getting data. Only
+                // processing a subset of data each frame keeps the UI responsive to the user
+                // sending Ctrl-C etc
+                ctx.request_repaint();
+                Ok(true)
             }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                Ok(false)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(false),
         }
     }
 }
@@ -367,7 +348,6 @@ struct AnsiGrid {
     num_rows: usize,
     num_cols: usize,
     max_rows_scrollback: usize,
-    first_visible_line_no: usize, // in the range (0..max_rows_scrollback)
     cells: Vec<char>,
     text_format: Vec<TextFormat>,
     cursor_position: (usize, usize), // in the range (0..num_rows, 0..num_cols)
@@ -381,12 +361,10 @@ impl AnsiGrid {
         // scrollback has to be at least num_rows
         let max_rows_scrollback = max_rows_scrollback.max(num_rows);
         let cursor_position = (0, 0);
-        let first_visible_line_no = 0;
         Self {
             num_rows,
             num_cols,
             max_rows_scrollback,
-            first_visible_line_no,
             cells: vec![Self::FILL_CHAR; num_rows * num_cols],
             text_format: vec![TextFormat::default(); num_rows * num_cols],
             cursor_position,
@@ -403,7 +381,7 @@ impl AnsiGrid {
             self.num_rows,
             self.num_cols
         );
-        let new_len = (self.first_visible_line_no + new_num_rows) * new_num_cols;
+        let new_len = (self.first_visible_line_no() + new_num_rows) * new_num_cols;
         let mut new_cells = vec![Self::FILL_CHAR; new_len];
         let mut new_format = vec![TextFormat::default(); new_len];
         let line_len = self.num_cols.min(new_num_cols);
@@ -460,22 +438,22 @@ impl AnsiGrid {
             CursorControl(CursorControl::MoveTo { line, col }) => {
                 self.move_cursor(line.saturating_sub(1), col.saturating_sub(1));
             }
-            CursorControl(CursorControl::MoveLineUp) => {
+            CursorControl(CursorControl::ScrollUpFromHome) => {
                 let (cursor_row, _) = self.cursor_position;
                 if cursor_row > 0 {
                     // no need to scroll
                     self.move_cursor_relative(-1, 0);
                 } else {
-                    self.first_visible_line_no = self.first_visible_line_no.saturating_sub(1);
-                    // // shift last num_rows lines down by one line
-                    // let last_row_start = self.cells.len() - self.num_cols;
-                    // let visible_start = self.cursor_position_to_buf_pos(&(0, 0));
-                    // self.cells
-                    //     .copy_within(visible_start..last_row_start, self.num_cols);
-                    // self.text_format
-                    //     .copy_within(visible_start..last_row_start, self.num_cols);
-                    // self.cells[visible_start..self.num_cols].fill(Self::FILL_CHAR);
-                    // self.text_format[visible_start..self.num_cols].fill(TextFormat::default());
+                    let home_row_start = self.cursor_position_to_buf_pos(&(0, 0));
+                    let next_row_start = home_row_start + self.num_cols;
+                    let last_row_start = self.cells.len() - self.num_cols;
+                    self.cells
+                        .copy_within(home_row_start..last_row_start, next_row_start);
+                    self.text_format
+                        .copy_within(home_row_start..last_row_start, next_row_start);
+                    // clear the new row created on top
+                    self.cells[home_row_start..next_row_start].fill(Self::FILL_CHAR);
+                    self.text_format[home_row_start..next_row_start].fill(TextFormat::default());
                 }
             }
             EraseControl(EraseControl::Screen) => {
@@ -518,11 +496,14 @@ impl AnsiGrid {
                 }
             }
             ignored => info!("ignoring ansii token: {ignored:?}"),
-        }
+        };
     }
 
     fn cursor_position_to_buf_pos(&self, (r, c): &(usize, usize)) -> usize {
-        let start = self.first_visible_line_no * self.num_cols;
+        let start = self
+            .cells
+            .len()
+            .saturating_sub(self.num_rows * self.num_cols);
         let offset = r * self.num_cols + c;
         start + offset
     }
@@ -535,14 +516,11 @@ impl AnsiGrid {
             return;
         }
 
+        // if we can't grow the buffer, create room at the end by shifting everything up
         let num_new_lines = new_row - self.num_rows + 1;
         if self.cells.len() >= self.max_rows_scrollback * self.num_cols {
-            // if we can't grow the buffer, create room at the end by shifting everything up
             let _ = self.cells.drain(0..num_new_lines * self.num_cols);
             let _ = self.text_format.drain(0..num_new_lines * self.num_cols);
-        } else {
-            // otherwise, grow the buffer and move the visible area forward
-            self.first_visible_line_no += new_row - self.num_rows + 1;
         }
 
         // we can grow to accomodate
@@ -584,27 +562,10 @@ impl AnsiGrid {
         self.cells.len() / self.num_cols
         // self.num_rows
     }
-}
 
-// See: https://github.com/sphaerophoria/termie/blob/934f23bfe9ff9ff5a8168ba2bc7ac46e8b64bcfa/src/gui.rs#L26C1-L44C2
-fn get_char_size(ctx: &egui::Context, font_id: &egui::FontId) -> (f32, f32) {
-    ctx.fonts(move |fonts| {
-        // NOTE: Glyph width seems to be a little too wide
-        let width = fonts
-            .layout(
-                "M".to_string(),
-                font_id.clone(),
-                Color32::WHITE,
-                f32::INFINITY,
-            )
-            .mesh_bounds
-            .width();
-
-        let height = fonts.row_height(font_id);
-
-        // (width, height + 3.3)
-        (width, height)
-    })
+    fn first_visible_line_no(&self) -> usize {
+        self.cursor_position_to_buf_pos(&(0, 0)) / self.num_cols
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

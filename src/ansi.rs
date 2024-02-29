@@ -143,7 +143,7 @@ fn parse_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
     use CursorControl::*;
     match buf {
         [b'[', rem @ ..] => parse_csi_escape_sequence(rem),
-        [b'M', rem @ ..] => Some((rem, AnsiToken::CursorControl(MoveLineUp))),
+        [b'M', rem @ ..] => Some((rem, AnsiToken::CursorControl(ScrollUpFromHome))),
         [b'7', rem @ ..] => Some((rem, AnsiToken::CursorControl(SavePositionDEC))),
         [b'8', rem @ ..] => Some((rem, AnsiToken::CursorControl(RestorePositionDEC))),
         [other, rem @ ..] => Some((rem, AnsiToken::Unknown(format!("\u{1b}{other}")))),
@@ -225,7 +225,7 @@ pub enum CursorControl {
     MoveLineBeginUp { lines: usize },
     MoveColumn { col: usize },
     RequestPosition,
-    MoveLineUp,
+    ScrollUpFromHome,
     SavePositionDEC,
     RestorePositionDEC,
     SavePositionSCO,
