@@ -493,13 +493,13 @@ mod tests {
         let mut parser = Parser::new();
         for (byte_stream, expected) in byte_streams.into_iter().zip(expected) {
             parser.push_bytes(byte_stream.as_bytes());
-            assert_eq!(expected, parser.tokens().collect::<Vec<_>>());
+            assert_eq!(expected, Vec::from(parser.tokens()));
         }
 
         parser.push_bytes(b"\x1b[A");
         assert_eq!(
             vec![AnsiToken::CursorControl(CursorControl::MoveUp { lines: 1 })],
-            parser.tokens().collect::<Vec<_>>()
+            Vec::from(parser.tokens())
         );
     }
 

@@ -8,8 +8,8 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.79"
 bytes = "1.5.0"
-eframe = "0.26.2"
-egui = "0.26.2"
+eframe = { version = "0.26.2", features = ["persistence"] }
+egui = { version = "0.26.2", features = ["persistence"] }
 env_logger = "0.11.1"
 libc = "0.2.153"
 log = "0.4.20"

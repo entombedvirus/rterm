@@ -16,10 +16,36 @@ use log::info;
 use nix::errno::Errno;
 
 #[derive(Debug)]
-pub struct TerminalEmulator {
+struct ChildProcess {
     _io_thread: std::thread::JoinHandle<()>,
     pty_fd: Arc<OwnedFd>,
     token_stream: mpsc::Receiver<VecDeque<ansi::AnsiToken>>,
+}
+
+impl ChildProcess {
+    fn spawn(ctx: egui::Context) -> Self {
+        let pty_fd = pty::create_pty().expect("create_pty failed");
+        let pty_fd = Arc::new(pty_fd);
+        let (tx, rx) = mpsc::channel();
+
+        let io_fd = Arc::clone(&pty_fd);
+        let _io_thread = std::thread::Builder::new()
+            .name("rterm i/o thread".to_string())
+            .spawn(move || {
+                terminal_input::input_loop(ctx, io_fd, tx);
+            })
+            .expect("Failed to spawn input_loop thread");
+
+        Self {
+            _io_thread,
+            pty_fd,
+            token_stream: rx,
+        }
+    }
+}
+#[derive(Debug)]
+pub struct TerminalEmulator {
+    child_process: Option<ChildProcess>,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
     grid: AnsiGrid,
@@ -58,12 +84,17 @@ impl eframe::App for TerminalEmulator {
                 char_dims.x,
                 char_dims.y,
             );
+
+            let pty_fd = self
+                .child_process
+                .get_or_insert_with(|| ChildProcess::spawn(ctx.clone()))
+                .pty_fd
+                .as_fd();
             if self
                 .grid
                 .resize(winsz.ws_row as usize, winsz.ws_col as usize)
             {
-                pty::update_pty_window_size(self.pty_fd.as_fd(), &winsz)
-                    .context("update_pty_window_size")?;
+                pty::update_pty_window_size(pty_fd, &winsz).context("update_pty_window_size")?;
             }
 
             ui.input(|input_state| -> anyhow::Result<()> {
@@ -143,27 +174,14 @@ impl eframe::App for TerminalEmulator {
 }
 
 impl TerminalEmulator {
-    pub fn new(cc: &eframe::CreationContext<'_>, pty_fd: Arc<OwnedFd>) -> anyhow::Result<Self> {
-        let (tx, rx) = mpsc::channel();
-
-        let io_fd = Arc::clone(&pty_fd);
-        let ctx = cc.egui_ctx.clone();
-        let _io_thread = std::thread::Builder::new()
-            .name("rterm i/o thread".to_string())
-            .spawn(move || {
-                terminal_input::input_loop(ctx, io_fd, tx);
-            })
-            .expect("Failed to spawn input_loop thread");
-
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         let regular_font = FontId::monospace(24.0);
         // cc.egui_ctx.set_pixels_per_point(2.0);
 
         Ok(Self {
-            _io_thread,
+            child_process: None,
             buffered_input: String::new(),
             grid: AnsiGrid::new(24, 80, 5000),
-            pty_fd,
-            token_stream: rx,
             char_dimensions: None,
             regular_font,
             enable_debug_render: false,
@@ -211,9 +229,15 @@ impl TerminalEmulator {
             return Ok(());
         }
 
+        let pty_fd = self
+            .child_process
+            .as_ref()
+            .map(|child| child.pty_fd.as_raw_fd())
+            .context("child process not spawned yet")?;
+
         let mut buf = self.buffered_input.as_bytes();
         while !buf.is_empty() {
-            match nix::unistd::write(self.pty_fd.as_raw_fd(), buf) {
+            match nix::unistd::write(pty_fd, buf) {
                 Ok(num_written) => {
                     buf = &buf[num_written..];
                 }
@@ -323,7 +347,12 @@ impl TerminalEmulator {
     }
 
     fn read_from_pty(&mut self, ctx: &egui::Context) -> anyhow::Result<bool> {
-        match self.token_stream.try_recv() {
+        let token_stream = self
+            .child_process
+            .as_ref()
+            .map(|child| &child.token_stream)
+            .context("child process not spawned yet")?;
+        match token_stream.try_recv() {
             Ok(tokens) => {
                 for token in tokens {
                     self.grid.update(&token);
