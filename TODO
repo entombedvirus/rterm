@@ -3,7 +3,9 @@
 [X] exit app when shell exits
 [X] send batches of tokens between IO and UI threads instead of one-by-one
 [X] support for scrolling
+[ ] remember window size and position through restarts
 [ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
-[ ] configuration based colors / fonts
+[ ] configuration / preferences pane based colors / fonts
+[ ] use small vec for passing terminal output
 [ ] SIMD based ansi escape parsing
 [ ] make neovim run okay
