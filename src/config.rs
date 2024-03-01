@@ -17,14 +17,26 @@ impl Default for Config {
     }
 }
 
-pub fn get(ctx: &egui::Context) -> Config {
-    ctx.data_mut(|d| d.get_persisted(id())).unwrap_or_default()
+pub fn get(storage: Option<&dyn eframe::Storage>) -> Config {
+    storage
+        .and_then(|storage| storage.get_string("config"))
+        .and_then(|config_string| match toml::from_str(&config_string) {
+            Ok(config) => Some(config),
+            Err(err) => {
+                log::warn!("config parsing failed: {err}");
+                None
+            }
+        })
+        .unwrap_or_default()
 }
 
-pub fn set(ctx: &egui::Context, config: Config) {
-    ctx.data_mut(|d| d.insert_persisted(id(), config));
-}
-
-fn id() -> egui::Id {
-    egui::Id::new("config")
+pub fn set(storage: &mut dyn eframe::Storage, config: Config) {
+    match toml::to_string(&config) {
+        Ok(config_string) => {
+            storage.set_string("config", config_string);
+        }
+        Err(err) =>  {
+            log::warn!("config serialization failed: {err}");
+        },
+    }
 }

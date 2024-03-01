@@ -46,20 +46,24 @@ impl ChildProcess {
 }
 #[derive(Debug)]
 pub struct TerminalEmulator {
-    ctx: egui::Context,
     config: Config,
     child_process: Option<ChildProcess>,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
     grid: AnsiGrid,
     enable_debug_render: bool,
+    show_settings: bool,
 }
 
 impl eframe::App for TerminalEmulator {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.set_pixels_per_point(self.config.pixels_per_point.at_least(1.0));
+        if self.show_settings {
+            self.show_settings_window(ctx);
+        }
+
         let regular_font = self.regular_font();
-        let panel_response = CentralPanel::default().show(ctx, |ui| -> anyhow::Result<()> {
+        CentralPanel::default().show(ctx, |ui| -> anyhow::Result<()> {
+            ctx.set_pixels_per_point(self.config.pixels_per_point.at_least(1.0));
             if self.enable_debug_render {
                 ctx.debug_painter()
                     .debug_rect(ui.max_rect(), Color32::YELLOW, "panel");
@@ -166,47 +170,59 @@ impl eframe::App for TerminalEmulator {
             });
             Ok(())
         });
-
-        panel_response.response.context_menu(|ui| {
-            self.settings_ui(ui);
-        });
     }
 
-    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
-        config::set(&self.ctx, self.config.clone());
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        config::set(storage, self.config.clone());
     }
 }
 
 impl TerminalEmulator {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
-        let ctx = cc.egui_ctx.clone();
-        let config = config::get(&ctx);
+        let config = config::get(cc.storage);
 
         Ok(Self {
-            ctx,
             config,
             child_process: None,
             buffered_input: String::new(),
             grid: AnsiGrid::new(24, 80, 5000),
             char_dimensions: None,
             enable_debug_render: false,
+            show_settings: false,
         })
     }
 
-    fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Font Size:");
-            ui.add(DragValue::new(&mut self.config.font_size).clamp_range(2.0..=88.0));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Pixels Per Point");
-            ui.add(
-                DragValue::new(&mut self.config.pixels_per_point)
-                    .clamp_range(1.0..=4.0)
-                    .speed(1.0),
-            );
-        });
-        ui.checkbox(&mut self.enable_debug_render, "Enable Debug Renderer");
+    fn show_settings_window(&mut self, ctx: &egui::Context) {
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("settings_ui"),
+            egui::ViewportBuilder::default()
+                .with_min_inner_size((100.0, 200.0))
+                .with_resizable(false)
+                .with_active(true)
+                .with_title("rterm - settings"),
+            |ctx, _window_class| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Font Size:");
+                        ui.add(DragValue::new(&mut self.config.font_size).clamp_range(2.0..=88.0));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Pixels Per Point");
+                        ui.add(
+                            DragValue::new(&mut self.config.pixels_per_point)
+                                .clamp_range(1.0..=4.0)
+                                .speed(1.0),
+                        );
+                    });
+                    ui.checkbox(&mut self.enable_debug_render, "Enable Debug Renderer");
+                    self.show_settings = !ctx.input_mut(|input| {
+                        input.viewport().close_requested()
+                            || input.consume_key(egui::Modifiers::COMMAND, Key::W)
+                            || input.consume_key(egui::Modifiers::NONE, Key::Escape)
+                    });
+                })
+            },
+        );
     }
 
     pub fn render(
@@ -288,6 +304,15 @@ impl TerminalEmulator {
                 } else {
                     self.buffered_input.push_str(&txt);
                 };
+            }
+            egui::Event::Key {
+                key: Key::Comma,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } if modifiers.mac_cmd => {
+                self.show_settings = true;
             }
             egui::Event::Key {
                 key,
