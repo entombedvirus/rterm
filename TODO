@@ -9,6 +9,7 @@
 [ ] can use any fixed width font from the host system
 [ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
 [ ] configuration / preferences pane based colors / fonts
+[ ] support for italic font
 [ ] use small vec for passing terminal output
 [ ] SIMD based ansi escape parsing
 [ ] make neovim run okay
