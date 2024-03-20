@@ -14,6 +14,7 @@ use crate::{
 use ansi::AsciiControl;
 use anyhow::Context;
 use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, NumExt, Rect};
+use font_kit::font::Font;
 use log::info;
 use nix::errno::Errno;
 
@@ -54,14 +55,28 @@ pub struct TerminalEmulator {
     buffered_input: String,
     grid: AnsiGrid,
     enable_debug_render: bool,
+
     show_settings: bool,
+    settings_state: Option<SettingsState>,
 }
 
 impl eframe::App for TerminalEmulator {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.show_settings {
-            self.show_settings_window(ctx);
+            self.settings_state
+                .get_or_insert_with(|| SettingsState::new(&self.font_manager))
+                .show(
+                    ctx,
+                    &mut self.config,
+                    &mut self.enable_debug_render,
+                    &mut self.show_settings,
+                );
         }
+
+        self.font_manager
+            .get_or_init("regular", &self.config.regular_font);
+        self.font_manager
+            .get_or_init("bold", &self.config.bold_font);
 
         CentralPanel::default().show(ctx, |ui| -> anyhow::Result<()> {
             ctx.set_pixels_per_point(self.config.pixels_per_point.at_least(1.0));
@@ -79,7 +94,8 @@ impl eframe::App for TerminalEmulator {
                 .insert({
                     let regular_font = egui::FontId::new(
                         self.config.font_size,
-                        self.font_manager.font_family(&self.config.regular_font),
+                        self.font_manager
+                            .get_or_init("regular", &self.config.regular_font),
                     );
                     let dims = ctx.fonts(|fonts| {
                         let width = fonts.glyph_width(&regular_font, 'M');
@@ -184,12 +200,13 @@ impl eframe::App for TerminalEmulator {
 
 impl TerminalEmulator {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
-        let config = dbg!(config::get(cc.storage));
+        let mut config = dbg!(config::get(cc.storage));
+        config.bold_font = "VictorMono-Bold".to_string();
 
         // initialize fonts before first frame render
         let mut font_manager = FontManager::new(cc.egui_ctx.clone());
-        font_manager.font_family(&config.regular_font);
-        font_manager.font_family(&config.bold_font);
+        font_manager.get_or_init("regular", &config.regular_font);
+        font_manager.get_or_init("bold", &config.bold_font);
 
         Ok(Self {
             config,
@@ -200,41 +217,11 @@ impl TerminalEmulator {
             char_dimensions: None,
             enable_debug_render: false,
             show_settings: false,
+            settings_state: None,
         })
     }
 
-    fn show_settings_window(&mut self, ctx: &egui::Context) {
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("settings_ui"),
-            egui::ViewportBuilder::default()
-                .with_min_inner_size((100.0, 200.0))
-                .with_resizable(false)
-                .with_active(true)
-                .with_title("rterm - settings"),
-            |ctx, _window_class| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Font Size:");
-                        ui.add(DragValue::new(&mut self.config.font_size).clamp_range(2.0..=88.0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Pixels Per Point");
-                        ui.add(
-                            DragValue::new(&mut self.config.pixels_per_point)
-                                .clamp_range(1.0..=4.0)
-                                .speed(1.0),
-                        );
-                    });
-                    ui.checkbox(&mut self.enable_debug_render, "Enable Debug Renderer");
-                    self.show_settings = !ctx.input_mut(|input| {
-                        input.viewport().close_requested()
-                            || input.consume_key(egui::Modifiers::COMMAND, Key::W)
-                            || input.consume_key(egui::Modifiers::NONE, Key::Escape)
-                    });
-                })
-            },
-        );
-    }
+    fn show_settings_window(&mut self, ctx: &egui::Context) {}
 
     pub fn render(
         &mut self,
@@ -251,11 +238,13 @@ impl TerminalEmulator {
                 layout.text.push(ch);
                 let font_id = egui::FontId::new(
                     self.config.font_size,
-                    self.font_manager.font_family(if format.bold {
-                        &self.config.bold_font
+                    if format.bold {
+                        self.font_manager
+                            .get_or_init("bold", &self.config.bold_font)
                     } else {
-                        &self.config.regular_font
-                    }),
+                        self.font_manager
+                            .get_or_init("regular", &self.config.regular_font)
+                    },
                 );
                 let format = egui::text::TextFormat {
                     font_id,
@@ -429,6 +418,104 @@ impl TerminalEmulator {
             }
             Err(mpsc::TryRecvError::Empty) => Ok(false),
         }
+    }
+}
+
+#[derive(Debug)]
+struct SettingsState {
+    async_font_search_result: Option<anyhow::Result<Vec<Font>>>,
+    async_receiver: mpsc::Receiver<anyhow::Result<Vec<Font>>>,
+}
+
+impl SettingsState {
+    fn new(font_manager: &FontManager) -> Self {
+        let async_receiver = font_manager.async_search_for_monospace_fonts();
+        let async_font_search_result = None;
+        Self {
+            async_font_search_result,
+            async_receiver,
+        }
+    }
+
+    fn get_fonts<'a>(&'a mut self) -> anyhow::Result<Option<&'a [Font]>> {
+        if self.async_font_search_result.is_none() {
+            self.async_font_search_result = match self.async_receiver.try_recv() {
+                Ok(res) => Some(res),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(anyhow::format_err!(
+                    "background thread disconnected without result"
+                ))),
+            }
+        }
+        match &self.async_font_search_result {
+            Some(Ok(fonts)) => Ok(Some(fonts.as_slice())),
+            Some(Err(err)) => Err(anyhow::format_err!("async font search failed: {err}")),
+            None => Ok(None),
+        }
+    }
+
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        config: &mut Config,
+        enable_debug_render: &mut bool,
+        show_settings: &mut bool,
+    ) {
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("settings_ui"),
+            egui::ViewportBuilder::default()
+                .with_min_inner_size((100.0, 200.0))
+                .with_resizable(false)
+                .with_active(true)
+                .with_title("rterm - settings"),
+            |ctx, _window_class| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Font Size:");
+                        ui.add(DragValue::new(&mut config.font_size).clamp_range(2.0..=88.0));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Pixels Per Point");
+                        ui.add(
+                            DragValue::new(&mut config.pixels_per_point)
+                                .clamp_range(1.0..=4.0)
+                                .speed(1.0),
+                        );
+                    });
+                    ui.checkbox(enable_debug_render, "Enable Debug Renderer");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Fonts");
+                        match self.get_fonts() {
+                            Ok(Some(fonts)) => {
+                                egui::ScrollArea::new([false, true]).show(ui, |ui| {
+                                    ui.vertical(|ui| {
+                                        for font in fonts {
+                                            ui.selectable_value(
+                                                &mut config.regular_font,
+                                                font.postscript_name().unwrap(),
+                                                font.full_name(),
+                                            );
+                                        }
+                                    });
+                                });
+                            }
+                            Ok(None) => {
+                                ui.spinner();
+                            }
+                            Err(err) => {
+                                ui.label(format!("font search error: {err}"));
+                            }
+                        }
+                    });
+                    *show_settings = !ctx.input_mut(|input| {
+                        input.viewport().close_requested()
+                            || input.consume_key(egui::Modifiers::COMMAND, Key::W)
+                            || input.consume_key(egui::Modifiers::NONE, Key::Escape)
+                    });
+                })
+            },
+        );
     }
 }
 
