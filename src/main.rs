@@ -2,6 +2,7 @@ use terminal_emulator::TerminalEmulator;
 
 mod ansi;
 mod config;
+mod fonts;
 mod pty;
 mod terminal_emulator;
 mod terminal_input;

@@ -8,11 +8,12 @@ use std::{
 use crate::{
     ansi::{self, SgrControl},
     config::{self, Config},
+    fonts::FontManager,
     pty, terminal_input,
 };
 use ansi::AsciiControl;
 use anyhow::Context;
-use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, FontId, Key, NumExt, Rect};
+use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, NumExt, Rect};
 use log::info;
 use nix::errno::Errno;
 
@@ -47,6 +48,7 @@ impl ChildProcess {
 #[derive(Debug)]
 pub struct TerminalEmulator {
     config: Config,
+    font_manager: FontManager,
     child_process: Option<ChildProcess>,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
@@ -61,7 +63,6 @@ impl eframe::App for TerminalEmulator {
             self.show_settings_window(ctx);
         }
 
-        let regular_font = self.regular_font();
         CentralPanel::default().show(ctx, |ui| -> anyhow::Result<()> {
             ctx.set_pixels_per_point(self.config.pixels_per_point.at_least(1.0));
             if self.enable_debug_render {
@@ -76,6 +77,10 @@ impl eframe::App for TerminalEmulator {
             let char_dims = self
                 .char_dimensions
                 .insert({
+                    let regular_font = egui::FontId::new(
+                        self.config.font_size,
+                        self.font_manager.font_family(&self.config.regular_font),
+                    );
                     let dims = ctx.fonts(|fonts| {
                         let width = fonts.glyph_width(&regular_font, 'M');
                         let height = fonts.row_height(&regular_font);
@@ -179,10 +184,16 @@ impl eframe::App for TerminalEmulator {
 
 impl TerminalEmulator {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
-        let config = config::get(cc.storage);
+        let config = dbg!(config::get(cc.storage));
+
+        // initialize fonts before first frame render
+        let mut font_manager = FontManager::new(cc.egui_ctx.clone());
+        font_manager.font_family(&config.regular_font);
+        font_manager.font_family(&config.bold_font);
 
         Ok(Self {
             config,
+            font_manager,
             child_process: None,
             buffered_input: String::new(),
             grid: AnsiGrid::new(24, 80, 5000),
@@ -226,12 +237,11 @@ impl TerminalEmulator {
     }
 
     pub fn render(
-        &self,
+        &mut self,
         _ctx: &egui::Context,
         ui: &mut egui::Ui,
         visible_rows: Range<usize>,
     ) -> Vec<egui::Response> {
-        ui.style_mut().override_font_id = Some(self.regular_font());
         let mut label_responses = Vec::new();
         for (line_chars, formats) in self.grid.lines(visible_rows) {
             let mut layout = LayoutJob::default();
@@ -239,13 +249,17 @@ impl TerminalEmulator {
             for (&ch, format) in line_chars.into_iter().zip(formats) {
                 let byte_range = layout.text.len()..layout.text.len() + ch.len_utf8();
                 layout.text.push(ch);
-                let format = egui::text::TextFormat {
-                    font_id: self.regular_font(),
-                    color: if format.bold {
-                        ansi::Color::brighter(format.fg_color).into()
+                let font_id = egui::FontId::new(
+                    self.config.font_size,
+                    self.font_manager.font_family(if format.bold {
+                        &self.config.bold_font
                     } else {
-                        format.fg_color.into()
-                    },
+                        &self.config.regular_font
+                    }),
+                );
+                let format = egui::text::TextFormat {
+                    font_id,
+                    color: format.fg_color.into(),
                     ..Default::default()
                 };
                 let section = egui::text::LayoutSection {
@@ -415,10 +429,6 @@ impl TerminalEmulator {
             }
             Err(mpsc::TryRecvError::Empty) => Ok(false),
         }
-    }
-
-    fn regular_font(&self) -> FontId {
-        egui::FontId::new(self.config.font_size, self.config.regular_font.clone())
     }
 }
 

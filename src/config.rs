@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
-    pub regular_font: egui::FontFamily,
+    pub regular_font: String,
+    pub bold_font: String,
     pub font_size: f32,
     pub pixels_per_point: f32,
 }
@@ -10,7 +11,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            regular_font: egui::FontFamily::Monospace,
+            regular_font: "Hack".to_string(),
+            bold_font: "Hack".to_string(),
             font_size: 24.0,
             pixels_per_point: 1.0,
         }
@@ -35,8 +37,8 @@ pub fn set(storage: &mut dyn eframe::Storage, config: Config) {
         Ok(config_string) => {
             storage.set_string("config", config_string);
         }
-        Err(err) =>  {
+        Err(err) => {
             log::warn!("config serialization failed: {err}");
-        },
+        }
     }
 }
