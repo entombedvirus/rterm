@@ -250,6 +250,8 @@ pub enum EraseControl {
 pub enum SgrControl {
     Reset = 0,
     Bold,
+    EnterItalicsMode = 3,
+    ExitItalicsMode = 23,
     ForgroundColor(Color),
     Unimplemented(String),
 }
@@ -259,6 +261,8 @@ impl SgrControl {
         match param {
             0 => Ok(Reset),
             1 => Ok(Bold),
+            3 => Ok(EnterItalicsMode),
+            23 => Ok(ExitItalicsMode),
             num @ (30..=37 | 90..=97) => Ok(ForgroundColor(
                 Color::from_sgr_num(num)
                     .with_context(|| format!("invalid SGR foreground color param: {num}"))?,

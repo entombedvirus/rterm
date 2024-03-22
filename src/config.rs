@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub regular_font: String,
     pub bold_font: String,
+    pub bold_italic_font: String,
+    pub italic_font: String,
     pub font_size: f32,
 }
 
@@ -12,6 +14,8 @@ impl Default for Config {
         Self {
             regular_font: "Hack".to_string(),
             bold_font: "Hack".to_string(),
+            bold_italic_font: "Hack".to_string(),
+            italic_font: "Hack".to_string(),
             font_size: 24.0,
         }
     }

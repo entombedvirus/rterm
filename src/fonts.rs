@@ -1,6 +1,7 @@
 use std::{fs, path::PathBuf, sync::mpsc};
 
 use anyhow::Context;
+use egui::TextBuffer;
 
 #[derive(Debug)]
 pub struct FontManager {
@@ -33,10 +34,18 @@ impl FontManager {
         font_family_name: &str,
         font_postscript_name: &str,
     ) -> egui::FontFamily {
-        let font_data = self.font_defs.font_data.get(font_postscript_name);
-        match font_data {
-            None => self.init_font(font_family_name, font_postscript_name),
-            Some(_) => egui::FontFamily::Name(font_family_name.into()),
+        let key = egui::FontFamily::Name(font_family_name.into());
+        let needs_init = self
+            .font_defs
+            .families
+            .get(&key)
+            .and_then(|font_names| font_names.first())
+            .map(|font_name| font_name.as_str() != font_postscript_name)
+            .unwrap_or(true);
+        if needs_init {
+            self.init_font(font_family_name, font_postscript_name)
+        } else {
+            key
         }
     }
 
@@ -55,7 +64,7 @@ impl FontManager {
                 log::warn!(
                     "failed to read font {font_postscript_name}: {err1}. using fallback font"
                 );
-                self.attempt_fallback(&font_postscript_name)
+                self.attempt_fallback()
             })
             .and_then(|font_data| {
                 self.register_font(font_family_name, font_postscript_name, font_data)
@@ -67,14 +76,14 @@ impl FontManager {
             })
     }
 
-    fn attempt_fallback(&mut self, font_postscript_name: &str) -> anyhow::Result<egui::FontData> {
+    fn attempt_fallback(&mut self) -> anyhow::Result<egui::FontData> {
         self.font_defs
             .families
             .get(&egui::FontFamily::Monospace)
             .and_then(|font_names| font_names.first())
             .and_then(|font_name| self.font_defs.font_data.get(font_name))
             .cloned()
-            .with_context(|| format!("failed to find fallback font for: {font_postscript_name}"))
+            .context("failed to find fallback font")
     }
 
     fn register_font(

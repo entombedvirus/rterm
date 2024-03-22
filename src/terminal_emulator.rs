@@ -72,11 +72,7 @@ impl eframe::App for TerminalEmulator {
                 );
         }
 
-        self.font_manager
-            .get_or_init("regular", &self.config.regular_font);
-        self.font_manager
-            .get_or_init("bold", &self.config.bold_font);
-
+        Self::init_fonts(&self.config, &mut self.font_manager);
         CentralPanel::default().show(ctx, |ui| -> anyhow::Result<()> {
             if self.enable_debug_render {
                 ctx.debug_painter()
@@ -198,13 +194,11 @@ impl eframe::App for TerminalEmulator {
 
 impl TerminalEmulator {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
-        let mut config = dbg!(config::get(cc.storage));
-        config.bold_font = "VictorMono-Bold".to_string();
+        let config = dbg!(config::get(cc.storage));
 
         // initialize fonts before first frame render
         let mut font_manager = FontManager::new(cc.egui_ctx.clone());
-        font_manager.get_or_init("regular", &config.regular_font);
-        font_manager.get_or_init("bold", &config.bold_font);
+        Self::init_fonts(&config, &mut font_manager);
 
         Ok(Self {
             config,
@@ -217,6 +211,17 @@ impl TerminalEmulator {
             show_settings: false,
             settings_state: None,
         })
+    }
+
+    fn init_fonts(config: &Config, font_manager: &mut FontManager) {
+        for (family_name, font_postscript_name) in [
+            ("regular", &config.regular_font),
+            ("bold", &config.bold_font),
+            ("bold_italic", &config.bold_italic_font),
+            ("italic", &config.italic_font),
+        ] {
+            font_manager.get_or_init(family_name, font_postscript_name);
+        }
     }
 
     pub fn render(
@@ -234,9 +239,15 @@ impl TerminalEmulator {
                 layout.text.push(ch);
                 let font_id = egui::FontId::new(
                     self.config.font_size,
-                    if format.bold {
+                    if format.bold && format.italic {
+                        self.font_manager
+                            .get_or_init("bold_italic", &self.config.bold_italic_font)
+                    } else if format.bold {
                         self.font_manager
                             .get_or_init("bold", &self.config.bold_font)
+                    } else if format.italic {
+                        self.font_manager
+                            .get_or_init("italic", &self.config.italic_font)
                     } else {
                         self.font_manager
                             .get_or_init("regular", &self.config.regular_font)
@@ -491,8 +502,26 @@ impl SettingsState {
                                 ui.horizontal(|ui| {
                                     Self::font_ui(
                                         ui,
+                                        "Italic",
+                                        &mut config.italic_font,
+                                        fonts,
+                                        should_scroll,
+                                    )
+                                });
+                                ui.horizontal(|ui| {
+                                    Self::font_ui(
+                                        ui,
                                         "Bold",
                                         &mut config.bold_font,
+                                        fonts,
+                                        should_scroll,
+                                    )
+                                });
+                                ui.horizontal(|ui| {
+                                    Self::font_ui(
+                                        ui,
+                                        "Bold Italic",
+                                        &mut config.bold_italic_font,
                                         fonts,
                                         should_scroll,
                                     )
@@ -525,24 +554,27 @@ impl SettingsState {
         fonts: &[FontDesc],
         should_scroll: bool,
     ) {
-        ui.label(label_text);
-        egui::ScrollArea::new([false, true])
-            .id_source(label_text)
-            .max_height(60.0)
-            .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    for font in fonts {
-                        let resp = ui.selectable_value(
-                            dest,
-                            font.postscript_name.clone(),
-                            font.display_name.clone(),
-                        );
-                        if should_scroll && *dest == font.postscript_name {
-                            resp.scroll_to_me(Some(egui::Align::Center));
+        ui.columns(2, |cols| {
+            cols[0].label(label_text);
+
+            egui::ScrollArea::new([false, true])
+                .id_source(label_text)
+                .max_height(60.0)
+                .show(&mut cols[1], |ui| {
+                    ui.vertical(|ui| {
+                        for font in fonts {
+                            let resp = ui.selectable_value(
+                                dest,
+                                font.postscript_name.clone(),
+                                font.display_name.clone(),
+                            );
+                            if should_scroll && *dest == font.postscript_name {
+                                resp.scroll_to_me(Some(egui::Align::Center));
+                            }
                         }
-                    }
+                    });
                 });
-            });
+        });
     }
 }
 
@@ -686,6 +718,12 @@ impl AnsiGrid {
                         SgrControl::Bold => {
                             self.current_text_format.bold = true;
                         }
+                        SgrControl::EnterItalicsMode => {
+                            self.current_text_format.italic = true;
+                        }
+                        SgrControl::ExitItalicsMode => {
+                            self.current_text_format.italic = false;
+                        }
                         SgrControl::ForgroundColor(color) => {
                             self.current_text_format.fg_color = *color;
                         }
@@ -775,6 +813,7 @@ impl AnsiGrid {
 struct TextFormat {
     fg_color: ansi::Color,
     bold: bool,
+    italic: bool,
 }
 
 impl Default for TextFormat {
@@ -782,6 +821,7 @@ impl Default for TextFormat {
         Self {
             fg_color: ansi::Color::BrightBlack,
             bold: false,
+            italic: false,
         }
     }
 }

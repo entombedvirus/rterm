@@ -8,6 +8,7 @@
 [X] move settings to a new window
 [X] can use any fixed width font from the host system
 [X] configuration / preferences pane based fonts
+[X] add support for italic and bold + italic text
 [ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
 [ ] configuration / preferences pane based colors
 [ ] support for italic font

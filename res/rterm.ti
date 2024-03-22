@@ -42,3 +42,9 @@ rterm|80-column dumb tty,
 	ri=\EM,
 # scroll_forward              ind       sf     scroll text up (P)
 	ind=\n,
+# enter_italics_mode          sitm     ZH     Enter italic mode
+    sitm=\E[3m,
+# exit_italics_mode           ritm     ZR     End italic mode
+    ritm=\E[23m,
+# enter_bold_mode             bold     md     turn on bold (extra bright) mode
+	bold=\E[1m,
