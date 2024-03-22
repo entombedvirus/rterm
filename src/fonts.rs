@@ -1,31 +1,27 @@
-use std::sync::mpsc;
+use std::{fs, path::PathBuf, sync::mpsc};
 
 use anyhow::Context;
-use font_kit::font::Font;
 
 #[derive(Debug)]
 pub struct FontManager {
     ctx: egui::Context,
     font_defs: egui::FontDefinitions,
-    cached_monospace_fonts: Option<Vec<font_kit::font::Font>>,
 }
 
 impl FontManager {
     pub fn new(ctx: egui::Context) -> Self {
         let font_defs = egui::FontDefinitions::default();
-        Self {
-            ctx,
-            font_defs,
-            cached_monospace_fonts: None,
-        }
+        Self { ctx, font_defs }
     }
 
-    pub fn async_search_for_monospace_fonts(&self) -> mpsc::Receiver<anyhow::Result<Vec<Font>>> {
+    pub fn async_search_for_monospace_fonts(
+        &self,
+    ) -> mpsc::Receiver<anyhow::Result<Vec<FontDesc>>> {
         let (tx, rx) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("rterm - font searcher".to_string())
             .spawn(move || {
-                let search_result = search_for_monospace_fonts();
+                let search_result = native::search_for_monospace_fonts2();
                 let _ = tx.send(search_result); // will not block since chan is buffered
             })
             .expect("spawning background thread failed");
@@ -38,23 +34,37 @@ impl FontManager {
         font_postscript_name: &str,
     ) -> egui::FontFamily {
         let font_data = self.font_defs.font_data.get(font_postscript_name);
-        if font_data.is_none() {
-            self.search_system(font_postscript_name)
-                .or_else(|err1| {
-                    log::warn!("failed to register font: {err1}. using fallback font");
-                    self.attempt_fallback(font_postscript_name)
-                })
-                .and_then(|font_data| {
-                    self.register_font(font_family_name, font_postscript_name, font_data)
-                })
-                .map(|_| egui::FontFamily::Name(font_family_name.into()))
-                .unwrap_or_else(|err2| {
-                    log::warn!("failed to choose a fallback: {err2}");
-                    egui::FontFamily::Monospace
-                })
-        } else {
-            egui::FontFamily::Name(font_family_name.into())
+        match font_data {
+            None => self.init_font(font_family_name, font_postscript_name),
+            Some(_) => egui::FontFamily::Name(font_family_name.into()),
         }
+    }
+
+    fn init_font(
+        &mut self,
+        font_family_name: &str,
+        font_postscript_name: &str,
+    ) -> egui::FontFamily {
+        native::lookup_font_path_by_postscript_name(font_postscript_name)
+            .and_then(|font_path| {
+                fs::read(&font_path)
+                    .map(egui::FontData::from_owned)
+                    .map_err(|err| anyhow::format_err!("{font_path:?}: {err}"))
+            })
+            .or_else(|err1| {
+                log::warn!(
+                    "failed to read font {font_postscript_name}: {err1}. using fallback font"
+                );
+                self.attempt_fallback(&font_postscript_name)
+            })
+            .and_then(|font_data| {
+                self.register_font(font_family_name, font_postscript_name, font_data)
+                    .map(|_| egui::FontFamily::Name(font_family_name.into()))
+            })
+            .unwrap_or_else(|err2| {
+                log::warn!("failed to choose a fallback: {err2}");
+                egui::FontFamily::Monospace
+            })
     }
 
     fn attempt_fallback(&mut self, font_postscript_name: &str) -> anyhow::Result<egui::FontData> {
@@ -65,16 +75,6 @@ impl FontManager {
             .and_then(|font_name| self.font_defs.font_data.get(font_name))
             .cloned()
             .with_context(|| format!("failed to find fallback font for: {font_postscript_name}"))
-    }
-
-    fn search_system(&self, font_postscript_name: &str) -> anyhow::Result<egui::FontData> {
-        let font_source = font_kit::source::SystemSource::new();
-        let font_handle = font_source
-            .select_by_postscript_name(font_postscript_name)
-            .with_context(|| format!("unable to resolve font with name {font_postscript_name}"))?;
-        let font = font_handle.load().context("font loading failed")?;
-        let font_bytes = font.copy_font_data().context("reading font data failed")?;
-        Ok(egui::FontData::from_owned((*font_bytes).clone()))
     }
 
     fn register_font(
@@ -95,13 +95,72 @@ impl FontManager {
     }
 }
 
-// can be very slow since it will scan and load all fonts in the system
-pub fn search_for_monospace_fonts() -> anyhow::Result<Vec<Font>> {
-    let font_source = font_kit::source::SystemSource::new();
-    let all_fonts = font_source.all_fonts().context("all_fonts failed")?;
-    Ok(all_fonts
-        .into_iter()
-        .flat_map(|handle| handle.load().ok())
-        .filter(|font| font.is_monospace())
-        .collect())
+#[derive(Debug)]
+pub struct FontDesc {
+    pub display_name: String,
+    pub postscript_name: String,
+    pub font_path: PathBuf,
+}
+
+impl TryFrom<&core_text::font_descriptor::CTFontDescriptor> for FontDesc {
+    type Error = anyhow::Error;
+
+    fn try_from(fd: &core_text::font_descriptor::CTFontDescriptor) -> Result<Self, Self::Error> {
+        let font_path = fd.font_path().context("font path is missing")?;
+        let display_name = fd.display_name();
+        let postscript_name = fd.font_name();
+        Ok(FontDesc {
+            display_name,
+            postscript_name,
+            font_path,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod native {
+    use super::FontDesc;
+    use anyhow::Context;
+    use core_foundation::{
+        array::CFArray, base::TCFType, dictionary::CFDictionary, number::CFNumber, string::CFString,
+    };
+    use core_text::font_descriptor::{
+        kCTFontMonoSpaceTrait, kCTFontSymbolicTrait, kCTFontTraitsAttribute,
+    };
+    use std::{ops::Deref, path::PathBuf};
+
+    pub fn search_for_monospace_fonts2() -> anyhow::Result<Vec<FontDesc>> {
+        // query os x font system for all installed monospace fonts
+        let traits_dict = CFDictionary::from_CFType_pairs(&[(
+            unsafe { CFString::wrap_under_get_rule(kCTFontSymbolicTrait) },
+            CFNumber::from(kCTFontMonoSpaceTrait as i32),
+        )]);
+        let attributes = CFDictionary::from_CFType_pairs(&[(
+            unsafe { CFString::wrap_under_get_rule(kCTFontTraitsAttribute) },
+            traits_dict.as_CFType(),
+        )]);
+        let query =
+            CFArray::from_CFTypes(&[core_text::font_descriptor::new_from_attributes(&attributes)]);
+        let font_collection = core_text::font_collection::new_from_descriptors(&query);
+        let matching_font_decs = font_collection
+            .get_descriptors()
+            .context("failed to get query font system")?;
+
+        let mut fonts: Vec<FontDesc> = matching_font_decs
+            .into_iter()
+            .filter_map(|fd| fd.deref().try_into().ok())
+            .collect();
+        fonts.sort_unstable_by(|a, b| a.display_name.cmp(&b.display_name));
+        Ok(fonts)
+    }
+
+    pub fn lookup_font_path_by_postscript_name(
+        font_postscript_name: &str,
+    ) -> anyhow::Result<PathBuf> {
+        let font_name: CFString = font_postscript_name
+            .parse()
+            .map_err(|_| anyhow::format_err!("invalid font postscript name"))?;
+        let font_desc = core_text::font_descriptor::new_from_postscript_name(&font_name);
+        font_desc.font_path().context("font path is missing")
+    }
 }

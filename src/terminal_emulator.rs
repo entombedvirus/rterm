@@ -8,13 +8,12 @@ use std::{
 use crate::{
     ansi::{self, SgrControl},
     config::{self, Config},
-    fonts::FontManager,
+    fonts::{FontDesc, FontManager},
     pty, terminal_input,
 };
 use ansi::AsciiControl;
 use anyhow::Context;
 use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, NumExt, Rect};
-use font_kit::font::Font;
 use log::info;
 use nix::errno::Errno;
 
@@ -221,8 +220,6 @@ impl TerminalEmulator {
         })
     }
 
-    fn show_settings_window(&mut self, ctx: &egui::Context) {}
-
     pub fn render(
         &mut self,
         _ctx: &egui::Context,
@@ -423,8 +420,9 @@ impl TerminalEmulator {
 
 #[derive(Debug)]
 struct SettingsState {
-    async_font_search_result: Option<anyhow::Result<Vec<Font>>>,
-    async_receiver: mpsc::Receiver<anyhow::Result<Vec<Font>>>,
+    async_font_search_result: Option<anyhow::Result<Vec<FontDesc>>>,
+    async_receiver: mpsc::Receiver<anyhow::Result<Vec<FontDesc>>>,
+    should_scroll: bool,
 }
 
 impl SettingsState {
@@ -434,10 +432,11 @@ impl SettingsState {
         Self {
             async_font_search_result,
             async_receiver,
+            should_scroll: true,
         }
     }
 
-    fn get_fonts<'a>(&'a mut self) -> anyhow::Result<Option<&'a [Font]>> {
+    fn get_fonts<'a>(&'a mut self) -> anyhow::Result<Option<&'a [FontDesc]>> {
         if self.async_font_search_result.is_none() {
             self.async_font_search_result = match self.async_receiver.try_recv() {
                 Ok(res) => Some(res),
@@ -484,30 +483,39 @@ impl SettingsState {
                     });
                     ui.checkbox(enable_debug_render, "Enable Debug Renderer");
 
-                    ui.horizontal(|ui| {
-                        ui.label("Fonts");
-                        match self.get_fonts() {
-                            Ok(Some(fonts)) => {
-                                egui::ScrollArea::new([false, true]).show(ui, |ui| {
-                                    ui.vertical(|ui| {
-                                        for font in fonts {
-                                            ui.selectable_value(
-                                                &mut config.regular_font,
-                                                font.postscript_name().unwrap(),
-                                                font.full_name(),
-                                            );
-                                        }
-                                    });
-                                });
-                            }
-                            Ok(None) => {
-                                ui.spinner();
-                            }
-                            Err(err) => {
-                                ui.label(format!("font search error: {err}"));
-                            }
+                    ui.separator();
+                    ui.heading("Fonts");
+                    let should_scroll = self.should_scroll;
+                    match self.get_fonts() {
+                        Ok(Some(fonts)) => {
+                            ui.horizontal(|ui| {
+                                Self::font_ui(
+                                    ui,
+                                    "Regular",
+                                    &mut config.regular_font,
+                                    fonts,
+                                    should_scroll,
+                                )
+                            });
+                            ui.horizontal(|ui| {
+                                Self::font_ui(
+                                    ui,
+                                    "Bold",
+                                    &mut config.bold_font,
+                                    fonts,
+                                    should_scroll,
+                                )
+                            });
+                            self.should_scroll = false;
                         }
-                    });
+                        Ok(None) => {
+                            ui.spinner();
+                        }
+                        Err(err) => {
+                            ui.label(format!("font search error: {err}"));
+                        }
+                    }
+
                     *show_settings = !ctx.input_mut(|input| {
                         input.viewport().close_requested()
                             || input.consume_key(egui::Modifiers::COMMAND, Key::W)
@@ -516,6 +524,33 @@ impl SettingsState {
                 })
             },
         );
+    }
+
+    fn font_ui(
+        ui: &mut egui::Ui,
+        label_text: &str,
+        dest: &mut String,
+        fonts: &[FontDesc],
+        should_scroll: bool,
+    ) {
+        ui.label(label_text);
+        egui::ScrollArea::new([false, true])
+            .id_source(label_text)
+            .max_height(60.0)
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    for font in fonts {
+                        let resp = ui.selectable_value(
+                            dest,
+                            font.postscript_name.clone(),
+                            font.display_name.clone(),
+                        );
+                        if should_scroll && *dest == font.postscript_name {
+                            resp.scroll_to_me(Some(egui::Align::Center));
+                        }
+                    }
+                });
+            });
     }
 }
 

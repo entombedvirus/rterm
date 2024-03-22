@@ -6,9 +6,10 @@
 [X] remember window size and position through restarts
 [X] remember font size through restarts
 [X] move settings to a new window
-[ ] can use any fixed width font from the host system
+[X] can use any fixed width font from the host system
+[X] configuration / preferences pane based fonts
 [ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
-[ ] configuration / preferences pane based colors / fonts
+[ ] configuration / preferences pane based colors
 [ ] support for italic font
 [ ] use small vec for passing terminal output
 [ ] SIMD based ansi escape parsing
