@@ -13,7 +13,7 @@ use crate::{
 };
 use ansi::AsciiControl;
 use anyhow::Context;
-use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, NumExt, Rect};
+use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, Rect};
 use log::info;
 use nix::errno::Errno;
 
@@ -78,7 +78,6 @@ impl eframe::App for TerminalEmulator {
             .get_or_init("bold", &self.config.bold_font);
 
         CentralPanel::default().show(ctx, |ui| -> anyhow::Result<()> {
-            ctx.set_pixels_per_point(self.config.pixels_per_point.at_least(1.0));
             if self.enable_debug_render {
                 ctx.debug_painter()
                     .debug_rect(ui.max_rect(), Color32::YELLOW, "panel");
@@ -472,14 +471,6 @@ impl SettingsState {
                     ui.horizontal(|ui| {
                         ui.label("Font Size:");
                         ui.add(DragValue::new(&mut config.font_size).clamp_range(2.0..=88.0));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Pixels Per Point");
-                        ui.add(
-                            DragValue::new(&mut config.pixels_per_point)
-                                .clamp_range(1.0..=4.0)
-                                .speed(1.0),
-                        );
                     });
                     ui.checkbox(enable_debug_render, "Enable Debug Renderer");
 

@@ -5,7 +5,6 @@ pub struct Config {
     pub regular_font: String,
     pub bold_font: String,
     pub font_size: f32,
-    pub pixels_per_point: f32,
 }
 
 impl Default for Config {
@@ -14,7 +13,6 @@ impl Default for Config {
             regular_font: "Hack".to_string(),
             bold_font: "Hack".to_string(),
             font_size: 24.0,
-            pixels_per_point: 1.0,
         }
     }
 }
