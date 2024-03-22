@@ -484,37 +484,38 @@ impl SettingsState {
                     ui.checkbox(enable_debug_render, "Enable Debug Renderer");
 
                     ui.separator();
-                    ui.heading("Fonts");
-                    let should_scroll = self.should_scroll;
-                    match self.get_fonts() {
-                        Ok(Some(fonts)) => {
-                            ui.horizontal(|ui| {
-                                Self::font_ui(
-                                    ui,
-                                    "Regular",
-                                    &mut config.regular_font,
-                                    fonts,
-                                    should_scroll,
-                                )
-                            });
-                            ui.horizontal(|ui| {
-                                Self::font_ui(
-                                    ui,
-                                    "Bold",
-                                    &mut config.bold_font,
-                                    fonts,
-                                    should_scroll,
-                                )
-                            });
-                            self.should_scroll = false;
+                    ui.collapsing("Fonts", |ui| {
+                        let should_scroll = self.should_scroll;
+                        match self.get_fonts() {
+                            Ok(Some(fonts)) => {
+                                ui.horizontal(|ui| {
+                                    Self::font_ui(
+                                        ui,
+                                        "Regular",
+                                        &mut config.regular_font,
+                                        fonts,
+                                        should_scroll,
+                                    )
+                                });
+                                ui.horizontal(|ui| {
+                                    Self::font_ui(
+                                        ui,
+                                        "Bold",
+                                        &mut config.bold_font,
+                                        fonts,
+                                        should_scroll,
+                                    )
+                                });
+                                self.should_scroll = false;
+                            }
+                            Ok(None) => {
+                                ui.spinner();
+                            }
+                            Err(err) => {
+                                ui.label(format!("font search error: {err}"));
+                            }
                         }
-                        Ok(None) => {
-                            ui.spinner();
-                        }
-                        Err(err) => {
-                            ui.label(format!("font search error: {err}"));
-                        }
-                    }
+                    });
 
                     *show_settings = !ctx.input_mut(|input| {
                         input.viewport().close_requested()
