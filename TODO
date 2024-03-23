@@ -17,11 +17,12 @@
 [X] add support for different modes: bracketed paste
 [X] get zsh prompt to render
 [X] fix MoveLeft / MoveRight cursor control
+[X] make reset builtin command work
+[ ] add support for alternate screen
 [ ] add support for 24bit true colors
 [ ] add support for underline
 [ ] add support for overline
 [ ] add support for strikethrough
-[ ] make reset builtin command work
 [ ] make fzf ctrl-r work
 [ ] add transparency support
 [ ] add support for DECCKM(arrow keys)

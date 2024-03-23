@@ -1,6 +1,6 @@
 use anyhow::Context;
 use bytes::{Buf, BytesMut};
-use std::{collections::VecDeque, io::BufRead};
+use std::collections::VecDeque;
 
 #[derive(Debug)]
 pub struct Parser {
@@ -166,21 +166,40 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
 
 fn parse_osc_escape_sequence(mut buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
     let mut ctrl_buf = Vec::new();
-    let _ = buf.read_until(0x07, &mut ctrl_buf).ok()?;
-    if let Some((0x07, ctrl_bytes)) = ctrl_buf.split_last() {
-        let token = match ctrl_bytes {
-            // ESC ]0;this is the window title BEL
-            [b'0', b';', title_bytes @ ..] => AnsiToken::OSC(OscControl::SetWindowTitle(
-                String::from_utf8_lossy(title_bytes).to_string(),
-            )),
-            _ => AnsiToken::OSC(OscControl::Unknown(ctrl_bytes.to_vec())),
-        };
-
-        Some((buf, token))
-    } else {
-        // reached EOF without seeing terminating seq. try again
-        None
+    let mut terminated = false;
+    while let Some((&b, rem)) = buf.split_first() {
+        buf = rem;
+        match b {
+            0x07 => {
+                terminated = true;
+                break;
+            }
+            0x1b => {
+                if let Some(0x5c) = rem.get(0) {
+                    terminated = true;
+                    buf = &buf[1..];
+                    break;
+                } else {
+                    ctrl_buf.push(0x1b);
+                }
+            }
+            _ => ctrl_buf.push(b),
+        }
     }
+    if !terminated {
+        // reached EOF without seeing terminating seq. try again
+        return None;
+    }
+    let token = match ctrl_buf.as_slice() {
+        [] => AnsiToken::OSC(OscControl::Reset),
+        // ESC ]0;this is the window title BEL
+        [b'0', b';', title_bytes @ ..] => AnsiToken::OSC(OscControl::SetWindowTitle(
+            String::from_utf8_lossy(title_bytes).to_string(),
+        )),
+        _ => AnsiToken::OSC(OscControl::Unknown(ctrl_buf)),
+    };
+
+    Some((buf, token))
 }
 
 fn parse_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
@@ -191,6 +210,7 @@ fn parse_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
         [b'M', rem @ ..] => Some((rem, AnsiToken::CursorControl(ScrollUpFromHome))),
         [b'7', rem @ ..] => Some((rem, AnsiToken::CursorControl(SavePositionDEC))),
         [b'8', rem @ ..] => Some((rem, AnsiToken::CursorControl(RestorePositionDEC))),
+        [b'c', rem @ ..] => Some((rem, AnsiToken::ResetToInitialState)),
         [other, rem @ ..] => Some((rem, AnsiToken::Unknown(format!("\u{1b}{other}")))),
         _ => None,
     }
@@ -258,6 +278,7 @@ pub enum AnsiToken {
     OSC(OscControl),
     ModeControl(ModeControl),
     Unknown(String),
+    ResetToInitialState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,6 +356,7 @@ impl SgrControl {
 pub enum OscControl {
     SetWindowTitle(String),
     Unknown(Vec<u8>),
+    Reset,
 }
 
 #[allow(unused)]

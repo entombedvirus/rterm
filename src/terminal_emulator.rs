@@ -457,6 +457,7 @@ impl TerminalEmulator {
     fn handle_osc_token(&self, ctx: &egui::Context, osc_ctrl: ansi::OscControl) {
         use ansi::OscControl::*;
         match osc_ctrl {
+            Reset => (),
             SetWindowTitle(title) => ctx.send_viewport_cmd(egui::ViewportCommand::Title(title)),
             Unknown(_) => unimplemented!(),
         }
@@ -684,6 +685,11 @@ impl AnsiGrid {
         use ansi::EraseControl;
 
         match token {
+            ResetToInitialState => {
+                self.clear_screen();
+                self.current_text_format = TextFormat::default();
+                self.move_cursor(0, 0);
+            }
             Text(txt) => {
                 for ch in txt.chars() {
                     self.update_cursor_cell(ch);
@@ -736,11 +742,7 @@ impl AnsiGrid {
                 }
             }
             EraseControl(EraseControl::Screen) => {
-                let visible_start = self.cursor_position_to_buf_pos(&(0, 0));
-                let visible_end =
-                    self.cursor_position_to_buf_pos(&(self.num_rows - 1, self.num_cols - 1));
-                self.cells[visible_start..visible_end].fill(Self::FILL_CHAR);
-                self.text_format[visible_start..visible_end].fill(TextFormat::default());
+                self.clear_screen();
             }
             EraseControl(EraseControl::FromCursorToEndOfScreen) => {
                 let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_position);
@@ -853,6 +855,13 @@ impl AnsiGrid {
 
     fn first_visible_line_no(&self) -> usize {
         self.cursor_position_to_buf_pos(&(0, 0)) / self.num_cols
+    }
+
+    fn clear_screen(&mut self) {
+        let visible_start = self.cursor_position_to_buf_pos(&(0, 0));
+        let visible_end = self.cursor_position_to_buf_pos(&(self.num_rows - 1, self.num_cols - 1));
+        self.cells[visible_start..visible_end].fill(Self::FILL_CHAR);
+        self.text_format[visible_start..visible_end].fill(TextFormat::default());
     }
 }
 
