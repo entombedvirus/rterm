@@ -73,118 +73,121 @@ impl eframe::App for TerminalEmulator {
         }
 
         Self::init_fonts(&self.config, &mut self.font_manager);
-        CentralPanel::default().show(ctx, |ui| -> anyhow::Result<()> {
-            if self.enable_debug_render {
-                ctx.debug_painter()
-                    .debug_rect(ui.max_rect(), Color32::YELLOW, "panel");
-            }
-
-            let spacing = ui.spacing_mut();
-            spacing.item_spacing = egui::Vec2::ZERO;
-            spacing.window_margin = egui::Margin::ZERO;
-
-            let char_dims = self
-                .char_dimensions
-                .insert({
-                    let regular_font = egui::FontId::new(
-                        self.config.font_size,
-                        self.font_manager
-                            .get_or_init("regular", &self.config.regular_font),
-                    );
-                    let dims = ctx.fonts(|fonts| {
-                        let width = fonts.glyph_width(&regular_font, 'M');
-                        let height = fonts.row_height(&regular_font);
-                        (width, height).into()
-                    });
-                    // needed to avoid floating point errors when multiplying
-                    ui.painter().round_vec_to_pixels(dims)
-                })
-                .clone();
-
-            let winsz = pty::compute_winsize(
-                ui.painter().round_to_pixel(ui.available_width()),
-                ui.painter().round_to_pixel(ui.available_height()),
-                char_dims.x,
-                char_dims.y,
-            );
-
-            let pty_fd = self
-                .child_process
-                .get_or_insert_with(|| ChildProcess::spawn(ctx.clone()))
-                .pty_fd
-                .as_fd();
-            if self
-                .grid
-                .resize(winsz.ws_row as usize, winsz.ws_col as usize)
-            {
-                pty::update_pty_window_size(pty_fd, &winsz).context("update_pty_window_size")?;
-            }
-
-            ui.input(|input_state| -> anyhow::Result<()> {
-                for event in &input_state.events {
-                    self.handle_event(input_state, event)
-                        .context("handling event failed")?;
-                }
-                Ok(())
-            })
-            .context("input handling failed")?;
-
-            let read_input = self.read_from_pty(ctx).context("reading from pty failed")?;
-            self.write_to_pty().context("writing to pty failed")?;
-
-            ui.with_layout(egui::Layout::top_down_justified(egui::Align::TOP), |ui| {
-                ui.set_height(self.grid.num_rows as f32 * char_dims.y);
-                ui.set_width(self.grid.num_cols as f32 * char_dims.x);
+        CentralPanel::default()
+            .frame(egui::Frame::default().fill(ansi::Color::DefaultBg.into()))
+            .show(ctx, |ui| -> anyhow::Result<()> {
                 if self.enable_debug_render {
                     ctx.debug_painter()
-                        .debug_rect(ui.max_rect(), Color32::GREEN, "layout");
+                        .debug_rect(ui.max_rect(), Color32::YELLOW, "panel");
                 }
 
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show_rows(
-                        ui,
-                        char_dims.y,
-                        self.grid.num_current_rows(),
-                        |ui, visible_rows| -> anyhow::Result<()> {
-                            if self.enable_debug_render {
-                                ctx.debug_painter().debug_rect(
-                                    ui.max_rect(),
-                                    Color32::WHITE,
-                                    "scroll_area",
-                                );
-                                for r in 0..visible_rows.len() {
-                                    for c in 0..self.grid.num_cols {
-                                        let min = egui::Vec2::new(
-                                            c as f32 * char_dims.x,
-                                            r as f32 * char_dims.y,
-                                        );
-                                        let rect = egui::Rect::from_min_size(
-                                            ui.max_rect().min + min,
-                                            char_dims,
-                                        );
-                                        ui.painter().rect_stroke(
-                                            rect,
-                                            0.0,
-                                            (1.0, Color32::DARK_GRAY),
-                                        );
+                let spacing = ui.spacing_mut();
+                spacing.item_spacing = egui::Vec2::ZERO;
+                spacing.window_margin = egui::Margin::ZERO;
+
+                let char_dims = self
+                    .char_dimensions
+                    .insert({
+                        let regular_font = egui::FontId::new(
+                            self.config.font_size,
+                            self.font_manager
+                                .get_or_init("regular", &self.config.regular_font),
+                        );
+                        let dims = ctx.fonts(|fonts| {
+                            let width = fonts.glyph_width(&regular_font, 'M');
+                            let height = fonts.row_height(&regular_font);
+                            (width, height).into()
+                        });
+                        // needed to avoid floating point errors when multiplying
+                        ui.painter().round_vec_to_pixels(dims)
+                    })
+                    .clone();
+
+                let winsz = pty::compute_winsize(
+                    ui.painter().round_to_pixel(ui.available_width()),
+                    ui.painter().round_to_pixel(ui.available_height()),
+                    char_dims.x,
+                    char_dims.y,
+                );
+
+                let pty_fd = self
+                    .child_process
+                    .get_or_insert_with(|| ChildProcess::spawn(ctx.clone()))
+                    .pty_fd
+                    .as_fd();
+                if self
+                    .grid
+                    .resize(winsz.ws_row as usize, winsz.ws_col as usize)
+                {
+                    pty::update_pty_window_size(pty_fd, &winsz)
+                        .context("update_pty_window_size")?;
+                }
+
+                ui.input(|input_state| -> anyhow::Result<()> {
+                    for event in &input_state.events {
+                        self.handle_event(input_state, event)
+                            .context("handling event failed")?;
+                    }
+                    Ok(())
+                })
+                .context("input handling failed")?;
+
+                let read_input = self.read_from_pty(ctx).context("reading from pty failed")?;
+                self.write_to_pty().context("writing to pty failed")?;
+
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::TOP), |ui| {
+                    ui.set_height(self.grid.num_rows as f32 * char_dims.y);
+                    ui.set_width(self.grid.num_cols as f32 * char_dims.x);
+                    if self.enable_debug_render {
+                        ctx.debug_painter()
+                            .debug_rect(ui.max_rect(), Color32::GREEN, "layout");
+                    }
+
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(true)
+                        .show_rows(
+                            ui,
+                            char_dims.y,
+                            self.grid.num_current_rows(),
+                            |ui, visible_rows| -> anyhow::Result<()> {
+                                if self.enable_debug_render {
+                                    ctx.debug_painter().debug_rect(
+                                        ui.max_rect(),
+                                        Color32::WHITE,
+                                        "scroll_area",
+                                    );
+                                    for r in 0..visible_rows.len() {
+                                        for c in 0..self.grid.num_cols {
+                                            let min = egui::Vec2::new(
+                                                c as f32 * char_dims.x,
+                                                r as f32 * char_dims.y,
+                                            );
+                                            let rect = egui::Rect::from_min_size(
+                                                ui.max_rect().min + min,
+                                                char_dims,
+                                            );
+                                            ui.painter().rect_stroke(
+                                                rect,
+                                                0.0,
+                                                (1.0, Color32::DARK_GRAY),
+                                            );
+                                        }
                                     }
                                 }
-                            }
-                            let cursor_rect = self
-                                .paint_cursor(ui, &visible_rows)
-                                .context("paint_cursor failed")?;
-                            self.render(ctx, ui, visible_rows);
-                            if read_input && !ui.clip_rect().contains_rect(cursor_rect) {
-                                ui.scroll_to_rect(cursor_rect, None);
-                            }
-                            Ok(())
-                        },
-                    );
+                                let cursor_rect = self
+                                    .paint_cursor(ui, &visible_rows)
+                                    .context("paint_cursor failed")?;
+                                self.render(ctx, ui, visible_rows);
+                                if read_input && !ui.clip_rect().contains_rect(cursor_rect) {
+                                    ui.scroll_to_rect(cursor_rect, None);
+                                }
+                                Ok(())
+                            },
+                        );
+                });
+                Ok(())
             });
-            Ok(())
-        });
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -256,6 +259,7 @@ impl TerminalEmulator {
                 let format = egui::text::TextFormat {
                     font_id,
                     color: format.fg_color.into(),
+                    background: format.bg_color.into(),
                     ..Default::default()
                 };
                 let section = egui::text::LayoutSection {
@@ -739,6 +743,9 @@ impl AnsiGrid {
                         SgrControl::ForgroundColor(color) => {
                             self.current_text_format.fg_color = *color;
                         }
+                        SgrControl::BackgroundColor(color) => {
+                            self.current_text_format.bg_color = *color;
+                        }
                         SgrControl::Reset => {
                             self.current_text_format = TextFormat::default();
                         }
@@ -824,6 +831,7 @@ impl AnsiGrid {
 #[derive(Debug, Clone, Copy)]
 struct TextFormat {
     fg_color: ansi::Color,
+    bg_color: ansi::Color,
     bold: bool,
     italic: bool,
 }
@@ -831,7 +839,8 @@ struct TextFormat {
 impl Default for TextFormat {
     fn default() -> Self {
         Self {
-            fg_color: ansi::Color::BrightBlack,
+            fg_color: ansi::Color::DefaultFg,
+            bg_color: ansi::Color::DefaultBg,
             bold: false,
             italic: false,
         }

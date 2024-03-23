@@ -274,6 +274,7 @@ pub enum SgrControl {
     EnterItalicsMode = 3,
     ExitItalicsMode = 23,
     ForgroundColor(Color),
+    BackgroundColor(Color),
     Unimplemented(String),
 }
 impl SgrControl {
@@ -284,14 +285,14 @@ impl SgrControl {
             1 => Ok(Bold),
             3 => Ok(EnterItalicsMode),
             23 => Ok(ExitItalicsMode),
-            num @ (30..=37 | 90..=97) => Ok(ForgroundColor(
+            num @ (30..=37 | 39 | 90..=97) => Ok(ForgroundColor(
                 Color::from_sgr_num(num)
                     .with_context(|| format!("invalid SGR foreground color param: {num}"))?,
             )),
-            // num @ (40..=47 | 100..=107) => Ok(BackgroundColor(
-            //     Color::from_sgr_num(num)
-            //         .with_context(|| format!("invalid SGR foreground color param: {num}"))?,
-            // )),
+            num @ (40..=47 | 49 | 100..=107) => Ok(BackgroundColor(
+                Color::from_sgr_num(num)
+                    .with_context(|| format!("invalid SGR background color param: {num}"))?,
+            )),
             _unknown => Err(anyhow::format_err!("unknown sgr param: {param}")),
         }
     }
@@ -398,6 +399,8 @@ pub enum Color {
     BrightMagenta,
     BrightCyan,
     BrightWhite,
+    DefaultFg,
+    DefaultBg,
 }
 impl Color {
     fn from_sgr_num(num: usize) -> Option<Color> {
@@ -410,6 +413,8 @@ impl Color {
             35 | 45 => Color::Magenta,
             36 | 46 => Color::Cyan,
             37 | 47 => Color::White,
+            39 => Color::DefaultFg,
+            49 => Color::DefaultBg,
             90 | 100 => Color::BrightBlack,
             91 | 101 => Color::BrightRed,
             92 | 102 => Color::BrightGreen,
@@ -440,6 +445,8 @@ impl Color {
 impl From<Color> for egui::Color32 {
     fn from(value: Color) -> Self {
         match value {
+            Color::DefaultFg => egui::Color32::LIGHT_GRAY,
+            Color::DefaultBg => egui::Color32::BLACK,
             Color::Black => egui::Color32::BLACK,
             Color::Red => egui::Color32::RED,
             Color::Green => egui::Color32::GREEN,

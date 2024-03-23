@@ -1,7 +1,6 @@
 use std::{fs, path::PathBuf, sync::mpsc};
 
 use anyhow::Context;
-use egui::TextBuffer;
 
 #[derive(Debug)]
 pub struct FontManager {
