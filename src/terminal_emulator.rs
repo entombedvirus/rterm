@@ -705,11 +705,14 @@ impl AnsiGrid {
             CursorControl(CursorControl::MoveUp { lines }) => {
                 self.move_cursor_relative((*lines).try_into().unwrap_or(0_isize).neg(), 0);
             }
-            CursorControl(CursorControl::MoveRight { cols }) => {
-                self.move_cursor_relative(0, *cols as isize);
-            }
             CursorControl(CursorControl::MoveDown { lines }) => {
-                self.move_cursor_relative((*lines).try_into().unwrap_or(0), 0);
+                self.move_cursor_relative((*lines).try_into().unwrap_or(0_isize), 0);
+            }
+            CursorControl(CursorControl::MoveLeft { cols }) => {
+                self.move_cursor_relative(0, (*cols).try_into().unwrap_or(0_isize).neg());
+            }
+            CursorControl(CursorControl::MoveRight { cols }) => {
+                self.move_cursor_relative(0, (*cols).try_into().unwrap_or(0_isize));
             }
             CursorControl(CursorControl::MoveTo { line, col }) => {
                 self.move_cursor(line.saturating_sub(1), col.saturating_sub(1));

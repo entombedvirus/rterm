@@ -15,8 +15,16 @@
 [X] fix MoveLineUp / MoveLineDown cursor control
 [X] add support for pasting text into the terminal
 [X] add support for different modes: bracketed paste
+[X] get zsh prompt to render
+[X] fix MoveLeft / MoveRight cursor control
+[ ] add support for 24bit true colors
+[ ] add support for underline
+[ ] add support for overline
+[ ] add support for strikethrough
+[ ] make reset builtin command work
+[ ] make fzf ctrl-r work
+[ ] add transparency support
 [ ] add support for DECCKM(arrow keys)
-[ ] get zsh prompt to render
 [ ] do a profile pass
 [ ] configuration / preferences pane based colors
 [ ] use small vec for passing terminal output
