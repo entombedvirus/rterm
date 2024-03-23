@@ -143,6 +143,20 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
                 AnsiToken::SGR(params.collect())
             }
         })),
+        [b'h', rem @ ..] => Some((
+            rem,
+            match params.as_str() {
+                "?2004" => AnsiToken::ModeControl(ModeControl::BracketedPasteEnter),
+                _unknown => AnsiToken::ModeControl(ModeControl::Unknown(params)),
+            },
+        )),
+        [b'l', rem @ ..] => Some((
+            rem,
+            match params.as_str() {
+                "?2004" => AnsiToken::ModeControl(ModeControl::BracketedPasteExit),
+                _unknown => AnsiToken::ModeControl(ModeControl::Unknown(params)),
+            },
+        )),
         [unknown, rem @ ..] => Some((
             rem,
             AnsiToken::Unknown(format!("\u{1b}[{params}{ch}", ch = *unknown as char)),
@@ -242,6 +256,14 @@ pub enum AnsiToken {
     EraseControl(EraseControl),
     SGR(Vec<SgrControl>),
     OSC(OscControl),
+    ModeControl(ModeControl),
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModeControl {
+    BracketedPasteEnter,
+    BracketedPasteExit,
     Unknown(String),
 }
 

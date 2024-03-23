@@ -14,7 +14,7 @@
 [X] implement 256 color support
 [X] fix MoveLineUp / MoveLineDown cursor control
 [X] add support for pasting text into the terminal
-[ ] add support for different modes: bracketed paste
+[X] add support for different modes: bracketed paste
 [ ] add support for DECCKM(arrow keys)
 [ ] get zsh prompt to render
 [ ] do a profile pass

@@ -57,6 +57,8 @@ pub struct TerminalEmulator {
 
     show_settings: bool,
     settings_state: Option<SettingsState>,
+
+    enable_bracketed_paste: bool,
 }
 
 impl eframe::App for TerminalEmulator {
@@ -213,6 +215,7 @@ impl TerminalEmulator {
             enable_debug_render: false,
             show_settings: false,
             settings_state: None,
+            enable_bracketed_paste: false,
         })
     }
 
@@ -313,7 +316,13 @@ impl TerminalEmulator {
     ) -> anyhow::Result<()> {
         match event {
             egui::Event::Paste(txt) => {
+                if self.enable_bracketed_paste {
+                    self.buffered_input.push_str("\x1b[200~");
+                }
                 self.buffered_input.push_str(&txt);
+                if self.enable_bracketed_paste {
+                    self.buffered_input.push_str("\x1b[201~");
+                }
             }
             egui::Event::Text(txt) => {
                 if input_state.modifiers.alt {
@@ -418,10 +427,17 @@ impl TerminalEmulator {
         match token_stream.try_recv() {
             Ok(tokens) => {
                 for token in tokens {
-                    if let AnsiToken::OSC(osc_ctrl) = token {
-                        self.handle_osc_token(ctx, osc_ctrl)
-                    } else {
-                        self.grid.update(&token);
+                    match token {
+                        AnsiToken::OSC(osc_ctrl) => self.handle_osc_token(ctx, osc_ctrl),
+                        AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteEnter) => {
+                            self.enable_bracketed_paste = true
+                        }
+                        AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteExit) => {
+                            self.enable_bracketed_paste = false
+                        }
+                        _ => {
+                            self.grid.update(&token);
+                        }
                     }
                 }
                 // keep requesting painting a new frame as long as we keep getting data. Only
