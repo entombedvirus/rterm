@@ -2,10 +2,16 @@
 # https://man7.org/linux/man-pages/man5/terminfo.5.html
 rterm|80-column dumb tty,
 	am,
-	colors#8,
+	colors#256,
 	cols#80,
 	lines#24,
 	bel=^G,
+
+# Set background color
+    setab=\E[%?%p1%{8}%<%t4%p1%d%e%p1%{16}%<%t10%p1%{8}%-%d%e48;5;%p1%d%;m,
+# Set foreground color
+    setaf=\E[%?%p1%{8}%<%t3%p1%d%e%p1%{16}%<%t9%p1%{8}%-%d%e38;5;%p1%d%;m,
+
 # clear_screen                clear     cl     clear screen and home cursor (P*)
 	clear=\E[H\E[2J,
 	cr=\r,

@@ -124,13 +124,24 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
             if params.is_empty() {
                 return Some((rem, AnsiToken::SGR(vec![SgrControl::Reset])));
             }
-            let params = params.split(';').map(|p| {
-                p.parse::<usize>()
-                    .map_err(|err| anyhow::format_err!("sgr parse error: {err}"))
-                    .and_then(SgrControl::from_params)
-                    .unwrap_or(SgrControl::Unimplemented(format!("\u{1b}[{p}m")))
-            });
-            AnsiToken::SGR(params.collect())
+            if let Some(color_idx_str) = params.strip_prefix("38;5;") {
+                // 256 color mode fg color
+                let color_idx: u8 = color_idx_str.parse().unwrap();
+                AnsiToken::SGR(vec![SgrControl::ForgroundColor(Color::Indexed(color_idx))])
+            } else if let Some(color_idx_str) = params.strip_prefix("48;5;") {
+                // 256 color mode bg color
+                let color_idx: u8 = color_idx_str.parse().unwrap();
+                AnsiToken::SGR(vec![SgrControl::BackgroundColor(Color::Indexed(color_idx))])
+            } else {
+                // 16 color mode
+                let params = params.split(';').map(|p| {
+                    p.parse::<usize>()
+                        .map_err(|err| anyhow::format_err!("sgr parse error: {err}"))
+                        .and_then(SgrControl::from_params)
+                        .unwrap_or(SgrControl::Unimplemented(format!("\u{1b}[{p}m")))
+                });
+                AnsiToken::SGR(params.collect())
+            }
         })),
         [unknown, rem @ ..] => Some((
             rem,
@@ -401,7 +412,11 @@ pub enum Color {
     BrightWhite,
     DefaultFg,
     DefaultBg,
+    Indexed(u8),
 }
+
+static COLOR_LUT: [egui::Color32; 256] = Color::initialize_indexed_lut();
+
 impl Color {
     fn from_sgr_num(num: usize) -> Option<Color> {
         Some(match num {
@@ -440,6 +455,56 @@ impl Color {
             already_bright => already_bright,
         }
     }
+
+    const fn initialize_indexed_lut() -> [egui::Color32; 256] {
+        let mut lut = [egui::Color32::BLACK; 256];
+
+        // named colors
+        lut[0] = egui::Color32::BLACK;
+        lut[1] = egui::Color32::RED;
+        lut[2] = egui::Color32::GREEN;
+        lut[3] = egui::Color32::YELLOW;
+        lut[4] = egui::Color32::BLUE;
+        lut[5] = egui::Color32::from_rgb(128, 0, 128);
+        lut[6] = egui::Color32::from_rgb(0, 170, 170);
+        lut[7] = egui::Color32::WHITE;
+        lut[8] = egui::Color32::from_rgb(0x5f, 0x5f, 0x5f);
+        lut[9] = egui::Color32::from_rgb(0xd7, 0x87, 0x87);
+        lut[10] = egui::Color32::from_rgb(0x87, 0xd7, 0x87);
+        lut[11] = egui::Color32::from_rgb(0xd7, 0xd7, 0x87);
+        lut[12] = egui::Color32::from_rgb(0x87, 0x87, 0xd7);
+        lut[13] = egui::Color32::from_rgb(0xd7, 0x87, 0xd7);
+        lut[14] = egui::Color32::from_rgb(0x87, 0xd7, 0xd7);
+        lut[15] = egui::Color32::from_rgb(0xd7, 0xd7, 0xd7);
+
+        // computed 216 colors
+        // see: https://stackoverflow.com/questions/27159322/rgb-values-of-the-colors-in-the-ansi-extended-colors-index-17-255
+        const fn compute_middle_range(idx: u8) -> egui::Color32 {
+            let color_idx = idx.saturating_sub(16);
+            let index_r = color_idx / 36;
+            let index_g = (color_idx % 36) / 6;
+            let index_b = color_idx % 6;
+            let r = if index_r > 0 { 55 + index_r * 40 } else { 0 };
+            let g = if index_g > 0 { 55 + index_g * 40 } else { 0 };
+            let b = if index_b > 0 { 55 + index_b * 40 } else { 0 };
+            egui::Color32::from_rgb(r, g, b)
+        }
+
+        let mut i = 16_u8;
+        while i <= 231 {
+            lut[i as usize] = compute_middle_range(i);
+            i += 1;
+        }
+
+        // computed greyscale
+        i = 232;
+        while i != 0 {
+            let val = (i - 232) * 10 + 8;
+            lut[i as usize] = egui::Color32::from_rgb(val, val, val);
+            i = i.wrapping_add(1);
+        }
+        lut
+    }
 }
 
 impl From<Color> for egui::Color32 {
@@ -447,22 +512,24 @@ impl From<Color> for egui::Color32 {
         match value {
             Color::DefaultFg => egui::Color32::LIGHT_GRAY,
             Color::DefaultBg => egui::Color32::BLACK,
-            Color::Black => egui::Color32::BLACK,
-            Color::Red => egui::Color32::RED,
-            Color::Green => egui::Color32::GREEN,
-            Color::Yellow => egui::Color32::YELLOW,
-            Color::Blue => egui::Color32::BLUE,
-            Color::Magenta => egui::Color32::from_rgb(128, 0, 128),
-            Color::Cyan => egui::Color32::from_rgb(0, 170, 170),
-            Color::White => egui::Color32::WHITE,
-            Color::BrightBlack => egui::Color32::from_rgb(0x5f, 0x5f, 0x5f),
-            Color::BrightRed => egui::Color32::from_rgb(0xd7, 0x87, 0x87),
-            Color::BrightGreen => egui::Color32::from_rgb(0x87, 0xd7, 0x87),
-            Color::BrightYellow => egui::Color32::from_rgb(0xd7, 0xd7, 0x87),
-            Color::BrightBlue => egui::Color32::from_rgb(0x87, 0x87, 0xd7),
-            Color::BrightMagenta => egui::Color32::from_rgb(0xd7, 0x87, 0xd7),
-            Color::BrightCyan => egui::Color32::from_rgb(0x87, 0xd7, 0xd7),
-            Color::BrightWhite => egui::Color32::from_rgb(0xd7, 0xd7, 0xd7),
+            Color::Indexed(i) => COLOR_LUT[i as usize],
+
+            Color::Black => COLOR_LUT[0],
+            Color::Red => COLOR_LUT[1],
+            Color::Green => COLOR_LUT[2],
+            Color::Yellow => COLOR_LUT[3],
+            Color::Blue => COLOR_LUT[4],
+            Color::Magenta => COLOR_LUT[5],
+            Color::Cyan => COLOR_LUT[6],
+            Color::White => COLOR_LUT[7],
+            Color::BrightBlack => COLOR_LUT[8],
+            Color::BrightRed => COLOR_LUT[9],
+            Color::BrightGreen => COLOR_LUT[10],
+            Color::BrightYellow => COLOR_LUT[11],
+            Color::BrightBlue => COLOR_LUT[12],
+            Color::BrightMagenta => COLOR_LUT[13],
+            Color::BrightCyan => COLOR_LUT[14],
+            Color::BrightWhite => COLOR_LUT[15],
         }
     }
 }

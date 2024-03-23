@@ -11,6 +11,7 @@
 [X] add support for italic and bold + italic text
 [X] implement OSC 0; set window title
 [X] implement default fg and bg color
+[X] implement 256 color support
 [ ] get zsh prompt to render
 [ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
 [ ] configuration / preferences pane based colors
