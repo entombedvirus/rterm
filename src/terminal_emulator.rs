@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    ops::Range,
+    ops::{Neg, Range},
     os::fd::{AsFd, AsRawFd, OwnedFd},
     sync::{mpsc, Arc},
 };
@@ -683,8 +683,14 @@ impl AnsiGrid {
             AsciiControl(AsciiControl::CarriageReturn) => {
                 self.move_cursor(self.cursor_position.0, 0);
             }
+            CursorControl(CursorControl::MoveUp { lines }) => {
+                self.move_cursor_relative((*lines).try_into().unwrap_or(0_isize).neg(), 0);
+            }
             CursorControl(CursorControl::MoveRight { cols }) => {
                 self.move_cursor_relative(0, *cols as isize);
+            }
+            CursorControl(CursorControl::MoveDown { lines }) => {
+                self.move_cursor_relative((*lines).try_into().unwrap_or(0), 0);
             }
             CursorControl(CursorControl::MoveTo { line, col }) => {
                 self.move_cursor(line.saturating_sub(1), col.saturating_sub(1));
