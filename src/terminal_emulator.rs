@@ -312,6 +312,9 @@ impl TerminalEmulator {
         event: &egui::Event,
     ) -> anyhow::Result<()> {
         match event {
+            egui::Event::Paste(txt) => {
+                self.buffered_input.push_str(&txt);
+            }
             egui::Event::Text(txt) => {
                 if input_state.modifiers.alt {
                     terminal_input::alt(txt, &mut self.buffered_input);

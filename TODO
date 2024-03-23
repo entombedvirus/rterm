@@ -13,10 +13,12 @@
 [X] implement default fg and bg color
 [X] implement 256 color support
 [X] fix MoveLineUp / MoveLineDown cursor control
+[X] add support for pasting text into the terminal
+[ ] add support for different modes: bracketed paste
+[ ] add support for DECCKM(arrow keys)
 [ ] get zsh prompt to render
-[ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
+[ ] do a profile pass
 [ ] configuration / preferences pane based colors
-[ ] support for italic font
 [ ] use small vec for passing terminal output
 [ ] SIMD based ansi escape parsing
 [ ] make neovim run okay
