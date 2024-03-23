@@ -28,8 +28,8 @@ pub fn create_pty() -> anyhow::Result<OwnedFd> {
         }
         ForkResult::Child => {
             let _ = nix::unistd::execve(
-                cstr!["/bin/bash\x00"],
-                cstr!["/bin/bash\x00", "--noprofile\x00", "--norc\x00"],
+                cstr!["/bin/zsh\x00"],
+                cstr!["/bin/zsh\x00", "--login\x00"],
                 cstr![
                     "TERM=rterm\x00",
                     "TERMINFO=target/terminfo\x00",

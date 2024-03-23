@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    ansi::{self, SgrControl},
+    ansi::{self, AnsiToken, SgrControl},
     config::{self, Config},
     fonts::{FontDesc, FontManager},
     pty, terminal_input,
@@ -411,7 +411,11 @@ impl TerminalEmulator {
         match token_stream.try_recv() {
             Ok(tokens) => {
                 for token in tokens {
-                    self.grid.update(&token);
+                    if let AnsiToken::OSC(osc_ctrl) = token {
+                        self.handle_osc_token(ctx, osc_ctrl)
+                    } else {
+                        self.grid.update(&token);
+                    }
                 }
                 // keep requesting painting a new frame as long as we keep getting data. Only
                 // processing a subset of data each frame keeps the UI responsive to the user
@@ -424,6 +428,14 @@ impl TerminalEmulator {
                 Ok(false)
             }
             Err(mpsc::TryRecvError::Empty) => Ok(false),
+        }
+    }
+
+    fn handle_osc_token(&self, ctx: &egui::Context, osc_ctrl: ansi::OscControl) {
+        use ansi::OscControl::*;
+        match osc_ctrl {
+            SetWindowTitle(title) => ctx.send_viewport_cmd(egui::ViewportCommand::Title(title)),
+            Unknown(_) => unimplemented!(),
         }
     }
 }

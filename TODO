@@ -9,6 +9,8 @@
 [X] can use any fixed width font from the host system
 [X] configuration / preferences pane based fonts
 [X] add support for italic and bold + italic text
+[X] implement OSC 0; set window title
+[ ] get zsh prompt to render
 [ ] add support for different modes: bracketed paste, DECCKM(arrow keys)
 [ ] configuration / preferences pane based colors
 [ ] support for italic font
