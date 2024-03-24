@@ -21,6 +21,7 @@
 [X] add support for 24bit true colors
 [X] add support for save and restore cursor
 [X] add support for alternate screen
+[ ] make tmux run okay
 [ ] add support for underline
 [ ] add support for overline
 [ ] add support for strikethrough
@@ -28,6 +29,7 @@
 [ ] add transparency support
 [ ] add support for DECCKM(arrow keys)
 [ ] do a profile pass
+[ ] do a termcap pass from kitty and implement missing things
 [ ] configuration / preferences pane based colors
 [ ] use small vec for passing terminal output
 [ ] SIMD based ansi escape parsing
