@@ -69,3 +69,9 @@ rterm|80-column dumb tty,
     smcup=\E[?1049h,
 # exit alternate screen
     rmcup=\E[?1049l,
+
+# bracketed paste
+    PS=\E[200~,
+    PE=\E[201~,
+    BE=\E[?2004h,
+    BD=\E[?2004l,
