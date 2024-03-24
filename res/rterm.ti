@@ -75,3 +75,6 @@ rterm|80-column dumb tty,
     PE=\E[201~,
     BE=\E[?2004h,
     BD=\E[?2004l,
+
+# XTVERSION
+    XR=\E[>0q,

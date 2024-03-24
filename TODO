@@ -21,6 +21,7 @@
 [X] add support for 24bit true colors
 [X] add support for save and restore cursor
 [X] add support for alternate screen
+[ ] add support for Device Control Code: xtversion
 [ ] make tmux run okay
 [ ] add support for underline
 [ ] add support for overline

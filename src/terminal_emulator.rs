@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    fmt::Write,
     ops::{Neg, Range},
     os::fd::{AsFd, AsRawFd, OwnedFd},
     sync::{mpsc, Arc},
@@ -453,6 +454,13 @@ impl TerminalEmulator {
                         }
                         AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenExit) => {
                             self.exit_alternate_screen();
+                        }
+                        AnsiToken::DEC(ansi::DeviceControl::XtVersion) => {
+                            const XT_VERSION: &str = "0.0.1";
+                            let _ = write!(
+                                &mut self.buffered_input,
+                                "\x1bP>|rterm({XT_VERSION})\x1b\\"
+                            );
                         }
                         _ => {
                             let grid = self
