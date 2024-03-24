@@ -126,12 +126,24 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
             }
             if let Some(color_idx_str) = params.strip_prefix("38;5;") {
                 // 256 color mode fg color
-                let color_idx: u8 = color_idx_str.parse().unwrap();
+                let color_idx: u8 = color_idx_str.parse().unwrap_or_default();
                 AnsiToken::SGR(vec![SgrControl::ForgroundColor(Color::Indexed(color_idx))])
             } else if let Some(color_idx_str) = params.strip_prefix("48;5;") {
                 // 256 color mode bg color
-                let color_idx: u8 = color_idx_str.parse().unwrap();
+                let color_idx: u8 = color_idx_str.parse().unwrap_or_default();
                 AnsiToken::SGR(vec![SgrControl::BackgroundColor(Color::Indexed(color_idx))])
+            } else if let Some(rgb_str) = params.strip_prefix("38;2;") {
+                // 24 bit color mode fg color
+                let bg_color = Color::from_components_str(rgb_str);
+                AnsiToken::SGR(vec![bg_color
+                    .map(SgrControl::ForgroundColor)
+                    .unwrap_or(SgrControl::Unimplemented(params))])
+            } else if let Some(rgb_str) = params.strip_prefix("48;2;") {
+                // 24 bit color mode bg color
+                let bg_color = Color::from_components_str(rgb_str);
+                AnsiToken::SGR(vec![bg_color
+                    .map(SgrControl::BackgroundColor)
+                    .unwrap_or(SgrControl::Unimplemented(params))])
             } else {
                 // 16 color mode
                 let params = params.split(';').map(|p| {
@@ -457,6 +469,7 @@ pub enum Color {
     DefaultFg,
     DefaultBg,
     Indexed(u8),
+    TrueColor(u8, u8, u8),
 }
 
 static COLOR_LUT: [egui::Color32; 256] = Color::initialize_indexed_lut();
@@ -549,6 +562,20 @@ impl Color {
         }
         lut
     }
+
+    fn from_components_str(rgb_str: &str) -> Option<Self> {
+        // 10;20;30
+        rgb_str
+            .split(';')
+            .take(3)
+            .map(|c| c.parse::<u8>())
+            .collect::<Result<Vec<u8>, _>>()
+            .ok()
+            .and_then(|components| match components.as_slice() {
+                [r, g, b] => Some(Color::TrueColor(*r, *g, *b)),
+                _ => None,
+            })
+    }
 }
 
 impl From<Color> for egui::Color32 {
@@ -557,6 +584,7 @@ impl From<Color> for egui::Color32 {
             Color::DefaultFg => egui::Color32::LIGHT_GRAY,
             Color::DefaultBg => egui::Color32::BLACK,
             Color::Indexed(i) => COLOR_LUT[i as usize],
+            Color::TrueColor(r, g, b) => egui::Color32::from_rgb(r, g, b),
 
             Color::Black => COLOR_LUT[0],
             Color::Red => COLOR_LUT[1],
