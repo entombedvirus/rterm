@@ -686,9 +686,7 @@ impl AnsiGrid {
 
         match token {
             ResetToInitialState => {
-                self.clear_screen();
-                self.current_text_format = TextFormat::default();
-                self.move_cursor(0, 0);
+                self.clear_including_scrollback();
             }
             Text(txt) => {
                 for ch in txt.chars() {
@@ -743,6 +741,9 @@ impl AnsiGrid {
             }
             EraseControl(EraseControl::Screen) => {
                 self.clear_screen();
+            }
+            EraseControl(EraseControl::ScreenAndScrollback) => {
+                self.clear_including_scrollback();
             }
             EraseControl(EraseControl::FromCursorToEndOfScreen) => {
                 let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_position);
@@ -862,6 +863,10 @@ impl AnsiGrid {
         let visible_end = self.cursor_position_to_buf_pos(&(self.num_rows - 1, self.num_cols - 1));
         self.cells[visible_start..visible_end].fill(Self::FILL_CHAR);
         self.text_format[visible_start..visible_end].fill(TextFormat::default());
+    }
+
+    fn clear_including_scrollback(&mut self) {
+        *self = Self::new(self.num_rows, self.num_cols, self.max_rows_scrollback);
     }
 }
 
