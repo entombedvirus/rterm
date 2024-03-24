@@ -57,3 +57,7 @@ rterm|80-column dumb tty,
     ritm=\E[23m,
 # enter_bold_mode             bold     md     turn on bold (extra bright) mode
 	bold=\E[1m,
+# save_cursor                 sc       sc     save current cursor position (P)
+	sc=\E7,
+# restore_cursor              rc       rc     restore cursor to position of last save_cursor
+	rc=\E8,

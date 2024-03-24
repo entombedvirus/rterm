@@ -315,8 +315,6 @@ pub enum CursorControl {
     ScrollUpFromHome,
     SavePositionDEC,
     RestorePositionDEC,
-    SavePositionSCO,
-    RestorePositionSCO,
 }
 
 #[allow(unused)]

@@ -19,6 +19,7 @@
 [X] fix MoveLeft / MoveRight cursor control
 [X] make reset builtin command work
 [X] add support for 24bit true colors
+[X] add support for save and restore cursor
 [ ] add support for alternate screen
 [ ] add support for underline
 [ ] add support for overline

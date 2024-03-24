@@ -402,7 +402,7 @@ impl TerminalEmulator {
         ui: &mut egui::Ui,
         visible_rows: &Range<usize>,
     ) -> anyhow::Result<egui::Rect> {
-        let (cursor_row_in_screen_space, cursor_col) = self.grid.cursor_position;
+        let (cursor_row_in_screen_space, cursor_col) = self.grid.cursor_state.position;
         let cursor_row_in_scrollback_space =
             self.grid.first_visible_line_no() + cursor_row_in_screen_space;
         let num_rows_from_top = cursor_row_in_scrollback_space.saturating_sub(visible_rows.start);
@@ -620,9 +620,16 @@ struct AnsiGrid {
     num_cols: usize,
     max_rows_scrollback: usize,
     cells: Vec<char>,
-    text_format: Vec<TextFormat>,
-    cursor_position: (usize, usize), // in the range (0..num_rows, 0..num_cols)
-    current_text_format: TextFormat,
+    text_format: Vec<SgrState>,
+
+    cursor_state: CursorState,
+    saved_cursor_state: Option<CursorState>,
+}
+
+#[derive(Debug, Default, Copy, Clone)]
+struct CursorState {
+    position: (usize, usize), // in the range (0..num_rows, 0..num_cols)
+    sgr_state: SgrState,
 }
 
 impl AnsiGrid {
@@ -631,15 +638,15 @@ impl AnsiGrid {
     fn new(num_rows: usize, num_cols: usize, max_rows_scrollback: usize) -> Self {
         // scrollback has to be at least num_rows
         let max_rows_scrollback = max_rows_scrollback.max(num_rows);
-        let cursor_position = (0, 0);
+        let cursor_state = CursorState::default();
         Self {
             num_rows,
             num_cols,
             max_rows_scrollback,
             cells: vec![Self::FILL_CHAR; num_rows * num_cols],
-            text_format: vec![TextFormat::default(); num_rows * num_cols],
-            cursor_position,
-            current_text_format: TextFormat::default(),
+            text_format: vec![SgrState::default(); num_rows * num_cols],
+            cursor_state,
+            saved_cursor_state: None,
         }
     }
 
@@ -654,7 +661,7 @@ impl AnsiGrid {
         );
         let new_len = (self.first_visible_line_no() + new_num_rows) * new_num_cols;
         let mut new_cells = vec![Self::FILL_CHAR; new_len];
-        let mut new_format = vec![TextFormat::default(); new_len];
+        let mut new_format = vec![SgrState::default(); new_len];
         let line_len = self.num_cols.min(new_num_cols);
         for (line_no, (old_cells, old_formats)) in self
             .cells
@@ -704,7 +711,7 @@ impl AnsiGrid {
                 self.move_cursor_relative(1, 0);
             }
             AsciiControl(AsciiControl::CarriageReturn) => {
-                self.move_cursor(self.cursor_position.0, 0);
+                self.move_cursor(self.cursor_state.position.0, 0);
             }
             CursorControl(CursorControl::MoveUp { lines }) => {
                 self.move_cursor_relative((*lines).try_into().unwrap_or(0_isize).neg(), 0);
@@ -722,7 +729,7 @@ impl AnsiGrid {
                 self.move_cursor(line.saturating_sub(1), col.saturating_sub(1));
             }
             CursorControl(CursorControl::ScrollUpFromHome) => {
-                let (cursor_row, _) = self.cursor_position;
+                let (cursor_row, _) = self.cursor_state.position;
                 if cursor_row > 0 {
                     // no need to scroll
                     self.move_cursor_relative(-1, 0);
@@ -736,7 +743,15 @@ impl AnsiGrid {
                         .copy_within(home_row_start..last_row_start, next_row_start);
                     // clear the new row created on top
                     self.cells[home_row_start..next_row_start].fill(Self::FILL_CHAR);
-                    self.text_format[home_row_start..next_row_start].fill(TextFormat::default());
+                    self.text_format[home_row_start..next_row_start].fill(SgrState::default());
+                }
+            }
+            CursorControl(CursorControl::SavePositionDEC) => {
+                self.saved_cursor_state = Some(self.cursor_state);
+            }
+            CursorControl(CursorControl::RestorePositionDEC) => {
+                if let Some(saved_state) = self.saved_cursor_state.take() {
+                    self.cursor_state = saved_state;
                 }
             }
             EraseControl(EraseControl::Screen) => {
@@ -746,39 +761,39 @@ impl AnsiGrid {
                 self.clear_including_scrollback();
             }
             EraseControl(EraseControl::FromCursorToEndOfScreen) => {
-                let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_position);
+                let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_state.position);
                 let visible_end =
                     self.cursor_position_to_buf_pos(&(self.num_rows - 1, self.num_cols - 1));
                 self.cells[cur_idx..visible_end].fill(Self::FILL_CHAR);
-                self.text_format[cur_idx..visible_end].fill(TextFormat::default());
+                self.text_format[cur_idx..visible_end].fill(SgrState::default());
             }
             EraseControl(EraseControl::FromCursorToEndOfLine) => {
-                let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_position);
+                let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_state.position);
                 let line_end_idx =
-                    self.cursor_position_to_buf_pos(&(self.cursor_position.0 + 1, 0));
+                    self.cursor_position_to_buf_pos(&(self.cursor_state.position.0 + 1, 0));
                 self.cells[cur_idx..line_end_idx].fill(Self::FILL_CHAR);
-                self.text_format[cur_idx..line_end_idx].fill(TextFormat::default());
+                self.text_format[cur_idx..line_end_idx].fill(SgrState::default());
             }
             SGR(params) => {
                 for sgr in params {
                     match sgr {
                         SgrControl::Bold => {
-                            self.current_text_format.bold = true;
+                            self.cursor_state.sgr_state.bold = true;
                         }
                         SgrControl::EnterItalicsMode => {
-                            self.current_text_format.italic = true;
+                            self.cursor_state.sgr_state.italic = true;
                         }
                         SgrControl::ExitItalicsMode => {
-                            self.current_text_format.italic = false;
+                            self.cursor_state.sgr_state.italic = false;
                         }
                         SgrControl::ForgroundColor(color) => {
-                            self.current_text_format.fg_color = *color;
+                            self.cursor_state.sgr_state.fg_color = *color;
                         }
                         SgrControl::BackgroundColor(color) => {
-                            self.current_text_format.bg_color = *color;
+                            self.cursor_state.sgr_state.bg_color = *color;
                         }
                         SgrControl::Reset => {
-                            self.current_text_format = TextFormat::default();
+                            self.cursor_state.sgr_state = SgrState::default();
                         }
                         SgrControl::Unimplemented(_) => {
                             // noop
@@ -803,7 +818,7 @@ impl AnsiGrid {
         assert!(new_col < self.num_cols);
         // new position is within bounds
         if new_row < self.num_rows {
-            self.cursor_position = (new_row, new_col);
+            self.cursor_state.position = (new_row, new_col);
             return;
         }
 
@@ -817,12 +832,12 @@ impl AnsiGrid {
         // we can grow to accomodate
         let new_len = self.cells.len() + num_new_lines * self.num_cols;
         self.cells.resize(new_len, Self::FILL_CHAR);
-        self.text_format.resize(new_len, TextFormat::default());
-        self.cursor_position = (self.num_rows - 1, new_col);
+        self.text_format.resize(new_len, SgrState::default());
+        self.cursor_state.position = (self.num_rows - 1, new_col);
     }
 
     fn move_cursor_relative(&mut self, dr: isize, dc: isize) {
-        let (r, c) = self.cursor_position;
+        let (r, c) = self.cursor_state.position;
         let mut new_row = ((r as isize) + dr) as usize;
         let mut new_col = ((c as isize) + dc) as usize;
         new_row += new_col / self.num_cols;
@@ -831,15 +846,15 @@ impl AnsiGrid {
     }
 
     fn update_cursor_cell(&mut self, new_ch: char) {
-        let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_position);
+        let cur_idx = self.cursor_position_to_buf_pos(&self.cursor_state.position);
         self.cells[cur_idx] = new_ch;
-        self.text_format[cur_idx] = self.current_text_format;
+        self.text_format[cur_idx] = self.cursor_state.sgr_state;
     }
 
     fn lines<'a>(
         &'a self,
         visible_rows: Range<usize>,
-    ) -> impl Iterator<Item = (&'a [char], &'a [TextFormat])> + 'a {
+    ) -> impl Iterator<Item = (&'a [char], &'a [SgrState])> + 'a {
         // let start = self.cursor_position_to_buf_pos(&(0, 0));
         // let end = start + (self.num_rows * self.num_cols);
         self.cells
@@ -862,7 +877,7 @@ impl AnsiGrid {
         let visible_start = self.cursor_position_to_buf_pos(&(0, 0));
         let visible_end = self.cursor_position_to_buf_pos(&(self.num_rows - 1, self.num_cols - 1));
         self.cells[visible_start..visible_end].fill(Self::FILL_CHAR);
-        self.text_format[visible_start..visible_end].fill(TextFormat::default());
+        self.text_format[visible_start..visible_end].fill(SgrState::default());
     }
 
     fn clear_including_scrollback(&mut self) {
@@ -871,14 +886,14 @@ impl AnsiGrid {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct TextFormat {
+struct SgrState {
     fg_color: ansi::Color,
     bg_color: ansi::Color,
     bold: bool,
     italic: bool,
 }
 
-impl Default for TextFormat {
+impl Default for SgrState {
     fn default() -> Self {
         Self {
             fg_color: ansi::Color::DefaultFg,
