@@ -61,3 +61,7 @@ rterm|80-column dumb tty,
 	sc=\E7,
 # restore_cursor              rc       rc     restore cursor to position of last save_cursor
 	rc=\E8,
+# enter alternate screen
+    smcup=\E[?1049h,
+# exit alternate screen
+    rmcup=\E[?1049l,

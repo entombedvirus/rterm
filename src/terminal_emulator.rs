@@ -52,13 +52,16 @@ pub struct TerminalEmulator {
     child_process: Option<ChildProcess>,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
-    grid: AnsiGrid,
-    enable_debug_render: bool,
+
+    primary_grid: AnsiGrid,
+    // used for fullscreen apps. does not have scrollback
+    alternate_grid: Option<AnsiGrid>,
 
     show_settings: bool,
     settings_state: Option<SettingsState>,
 
     enable_bracketed_paste: bool,
+    enable_debug_render: bool,
 }
 
 impl eframe::App for TerminalEmulator {
@@ -117,10 +120,15 @@ impl eframe::App for TerminalEmulator {
                     .get_or_insert_with(|| ChildProcess::spawn(ctx.clone()))
                     .pty_fd
                     .as_fd();
-                if self
-                    .grid
-                    .resize(winsz.ws_row as usize, winsz.ws_col as usize)
-                {
+                let grids = self
+                    .alternate_grid
+                    .iter_mut()
+                    .chain(std::iter::once(&mut self.primary_grid));
+                let mut needs_signal = false;
+                for grid in grids {
+                    needs_signal |= grid.resize(winsz.ws_row as usize, winsz.ws_col as usize);
+                }
+                if needs_signal {
                     pty::update_pty_window_size(pty_fd, &winsz)
                         .context("update_pty_window_size")?;
                 }
@@ -138,20 +146,22 @@ impl eframe::App for TerminalEmulator {
                 self.write_to_pty().context("writing to pty failed")?;
 
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::TOP), |ui| {
-                    ui.set_height(self.grid.num_rows as f32 * char_dims.y);
-                    ui.set_width(self.grid.num_cols as f32 * char_dims.x);
+                    let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
+                    ui.set_height(grid.num_rows as f32 * char_dims.y);
+                    ui.set_width(grid.num_cols as f32 * char_dims.x);
                     if self.enable_debug_render {
                         ctx.debug_painter()
                             .debug_rect(ui.max_rect(), Color32::GREEN, "layout");
                     }
 
+                    let grid_cols = grid.num_cols;
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .stick_to_bottom(true)
                         .show_rows(
                             ui,
                             char_dims.y,
-                            self.grid.num_current_rows(),
+                            grid.num_current_rows(),
                             |ui, visible_rows| -> anyhow::Result<()> {
                                 if self.enable_debug_render {
                                     ctx.debug_painter().debug_rect(
@@ -160,7 +170,7 @@ impl eframe::App for TerminalEmulator {
                                         "scroll_area",
                                     );
                                     for r in 0..visible_rows.len() {
-                                        for c in 0..self.grid.num_cols {
+                                        for c in 0..grid_cols {
                                             let min = egui::Vec2::new(
                                                 c as f32 * char_dims.x,
                                                 r as f32 * char_dims.y,
@@ -210,7 +220,8 @@ impl TerminalEmulator {
             font_manager,
             child_process: None,
             buffered_input: String::new(),
-            grid: AnsiGrid::new(24, 80, 5000),
+            primary_grid: AnsiGrid::new(24, 80, 5000),
+            alternate_grid: None,
             char_dimensions: None,
             enable_debug_render: false,
             show_settings: false,
@@ -237,7 +248,8 @@ impl TerminalEmulator {
         visible_rows: Range<usize>,
     ) -> Vec<egui::Response> {
         let mut label_responses = Vec::new();
-        for (line_chars, formats) in self.grid.lines(visible_rows) {
+        let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
+        for (line_chars, formats) in grid.lines(visible_rows) {
             let mut layout = LayoutJob::default();
             layout.wrap = egui::text::TextWrapping::no_max_width();
             for (&ch, format) in line_chars.into_iter().zip(formats) {
@@ -402,9 +414,10 @@ impl TerminalEmulator {
         ui: &mut egui::Ui,
         visible_rows: &Range<usize>,
     ) -> anyhow::Result<egui::Rect> {
-        let (cursor_row_in_screen_space, cursor_col) = self.grid.cursor_state.position;
+        let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
+        let (cursor_row_in_screen_space, cursor_col) = grid.cursor_state.position;
         let cursor_row_in_scrollback_space =
-            self.grid.first_visible_line_no() + cursor_row_in_screen_space;
+            grid.first_visible_line_no() + cursor_row_in_screen_space;
         let num_rows_from_top = cursor_row_in_scrollback_space.saturating_sub(visible_rows.start);
         let char_dims = self.char_dimensions.unwrap_or(egui::vec2(12.0, 12.0));
         let cursor_rect = Rect::from_min_size(
@@ -435,8 +448,18 @@ impl TerminalEmulator {
                         AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteExit) => {
                             self.enable_bracketed_paste = false
                         }
+                        AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenEnter) => {
+                            self.enter_alternate_screen();
+                        }
+                        AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenExit) => {
+                            self.exit_alternate_screen();
+                        }
                         _ => {
-                            self.grid.update(&token);
+                            let grid = self
+                                .alternate_grid
+                                .as_mut()
+                                .unwrap_or(&mut self.primary_grid);
+                            grid.update(&token);
                         }
                     }
                 }
@@ -460,6 +483,21 @@ impl TerminalEmulator {
             Reset => (),
             SetWindowTitle(title) => ctx.send_viewport_cmd(egui::ViewportCommand::Title(title)),
             Unknown(_) => unimplemented!(),
+        }
+    }
+
+    fn enter_alternate_screen(&mut self) {
+        self.alternate_grid.get_or_insert_with(|| {
+            self.primary_grid.save_cursor_state();
+            let num_rows = self.primary_grid.num_rows;
+            let num_cols = self.primary_grid.num_cols;
+            AnsiGrid::new(num_rows, num_cols, 0)
+        });
+    }
+
+    fn exit_alternate_screen(&mut self) {
+        if let Some(_) = self.alternate_grid.take() {
+            self.primary_grid.restore_cursor_state();
         }
     }
 }
@@ -747,12 +785,10 @@ impl AnsiGrid {
                 }
             }
             CursorControl(CursorControl::SavePositionDEC) => {
-                self.saved_cursor_state = Some(self.cursor_state);
+                self.save_cursor_state();
             }
             CursorControl(CursorControl::RestorePositionDEC) => {
-                if let Some(saved_state) = self.saved_cursor_state.take() {
-                    self.cursor_state = saved_state;
-                }
+                self.restore_cursor_state();
             }
             EraseControl(EraseControl::Screen) => {
                 self.clear_screen();
@@ -882,6 +918,16 @@ impl AnsiGrid {
 
     fn clear_including_scrollback(&mut self) {
         *self = Self::new(self.num_rows, self.num_cols, self.max_rows_scrollback);
+    }
+
+    fn save_cursor_state(&mut self) {
+        self.saved_cursor_state = Some(self.cursor_state);
+    }
+
+    fn restore_cursor_state(&mut self) {
+        if let Some(saved_state) = self.saved_cursor_state.take() {
+            self.cursor_state = saved_state;
+        }
     }
 }
 
