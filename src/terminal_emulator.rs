@@ -455,11 +455,26 @@ impl TerminalEmulator {
                         AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenExit) => {
                             self.exit_alternate_screen();
                         }
-                        AnsiToken::DEC(ansi::DeviceControl::XtVersion) => {
+                        AnsiToken::DA(ansi::DeviceAttributes::XtVersion) => {
                             const XT_VERSION: &str = "0.0.1";
                             let _ = write!(
                                 &mut self.buffered_input,
                                 "\x1bP>|rterm({XT_VERSION})\x1b\\"
+                            );
+                        }
+                        AnsiToken::DA(ansi::DeviceAttributes::Primary) => {
+                            // See: https://github.com/kovidgoyal/kitty/blob/5b4ea0052c3db89063a4b4af9f4b78ef90b7332c/kitty/screen.c#L2084
+                            let _ = write!(&mut self.buffered_input, "\x1b[?62;c");
+                        }
+                        AnsiToken::DA(ansi::DeviceAttributes::Secondary) => {
+                            // See: https://github.com/kovidgoyal/kitty/blob/5b4ea0052c3db89063a4b4af9f4b78ef90b7332c/kitty/screen.c#L2087
+                            //  We add 4000 to the primary version because vim turns on SGR mouse mode
+                            //   automatically if this version is high enough
+                            const PRIMARY_VERSION: &str = "4000";
+                            const SECONDARY_VERSION: &str = "0";
+                            let _ = write!(
+                                &mut self.buffered_input,
+                                "\x1b[>1;{PRIMARY_VERSION};{SECONDARY_VERSION}c"
                             );
                         }
                         _ => {
@@ -490,7 +505,7 @@ impl TerminalEmulator {
         match osc_ctrl {
             Reset => (),
             SetWindowTitle(title) => ctx.send_viewport_cmd(egui::ViewportCommand::Title(title)),
-            Unknown(_) => unimplemented!(),
+            Unknown(seq) => log::warn!("unknown osc sequence: {seq:?}"),
         }
     }
 

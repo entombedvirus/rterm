@@ -78,3 +78,5 @@ rterm|80-column dumb tty,
 
 # XTVERSION
     XR=\E[>0q,
+# Send device attributes (report version)
+    RV=\E[>c,
