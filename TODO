@@ -22,6 +22,8 @@
 [X] add support for save and restore cursor
 [X] add support for alternate screen
 [X] add support for Device Attributes: xtversion, primary, secondary
+[X] implement pending-wrap mode
+[ ] implement change/read fg and bg color
 [ ] make tmux run okay
 [ ] add support for underline
 [ ] add support for overline

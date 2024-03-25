@@ -691,7 +691,10 @@ struct AnsiGrid {
 struct CursorState {
     position: (usize, usize), // in the range (0..num_rows, 0..num_cols)
     sgr_state: SgrState,
+    pending_wrap: bool,
 }
+
+impl CursorState {}
 
 impl AnsiGrid {
     const FILL_CHAR: char = '-';
@@ -758,8 +761,22 @@ impl AnsiGrid {
             }
             Text(txt) => {
                 for ch in txt.chars() {
+                    // before inserting txt, check if a wrap is pending
+                    if self.cursor_state.pending_wrap {
+                        // moving will clear the pending wrap flag
+                        self.move_cursor_relative(0, 1);
+                    }
                     self.update_cursor_cell(ch);
-                    self.move_cursor_relative(0, 1);
+                    // if the current position is the last column of any row,  flip the
+                    // pending_wrap flag to true so that that wrap can be delayed. This allows
+                    // printing on the very last line of the buffer to the last cell w/o triggering
+                    // scrolling.
+                    let (_, col) = self.cursor_state.position;
+                    if col + 1 == self.num_cols {
+                        self.cursor_state.pending_wrap = true;
+                    } else {
+                        self.move_cursor_relative(0, 1);
+                    }
                 }
             }
             AsciiControl(AsciiControl::Backspace) => {
@@ -875,6 +892,8 @@ impl AnsiGrid {
 
     fn move_cursor(&mut self, new_row: usize, new_col: usize) {
         assert!(new_col < self.num_cols);
+        self.cursor_state.pending_wrap = false;
+
         // new position is within bounds
         if new_row < self.num_rows {
             self.cursor_state.position = (new_row, new_col);
