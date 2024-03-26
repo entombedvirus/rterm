@@ -182,9 +182,6 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
                 _unknown => AnsiToken::ModeControl(ModeControl::Unknown(params)),
             },
         )),
-        // [2024-03-24T19:58:46Z DEBUG rterm::terminal_input] read 56 bytes from pty: Ok("\u{1b}[?1049h\u{1b}[H\u{1b}[2J\u{1b}[?2004h\u{1b}[1;1H\u{1b}[c\u{1b}[>c\u{1b}[>q\u{1b}]10;?\u{1b }\\\u{1b}]11;?\u{1b}\\")
-        // [2024-03-24T19:58:46Z DEBUG rterm::terminal_input] parsed_tokens: [ModeControl(AlternateScreenEnter), CursorControl(MoveTo { line: 1, col: 1 }), EraseControl(Screen), ModeCont rol(BracketedPasteEnter), CursorControl(MoveTo { line: 1, col: 1 }), Unknown("\u{1b}[c"), Unknown("\u{1b}[>c"), Unknown("\u{1b}[>q"), OSC(Unknown([49, 48, 59, 63])), OSC(Unkno wn([49, 49, 59, 63]))]
-
         // \e[>0q
         [b'q', rem @ ..] => Some((
             rem,
@@ -233,6 +230,10 @@ fn parse_osc_escape_sequence(mut buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
         [b'0', b';', title_bytes @ ..] => AnsiToken::OSC(OscControl::SetWindowTitle(
             String::from_utf8_lossy(title_bytes).to_string(),
         )),
+        // [2024-03-24T19:58:46Z DEBUG rterm::terminal_input] read 56 bytes from pty: Ok("\u{1b}[?1049h\u{1b}[H\u{1b}[2J\u{1b}[?2004h\u{1b}[1;1H\u{1b}[c\u{1b}[>c\u{1b}[>q\u{1b}]10;?\u{1b }\\\u{1b}]11;?\u{1b}\\")
+        // [2024-03-24T19:58:46Z DEBUG rterm::terminal_input] parsed_tokens: [ModeControl(AlternateScreenEnter), CursorControl(MoveTo { line: 1, col: 1 }), EraseControl(Screen), ModeCont rol(BracketedPasteEnter), CursorControl(MoveTo { line: 1, col: 1 }), Unknown("\u{1b}[c"), Unknown("\u{1b}[>c"), Unknown("\u{1b}[>q"), OSC(Unknown([49, 48, 59, 63])), OSC(Unkno wn([49, 49, 59, 63]))]
+        [b'1', b'0', b';', b'?'] => AnsiToken::OSC(OscControl::GetDefaultFgColor),
+        [b'1', b'1', b';', b'?'] => AnsiToken::OSC(OscControl::GetDefaultBgColor),
         _ => AnsiToken::OSC(OscControl::Unknown(ctrl_buf)),
     };
 
@@ -405,6 +406,8 @@ pub enum OscControl {
     SetWindowTitle(String),
     Unknown(Vec<u8>),
     Reset,
+    GetDefaultFgColor,
+    GetDefaultBgColor,
 }
 
 #[allow(unused)]
@@ -640,6 +643,15 @@ impl From<Color> for egui::Color32 {
             Color::BrightWhite => COLOR_LUT[15],
         }
     }
+}
+
+pub fn encode_color32(color: egui::Color32) -> String {
+    format!(
+        "rgb:{r:04x}/{g:04x}/{b:04x}",
+        r = color.r(),
+        g = color.g(),
+        b = color.b()
+    )
 }
 
 #[cfg(test)]

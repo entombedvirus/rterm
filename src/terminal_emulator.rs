@@ -500,9 +500,25 @@ impl TerminalEmulator {
         }
     }
 
-    fn handle_osc_token(&self, ctx: &egui::Context, osc_ctrl: ansi::OscControl) {
+    fn handle_osc_token(&mut self, ctx: &egui::Context, osc_ctrl: ansi::OscControl) {
         use ansi::OscControl::*;
         match osc_ctrl {
+            GetDefaultFgColor => {
+                let fg: egui::Color32 = ansi::Color::DefaultFg.into();
+                let _ = write!(
+                    &mut self.buffered_input,
+                    "\x1b]10;{c}\x1b\\",
+                    c = ansi::encode_color32(fg)
+                );
+            }
+            GetDefaultBgColor => {
+                let bg: egui::Color32 = ansi::Color::DefaultBg.into();
+                let _ = write!(
+                    &mut self.buffered_input,
+                    "\x1b]11;{c}\x1b\\",
+                    c = ansi::encode_color32(bg)
+                );
+            }
             Reset => (),
             SetWindowTitle(title) => ctx.send_viewport_cmd(egui::ViewportCommand::Title(title)),
             Unknown(seq) => log::warn!("unknown osc sequence: {seq:?}"),
