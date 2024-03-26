@@ -171,6 +171,7 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
             match params.as_str() {
                 "?2004" => AnsiToken::ModeControl(ModeControl::BracketedPasteEnter),
                 "?1049" => AnsiToken::ModeControl(ModeControl::AlternateScreenEnter),
+                "?1004" => AnsiToken::ModeControl(ModeControl::FocusTrackEnter),
                 _unknown => AnsiToken::ModeControl(ModeControl::Unknown(params)),
             },
         )),
@@ -179,6 +180,7 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
             match params.as_str() {
                 "?2004" => AnsiToken::ModeControl(ModeControl::BracketedPasteExit),
                 "?1049" => AnsiToken::ModeControl(ModeControl::AlternateScreenExit),
+                "?1004" => AnsiToken::ModeControl(ModeControl::FocusTrackExit),
                 _unknown => AnsiToken::ModeControl(ModeControl::Unknown(params)),
             },
         )),
@@ -334,6 +336,8 @@ pub enum ModeControl {
     BracketedPasteExit,
     AlternateScreenEnter,
     AlternateScreenExit,
+    FocusTrackEnter,
+    FocusTrackExit,
     Unknown(String),
 }
 

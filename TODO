@@ -25,6 +25,7 @@
 [X] implement pending-wrap mode
 [X] implement SGR 39 and 49 -> resetting fg and bg colors
 [X] implement read fg and bg color
+[X] support for focus gained / lost notif
 [ ] make tmux run okay
 [ ] add support for underline
 [ ] add support for overline

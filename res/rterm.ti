@@ -86,3 +86,12 @@ rterm|80-column dumb tty,
     XR=\E[>0q,
 # Send device attributes (report version)
     RV=\E[>c,
+# Focus In and Out events
+    kxIN=\E[I,
+    kxOUT=\E[O,
+# Enable/disable focus reporting
+    fe=\E[?1004h,
+    fd=\E[?1004l,
+# tmux uses these other ones
+	Enfcs=\E[?1004h,
+	Dsfcs=\E[?1004l,

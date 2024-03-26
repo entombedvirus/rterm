@@ -62,6 +62,7 @@ pub struct TerminalEmulator {
     settings_state: Option<SettingsState>,
 
     enable_bracketed_paste: bool,
+    enable_focus_tracking: bool,
     enable_debug_render: bool,
 }
 
@@ -228,6 +229,7 @@ impl TerminalEmulator {
             show_settings: false,
             settings_state: None,
             enable_bracketed_paste: false,
+            enable_focus_tracking: false,
         })
     }
 
@@ -328,6 +330,14 @@ impl TerminalEmulator {
         event: &egui::Event,
     ) -> anyhow::Result<()> {
         match event {
+            egui::Event::WindowFocused(is_focused) => {
+                if self.enable_focus_tracking {
+                    self.buffered_input.push_str(match is_focused {
+                        true => "\x1b[I",
+                        false => "\x1b[O",
+                    })
+                }
+            }
             egui::Event::Paste(txt) => {
                 if self.enable_bracketed_paste {
                     self.buffered_input.push_str("\x1b[200~");
@@ -454,6 +464,12 @@ impl TerminalEmulator {
                         }
                         AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenExit) => {
                             self.exit_alternate_screen();
+                        }
+                        AnsiToken::ModeControl(ansi::ModeControl::FocusTrackEnter) => {
+                            self.enable_focus_tracking = true;
+                        }
+                        AnsiToken::ModeControl(ansi::ModeControl::FocusTrackExit) => {
+                            self.enable_focus_tracking = false;
                         }
                         AnsiToken::DA(ansi::DeviceAttributes::XtVersion) => {
                             const XT_VERSION: &str = "0.0.1";
