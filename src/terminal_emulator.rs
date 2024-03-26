@@ -188,10 +188,10 @@ impl eframe::App for TerminalEmulator {
                                         }
                                     }
                                 }
+                                self.render(ctx, ui, visible_rows.clone());
                                 let cursor_rect = self
                                     .paint_cursor(ui, &visible_rows)
                                     .context("paint_cursor failed")?;
-                                self.render(ctx, ui, visible_rows);
                                 if read_input && !ui.clip_rect().contains_rect(cursor_rect) {
                                     ui.scroll_to_rect(cursor_rect, None);
                                 }
