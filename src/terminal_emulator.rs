@@ -871,6 +871,12 @@ impl AnsiGrid {
                         SgrControl::Reset => {
                             self.cursor_state.sgr_state = SgrState::default();
                         }
+                        SgrControl::ResetFgColor => {
+                            self.cursor_state.sgr_state.fg_color = ansi::Color::DefaultFg;
+                        }
+                        SgrControl::ResetBgColor => {
+                            self.cursor_state.sgr_state.bg_color = ansi::Color::DefaultBg;
+                        }
                         SgrControl::Unimplemented(_) => {
                             // noop
                         }

@@ -3,18 +3,24 @@
 rterm|80-column dumb tty,
 	am,
 
-# Terminfo extension used by tmux to detect true color support (non-standard)
-    Tc,
-
-	colors#256,
 	cols#80,
 	lines#24,
 	bel=^G,
 
-# Set background color
-    setab=\E[%?%p1%{8}%<%t4%p1%d%e%p1%{16}%<%t10%p1%{8}%-%d%e48;5;%p1%d%;m,
+# Color Stuff
+	colors#256,
+# boolean, asserts that the terminal interprets SGR 39 and
+# SGR 49 by resetting the foreground and background color,
+# respectively, to the default. used by tmux and screen
+	AX,
+# Terminfo extension used by tmux to detect true color support (non-standard)
+    Tc,
 # Set foreground color
     setaf=\E[%?%p1%{8}%<%t3%p1%d%e%p1%{16}%<%t9%p1%{8}%-%d%e38;5;%p1%d%;m,
+	setrgbf=\E[38;2;%p1%d;%p2%d;%p3%dm,
+# Set background color
+    setab=\E[%?%p1%{8}%<%t4%p1%d%e%p1%{16}%<%t10%p1%{8}%-%d%e48;5;%p1%d%;m,
+	setrgbb=\E[48;2;%p1%d;%p2%d;%p3%dm,
 
 # Reset string1 (empty OSC sequence to exit OSC/OTH modes, and regular reset)
     rs1=\E]\E\\\Ec,

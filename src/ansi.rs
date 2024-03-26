@@ -151,6 +151,10 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
                 AnsiToken::SGR(vec![bg_color
                     .map(SgrControl::BackgroundColor)
                     .unwrap_or(SgrControl::Unimplemented(params))])
+            } else if params == "39" {
+                AnsiToken::SGR(vec![SgrControl::ResetFgColor])
+            } else if params == "49" {
+                AnsiToken::SGR(vec![SgrControl::ResetBgColor])
             } else {
                 // 16 color mode
                 let params = params.split(';').map(|p| {
@@ -371,6 +375,8 @@ pub enum SgrControl {
     ExitItalicsMode = 23,
     ForgroundColor(Color),
     BackgroundColor(Color),
+    ResetFgColor = 39,
+    ResetBgColor = 49,
     Unimplemented(String),
 }
 impl SgrControl {
