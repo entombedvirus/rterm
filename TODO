@@ -26,6 +26,11 @@
 [X] implement SGR 39 and 49 -> resetting fg and bg colors
 [X] implement read fg and bg color
 [X] support for focus gained / lost notif
+[X] implement application escape mode
+[ ] implement https://sw.kovidgoyal.net/kitty/keyboard-protocol
+[ ] support for mouse events
+[ ] support for cursor shape
+[ ] support for cursor color
 [ ] make tmux run okay
 [ ] add support for underline
 [ ] add support for overline

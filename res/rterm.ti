@@ -3,6 +3,9 @@
 rterm|80-column dumb tty,
 	am,
 
+# xterm title style setting of window title. used by tmux and vim
+	XT,
+
 	cols#80,
 	lines#24,
 	bel=^G,

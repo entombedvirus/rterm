@@ -63,6 +63,7 @@ pub struct TerminalEmulator {
 
     enable_bracketed_paste: bool,
     enable_focus_tracking: bool,
+    enable_application_escape: bool,
     enable_debug_render: bool,
 }
 
@@ -230,6 +231,7 @@ impl TerminalEmulator {
             settings_state: None,
             enable_bracketed_paste: false,
             enable_focus_tracking: false,
+            enable_application_escape: false,
         })
     }
 
@@ -373,7 +375,13 @@ impl TerminalEmulator {
                 key: Key::Escape,
                 pressed: true,
                 ..
-            } => self.buffered_input.push(AsciiControl::Escape.into()),
+            } => {
+                if self.enable_application_escape {
+                    self.buffered_input.push_str("\x1bO[");
+                } else {
+                    self.buffered_input.push(AsciiControl::Escape.into());
+                }
+            }
             egui::Event::Key {
                 key: Key::Tab,
                 pressed: true,
@@ -470,6 +478,12 @@ impl TerminalEmulator {
                         }
                         AnsiToken::ModeControl(ansi::ModeControl::FocusTrackExit) => {
                             self.enable_focus_tracking = false;
+                        }
+                        AnsiToken::ModeControl(ansi::ModeControl::ApplicationEscEnter) => {
+                            self.enable_application_escape = true;
+                        }
+                        AnsiToken::ModeControl(ansi::ModeControl::ApplicationEscExit) => {
+                            self.enable_application_escape = false;
                         }
                         AnsiToken::DA(ansi::DeviceAttributes::XtVersion) => {
                             const XT_VERSION: &str = "0.0.1";
