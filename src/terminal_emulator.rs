@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
     ansi::{self, AnsiToken, SgrControl},
+    bootstrap,
     config::{self, Config},
     fonts::{FontDesc, FontManager},
     pty, terminal_input,
@@ -67,43 +68,12 @@ pub struct TerminalEmulator {
     enable_debug_render: bool,
 }
 
-// impl eframe::App for TerminalEmulator {
-//     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-//         config::set(storage, self.config.clone());
-//     }
-// }
-
-impl TerminalEmulator {
-    pub fn new(ctx: &egui::Context) -> anyhow::Result<Self> {
-        // let config = dbg!(config::get(cc.storage));
-        let config = config::Config::default();
-
-        // initialize fonts before first frame render
-        let mut font_manager = FontManager::new(ctx.clone());
-        Self::init_fonts(&config, &mut font_manager);
-
-        Ok(Self {
-            config,
-            font_manager,
-            child_process: None,
-            buffered_input: String::new(),
-            primary_grid: AnsiGrid::new(24, 80, 5000),
-            alternate_grid: None,
-            char_dimensions: None,
-            enable_debug_render: false,
-            show_settings: false,
-            settings_state: None,
-            enable_bracketed_paste: false,
-            enable_focus_tracking: false,
-            enable_application_escape: false,
-        })
-    }
-
-    pub fn clear_color(&self) -> egui::Color32 {
+impl bootstrap::App for TerminalEmulator {
+    fn clear_color(&self) -> egui::Color32 {
         ansi::Color::DefaultBg.into()
     }
 
-    pub fn update(&mut self, ctx: &egui::Context) {
+    fn on_each_frame(&mut self, ctx: &egui::Context) {
         if self.show_settings {
             self.settings_state
                 .get_or_insert_with(|| SettingsState::new(&self.font_manager))
@@ -238,6 +208,42 @@ impl TerminalEmulator {
                 });
                 Ok(())
             });
+    }
+
+    fn on_keyboard_event(&mut self, event: winit::event::KeyEvent) -> bool {
+        log::info!("got on_keyboard_event: {event:?}");
+        // should repaint
+        true
+    }
+    // fn save(&mut self, storage: &mut dyn eframe::Storage) {
+    //     config::set(storage, self.config.clone());
+    // }
+}
+
+impl TerminalEmulator {
+    pub fn new(ctx: &egui::Context) -> anyhow::Result<Self> {
+        // let config = dbg!(config::get(cc.storage));
+        let config = Config::default();
+
+        // initialize fonts before first frame render
+        let mut font_manager = FontManager::new(ctx.clone());
+        Self::init_fonts(&config, &mut font_manager);
+
+        Ok(Self {
+            config,
+            font_manager,
+            child_process: None,
+            buffered_input: String::new(),
+            primary_grid: AnsiGrid::new(24, 80, 5000),
+            alternate_grid: None,
+            char_dimensions: None,
+            enable_debug_render: false,
+            show_settings: false,
+            settings_state: None,
+            enable_bracketed_paste: false,
+            enable_focus_tracking: false,
+            enable_application_escape: false,
+        })
     }
 
     fn init_fonts(config: &Config, font_manager: &mut FontManager) {

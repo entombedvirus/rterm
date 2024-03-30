@@ -629,7 +629,7 @@ impl From<Color> for egui::Color32 {
     fn from(value: Color) -> Self {
         match value {
             Color::DefaultFg => egui::Color32::LIGHT_GRAY,
-            Color::DefaultBg => egui::Color32::BLACK,
+            Color::DefaultBg => egui::Color32::from_black_alpha(128),
             Color::Indexed(i) => COLOR_LUT[i as usize],
             Color::TrueColor(r, g, b) => egui::Color32::from_rgb(r, g, b),
 
