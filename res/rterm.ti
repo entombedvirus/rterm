@@ -32,6 +32,10 @@ rterm|80-column dumb tty,
 	clear=\E[H\E[2J,
 	cr=\r,
 
+# cursor keys mode
+	smkx=\E[?1h,
+	rmkx=\E[?1l,
+
 # key_up                      kcuu1     ku     up-arrow key
 	cuu=\E[%p1%dA,
 	cuu1=\E[A,
