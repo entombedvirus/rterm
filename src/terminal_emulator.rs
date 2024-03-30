@@ -67,8 +67,43 @@ pub struct TerminalEmulator {
     enable_debug_render: bool,
 }
 
-impl eframe::App for TerminalEmulator {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+// impl eframe::App for TerminalEmulator {
+//     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+//         config::set(storage, self.config.clone());
+//     }
+// }
+
+impl TerminalEmulator {
+    pub fn new(ctx: &egui::Context) -> anyhow::Result<Self> {
+        // let config = dbg!(config::get(cc.storage));
+        let config = config::Config::default();
+
+        // initialize fonts before first frame render
+        let mut font_manager = FontManager::new(ctx.clone());
+        Self::init_fonts(&config, &mut font_manager);
+
+        Ok(Self {
+            config,
+            font_manager,
+            child_process: None,
+            buffered_input: String::new(),
+            primary_grid: AnsiGrid::new(24, 80, 5000),
+            alternate_grid: None,
+            char_dimensions: None,
+            enable_debug_render: false,
+            show_settings: false,
+            settings_state: None,
+            enable_bracketed_paste: false,
+            enable_focus_tracking: false,
+            enable_application_escape: false,
+        })
+    }
+
+    pub fn clear_color(&self) -> egui::Color32 {
+        ansi::Color::DefaultBg.into()
+    }
+
+    pub fn update(&mut self, ctx: &egui::Context) {
         if self.show_settings {
             self.settings_state
                 .get_or_insert_with(|| SettingsState::new(&self.font_manager))
@@ -203,36 +238,6 @@ impl eframe::App for TerminalEmulator {
                 });
                 Ok(())
             });
-    }
-
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        config::set(storage, self.config.clone());
-    }
-}
-
-impl TerminalEmulator {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
-        let config = dbg!(config::get(cc.storage));
-
-        // initialize fonts before first frame render
-        let mut font_manager = FontManager::new(cc.egui_ctx.clone());
-        Self::init_fonts(&config, &mut font_manager);
-
-        Ok(Self {
-            config,
-            font_manager,
-            child_process: None,
-            buffered_input: String::new(),
-            primary_grid: AnsiGrid::new(24, 80, 5000),
-            alternate_grid: None,
-            char_dimensions: None,
-            enable_debug_render: false,
-            show_settings: false,
-            settings_state: None,
-            enable_bracketed_paste: false,
-            enable_focus_tracking: false,
-            enable_application_escape: false,
-        })
     }
 
     fn init_fonts(config: &Config, font_manager: &mut FontManager) {
