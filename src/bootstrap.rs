@@ -25,8 +25,6 @@ pub struct Bootstrap {
     gl_display: glutin::display::Display,
     gl_surface: glutin::surface::Surface<glutin::surface::WindowSurface>,
 
-    app: Option<Box<dyn App>>,
-
     egui_glow: egui_glow::EguiGlow,
 }
 
@@ -141,7 +139,6 @@ impl Bootstrap {
 
         Ok(Self {
             project_dirs,
-            app: None,
             event_loop: Some(event_loop),
             window,
             glow_ctx,
@@ -150,10 +147,6 @@ impl Bootstrap {
             gl_surface,
             egui_glow,
         })
-    }
-
-    pub fn init_app(&mut self, app: impl App + 'static) {
-        self.app = Some(Box::new(app));
     }
 
     pub fn egui_ctx(&self) -> &egui::Context {
@@ -172,16 +165,11 @@ impl Bootstrap {
         self.gl_surface.swap_buffers(&self.gl_context)
     }
 
-    pub fn run_event_loop(&mut self) {
+    pub fn run_event_loop(&mut self, mut app: impl App) {
         let event_loop = self
             .event_loop
             .take()
             .expect("run_event_loop can only called once");
-
-        let mut app = self
-            .app
-            .take()
-            .expect("run_event_loop called without init_app");
 
         let mut repaint_delay = std::time::Duration::MAX;
         let _ = event_loop.run(move |event, event_loop_window_target| {
