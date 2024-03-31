@@ -1,3 +1,6 @@
+use std::path::Path;
+
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -21,9 +24,9 @@ impl Default for Config {
     }
 }
 
-pub fn get(storage: Option<&dyn eframe::Storage>) -> Config {
+pub fn get<P: AsRef<Path>>(storage: Option<P>) -> Config {
     storage
-        .and_then(|storage| storage.get_string("config"))
+        .and_then(|storage_path| std::fs::read_to_string(storage_path).ok())
         .and_then(|config_string| match toml::from_str(&config_string) {
             Ok(config) => Some(config),
             Err(err) => {
@@ -34,13 +37,16 @@ pub fn get(storage: Option<&dyn eframe::Storage>) -> Config {
         .unwrap_or_default()
 }
 
-pub fn set(storage: &mut dyn eframe::Storage, config: Config) {
-    match toml::to_string(&config) {
-        Ok(config_string) => {
-            storage.set_string("config", config_string);
-        }
-        Err(err) => {
-            log::warn!("config serialization failed: {err}");
-        }
+pub fn set<P: AsRef<Path>>(storage: P, config: Config) -> anyhow::Result<()> {
+    if let Some(dir_name) = storage.as_ref().parent() {
+        std::fs::create_dir_all(dir_name)
+            .context("failed to create config parent directory")
+            .and_then(|()| toml::to_string(&config).context("failed to toml serialize config"))
+            .and_then(|contents| {
+                std::fs::write(storage.as_ref(), contents)
+                    .context("failed to write serialized config to disk")
+            })
+    } else {
+        anyhow::bail!("invalid storage path: {:?}", storage.as_ref());
     }
 }

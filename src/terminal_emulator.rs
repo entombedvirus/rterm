@@ -15,6 +15,7 @@ use crate::{
 };
 use ansi::AsciiControl;
 use anyhow::Context;
+use directories_next::ProjectDirs;
 use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, Rect};
 use log::info;
 use nix::errno::Errno;
@@ -215,15 +216,20 @@ impl bootstrap::App for TerminalEmulator {
         // should repaint
         true
     }
-    // fn save(&mut self, storage: &mut dyn eframe::Storage) {
-    //     config::set(storage, self.config.clone());
-    // }
+
+    fn on_exit(&mut self, project_dirs: &ProjectDirs) -> anyhow::Result<()> {
+        config::set(
+            project_dirs.config_dir().join("config.toml"),
+            self.config.clone(),
+        )
+    }
 }
 
 impl TerminalEmulator {
-    pub fn new(ctx: &egui::Context) -> anyhow::Result<Self> {
-        // let config = dbg!(config::get(cc.storage));
-        let config = Config::default();
+    pub fn new(ctx: &egui::Context, project_dirs: &ProjectDirs) -> anyhow::Result<Self> {
+        let config = dbg!(config::get(Some(
+            project_dirs.config_dir().join("config.toml")
+        )));
 
         // initialize fonts before first frame render
         let mut font_manager = FontManager::new(ctx.clone());
@@ -431,7 +437,6 @@ impl TerminalEmulator {
             egui::Event::Key { pressed: false, .. } => (),
             egui::Event::PointerMoved { .. } => (),
             egui::Event::PointerGone { .. } => (),
-            egui::Event::WindowFocused { .. } => (),
             egui::Event::Scroll { .. } => (),
             egui::Event::MouseWheel { .. } => (),
             _ => log::trace!("unhandled event: {event:?}"),

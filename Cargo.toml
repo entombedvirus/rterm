@@ -10,6 +10,7 @@ anyhow = "1.0.79"
 bytes = "1.5.0"
 core-foundation = "0.9.4"
 core-text = "20.1.0"
+directories-next = "2.0.0"
 eframe = { version = "0.27.1", features = ["persistence"] }
 egui = { version = "0.27.1", features = ["persistence"] }
 egui_glow = { version = "0.27.1", features = ["winit", "egui-winit"] }
@@ -21,6 +22,7 @@ libc = "0.2.153"
 log = "0.4.20"
 nix = {version = "0.27.1", features = ["process", "term", "fs", "ioctl"]}
 raw-window-handle = { version = "0.5.2", features = ["std"] }
+ron = "0.8.1"
 serde = { version = "1.0.197", features = ["derive"] }
 toml = "0.8.10"
 winit = "0.29.15"

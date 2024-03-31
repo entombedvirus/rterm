@@ -1,4 +1,5 @@
 use anyhow::Context;
+use directories_next::ProjectDirs;
 use glutin::context::NotCurrentGlContext;
 use glutin::display::GetGlDisplay;
 use glutin::display::GlDisplay;
@@ -15,6 +16,8 @@ pub enum UserEvent {
 }
 
 pub struct Bootstrap {
+    project_dirs: ProjectDirs,
+
     event_loop: Option<EventLoop<UserEvent>>,
     window: winit::window::Window,
     glow_ctx: Arc<glow::Context>,
@@ -28,7 +31,10 @@ pub struct Bootstrap {
 }
 
 impl Bootstrap {
-    pub unsafe fn new(winit_window_builder: winit::window::WindowBuilder) -> anyhow::Result<Self> {
+    pub unsafe fn new(
+        project_dirs: ProjectDirs,
+        winit_window_builder: winit::window::WindowBuilder,
+    ) -> anyhow::Result<Self> {
         let event_loop: EventLoop<UserEvent> =
             winit::event_loop::EventLoopBuilder::with_user_event()
                 .build()
@@ -129,7 +135,12 @@ impl Bootstrap {
                     .expect("Cannot send event");
             });
 
+        if let Ok(memory) = read_persisted_egui_memory(&project_dirs) {
+            egui_glow.egui_ctx.memory_mut(|slot| *slot = memory);
+        }
+
         Ok(Self {
+            project_dirs,
             app: None,
             event_loop: Some(event_loop),
             window,
@@ -250,6 +261,14 @@ impl Bootstrap {
                     repaint_delay = delay;
                 }
                 winit::event::Event::LoopExiting => {
+                    if let Err(err) =
+                        write_persisted_egui_memory(&self.project_dirs, &self.egui_glow.egui_ctx)
+                    {
+                        log::warn!("failed to persist applicate state: {err}");
+                    }
+                    if let Err(err) = app.on_exit(&self.project_dirs) {
+                        log::warn!("failed to persist applicate config: {err}");
+                    }
                     self.egui_glow.destroy();
                 }
                 winit::event::Event::NewEvents(winit::event::StartCause::ResumeTimeReached {
@@ -264,8 +283,28 @@ impl Bootstrap {
     }
 }
 
+fn read_persisted_egui_memory(project_dirs: &ProjectDirs) -> anyhow::Result<egui::Memory> {
+    let data_path = project_dirs.data_dir().join("egui_state.toml");
+    let contents = std::fs::read_to_string(data_path)?;
+    ron::from_str(&contents).map_err(|err| anyhow::format_err!("toml deserialize failed: {err}"))
+}
+
+fn write_persisted_egui_memory(
+    project_dirs: &ProjectDirs,
+    ctx: &egui::Context,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(project_dirs.data_dir())
+        .context("failed to crate applicate directory")?;
+    let data_path = project_dirs.data_dir().join("egui_state.toml");
+    let state = ctx.memory(|mem| mem.clone());
+    let serialized_state = ron::to_string(&state).context("ron serialization failed")?;
+    std::fs::write(data_path, serialized_state)
+        .map_err(|err| anyhow::format_err!("writing egui state failed: {err}"))
+}
+
 pub trait App {
     fn clear_color(&self) -> egui::Color32;
     fn on_each_frame(&mut self, ctx: &egui::Context);
     fn on_keyboard_event(&mut self, key_event: winit::event::KeyEvent) -> bool;
+    fn on_exit(&mut self, project_dirs: &ProjectDirs) -> anyhow::Result<()>;
 }
