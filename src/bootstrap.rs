@@ -226,21 +226,20 @@ impl Bootstrap {
                         self.resize(*physical_size);
                     }
 
-                    let should_repaint = if let WindowEvent::KeyboardInput {
+                    let response = self.egui_glow.on_window_event(&self.window, &event);
+                    // directly go to app for keybaord events since egui_glow uses egui_winit
+                    // internally and that prevent all keyboard events from reaching the app
+                    let app_requests_repaint = if let WindowEvent::KeyboardInput {
                         event: key_event,
                         ..
                     } = event
                     {
-                        // skip egui_glow and directly go to app for keybaord events since
-                        // egui_glow uses egui_winit internally and that prevent all keyboard
-                        // events from reaching the app
-                        app.on_keyboard_event(key_event)
+                        app.on_keyboard_event(&key_event, self.egui_ctx().input(|i| i.modifiers))
                     } else {
-                        let response = self.egui_glow.on_window_event(&self.window, &event);
-                        response.repaint
+                        false
                     };
 
-                    if should_repaint {
+                    if app_requests_repaint || response.repaint {
                         self.window.request_redraw();
                     }
                 }
@@ -293,6 +292,10 @@ fn write_persisted_egui_memory(
 pub trait App {
     fn clear_color(&self) -> egui::Color32;
     fn on_each_frame(&mut self, ctx: &egui::Context);
-    fn on_keyboard_event(&mut self, key_event: winit::event::KeyEvent) -> bool;
+    fn on_keyboard_event(
+        &mut self,
+        key_event: &winit::event::KeyEvent,
+        modifiers: egui::Modifiers,
+    ) -> bool;
     fn on_exit(&mut self, project_dirs: &ProjectDirs) -> anyhow::Result<()>;
 }

@@ -52,6 +52,7 @@ pub struct TerminalEmulator {
     config: Config,
     font_manager: FontManager,
     child_process: Option<ChildProcess>,
+    kbd_handler: KeyboardHandler,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
 
@@ -210,10 +211,21 @@ impl bootstrap::App for TerminalEmulator {
             });
     }
 
-    fn on_keyboard_event(&mut self, event: winit::event::KeyEvent) -> bool {
-        log::info!("got on_keyboard_event: {event:?}");
-        // should repaint
-        true
+    fn on_keyboard_event(
+        &mut self,
+        event: &winit::event::KeyEvent,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        match self
+            .kbd_handler
+            .on_keyboard_event(event, modifiers, &mut self.buffered_input)
+        {
+            Ok(should_repaint) => should_repaint,
+            Err(err) => {
+                log::warn!("kbd handler failed: {err}");
+                true
+            }
+        }
     }
 
     fn on_exit(&mut self, project_dirs: &ProjectDirs) -> anyhow::Result<()> {
@@ -237,6 +249,7 @@ impl TerminalEmulator {
         Ok(Self {
             config,
             font_manager,
+            kbd_handler: KeyboardHandler::default(),
             child_process: None,
             buffered_input: String::new(),
             primary_grid: AnsiGrid::new(24, 80, 5000),
@@ -365,23 +378,23 @@ impl TerminalEmulator {
                     self.buffered_input.push_str("\x1b[201~");
                 }
             }
-            egui::Event::Key {
-                key: Key::Comma,
-                pressed: true,
-                repeat: false,
-                modifiers,
-                ..
-            } if modifiers.mac_cmd => {
-                self.show_settings = true;
-            }
-            ev @ (egui::Event::Key { .. } | egui::Event::Text(_)) => {
-                self.alternate_grid
-                    .as_mut()
-                    .unwrap_or(&mut self.primary_grid)
-                    .keyboard_handler
-                    .on_keyboard_event(ev, &mut self.buffered_input)?;
-            }
             // --
+            // egui::Event::Key {
+            //     key: Key::Comma,
+            //     pressed: true,
+            //     repeat: false,
+            //     modifiers,
+            //     ..
+            // } if modifiers.mac_cmd => {
+            //     self.show_settings = true;
+            // }
+            // ev @ (egui::Event::Key { .. } | egui::Event::Text(_)) => {
+            //     self.alternate_grid
+            //         .as_mut()
+            //         .unwrap_or(&mut self.primary_grid)
+            //         .keyboard_handler
+            //         .on_keyboard_event(ev, &mut self.buffered_input)?;
+            // }
             // egui::Event::Text(txt) => {
             //     if input_state.modifiers.alt {
             //         terminal_input::alt(txt, &mut self.buffered_input);
@@ -441,7 +454,11 @@ impl TerminalEmulator {
             //     pressed: true,
             //     ..
             // } => self.buffered_input.push_str("\u{1b}[D"),
-            egui::Event::Key { pressed: false, .. } => (),
+
+            // keyboard events are handled in Self::on_keyboard_event
+            egui::Event::Key { .. } => (),
+            egui::Event::Text(..) => (),
+
             egui::Event::PointerMoved { .. } => (),
             egui::Event::PointerGone { .. } => (),
             egui::Event::Scroll { .. } => (),
