@@ -6,6 +6,7 @@ mod ansi;
 mod bootstrap;
 mod config;
 mod fonts;
+mod keyboard_handler;
 mod pty;
 mod terminal_emulator;
 mod terminal_input;

@@ -1,3 +1,16 @@
+use crate::{
+    ansi::{self, AnsiToken, ProgressiveKeyboardControl, SgrControl},
+    bootstrap,
+    config::{self, Config},
+    fonts::{FontDesc, FontManager},
+    keyboard_handler::{self, KeyboardHandler},
+    pty, terminal_input,
+};
+use anyhow::Context;
+use directories_next::ProjectDirs;
+use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, Rect};
+use log::info;
+use nix::errno::Errno;
 use std::{
     collections::VecDeque,
     fmt::Write,
@@ -5,20 +18,6 @@ use std::{
     os::fd::{AsFd, AsRawFd, OwnedFd},
     sync::{mpsc, Arc},
 };
-
-use crate::{
-    ansi::{self, AnsiToken, SgrControl},
-    bootstrap,
-    config::{self, Config},
-    fonts::{FontDesc, FontManager},
-    pty, terminal_input,
-};
-use ansi::AsciiControl;
-use anyhow::Context;
-use directories_next::ProjectDirs;
-use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, Rect};
-use log::info;
-use nix::errno::Errno;
 
 #[derive(Debug)]
 struct ChildProcess {
@@ -366,13 +365,6 @@ impl TerminalEmulator {
                     self.buffered_input.push_str("\x1b[201~");
                 }
             }
-            egui::Event::Text(txt) => {
-                if input_state.modifiers.alt {
-                    terminal_input::alt(txt, &mut self.buffered_input);
-                } else {
-                    self.buffered_input.push_str(&txt);
-                };
-            }
             egui::Event::Key {
                 key: Key::Comma,
                 pressed: true,
@@ -382,58 +374,73 @@ impl TerminalEmulator {
             } if modifiers.mac_cmd => {
                 self.show_settings = true;
             }
-            egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers: egui::Modifiers::CTRL,
-                ..
-            } => terminal_input::ctrl(key.name(), &mut self.buffered_input),
-            egui::Event::Key {
-                key: Key::Escape,
-                pressed: true,
-                ..
-            } => {
-                if self.enable_application_escape {
-                    self.buffered_input.push_str("\x1bO[");
-                } else {
-                    self.buffered_input.push(AsciiControl::Escape.into());
-                }
+            ev @ (egui::Event::Key { .. } | egui::Event::Text(_)) => {
+                self.alternate_grid
+                    .as_mut()
+                    .unwrap_or(&mut self.primary_grid)
+                    .keyboard_handler
+                    .on_keyboard_event(ev, &mut self.buffered_input)?;
             }
-            egui::Event::Key {
-                key: Key::Tab,
-                pressed: true,
-                ..
-            } => self.buffered_input.push(AsciiControl::Tab.into()),
-            egui::Event::Key {
-                key: Key::Backspace,
-                pressed: true,
-                ..
-            } => self.buffered_input.push(AsciiControl::Backspace.into()),
-            egui::Event::Key {
-                key: Key::Enter,
-                pressed: true,
-                ..
-            } => self.buffered_input.push(AsciiControl::LineFeed.into()),
-            egui::Event::Key {
-                key: Key::ArrowUp,
-                pressed: true,
-                ..
-            } => self.buffered_input.push_str("\u{1b}[A"),
-            egui::Event::Key {
-                key: Key::ArrowDown,
-                pressed: true,
-                ..
-            } => self.buffered_input.push_str("\u{1b}[B"),
-            egui::Event::Key {
-                key: Key::ArrowRight,
-                pressed: true,
-                ..
-            } => self.buffered_input.push_str("\u{1b}[C"),
-            egui::Event::Key {
-                key: Key::ArrowLeft,
-                pressed: true,
-                ..
-            } => self.buffered_input.push_str("\u{1b}[D"),
+            // --
+            // egui::Event::Text(txt) => {
+            //     if input_state.modifiers.alt {
+            //         terminal_input::alt(txt, &mut self.buffered_input);
+            //     } else {
+            //         self.buffered_input.push_str(&txt);
+            //     };
+            // }
+            // egui::Event::Key {
+            //     key,
+            //     pressed: true,
+            //     modifiers: egui::Modifiers::CTRL,
+            //     ..
+            // } => terminal_input::ctrl(key.name(), &mut self.buffered_input),
+            // egui::Event::Key {
+            //     key: Key::Escape,
+            //     pressed: true,
+            //     ..
+            // } => {
+            //     if self.enable_application_escape {
+            //         self.buffered_input.push_str("\x1bO[");
+            //     } else {
+            //         self.buffered_input.push(AsciiControl::Escape.into());
+            //     }
+            // }
+            // egui::Event::Key {
+            //     key: Key::Tab,
+            //     pressed: true,
+            //     ..
+            // } => self.buffered_input.push(AsciiControl::Tab.into()),
+            // egui::Event::Key {
+            //     key: Key::Backspace,
+            //     pressed: true,
+            //     ..
+            // } => self.buffered_input.push(AsciiControl::Backspace.into()),
+            // egui::Event::Key {
+            //     key: Key::Enter,
+            //     pressed: true,
+            //     ..
+            // } => self.buffered_input.push(AsciiControl::LineFeed.into()),
+            // egui::Event::Key {
+            //     key: Key::ArrowUp,
+            //     pressed: true,
+            //     ..
+            // } => self.buffered_input.push_str("\u{1b}[A"),
+            // egui::Event::Key {
+            //     key: Key::ArrowDown,
+            //     pressed: true,
+            //     ..
+            // } => self.buffered_input.push_str("\u{1b}[B"),
+            // egui::Event::Key {
+            //     key: Key::ArrowRight,
+            //     pressed: true,
+            //     ..
+            // } => self.buffered_input.push_str("\u{1b}[C"),
+            // egui::Event::Key {
+            //     key: Key::ArrowLeft,
+            //     pressed: true,
+            //     ..
+            // } => self.buffered_input.push_str("\u{1b}[D"),
             egui::Event::Key { pressed: false, .. } => (),
             egui::Event::PointerMoved { .. } => (),
             egui::Event::PointerGone { .. } => (),
@@ -483,6 +490,20 @@ impl TerminalEmulator {
                         AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteExit) => {
                             self.enable_bracketed_paste = false
                         }
+                        AnsiToken::ModeControl(ansi::ModeControl::CursorKeysEnter) => {
+                            self.alternate_grid
+                                .as_mut()
+                                .unwrap_or(&mut self.primary_grid)
+                                .keyboard_handler
+                                .set_cursor_keys_mode(true);
+                        }
+                        AnsiToken::ModeControl(ansi::ModeControl::CursorKeysExit) => {
+                            self.alternate_grid
+                                .as_mut()
+                                .unwrap_or(&mut self.primary_grid)
+                                .keyboard_handler
+                                .set_cursor_keys_mode(false);
+                        }
                         AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenEnter) => {
                             self.enter_alternate_screen();
                         }
@@ -522,6 +543,13 @@ impl TerminalEmulator {
                                 &mut self.buffered_input,
                                 "\x1b[>1;{PRIMARY_VERSION};{SECONDARY_VERSION}c"
                             );
+                        }
+                        AnsiToken::PKC(ProgressiveKeyboardControl::QueryFlags) => {
+                            self.alternate_grid
+                                .as_mut()
+                                .unwrap_or(&mut self.primary_grid)
+                                .keyboard_handler
+                                .progressive_mode_get_flags(&mut self.buffered_input);
                         }
                         _ => {
                             let grid = self
@@ -747,6 +775,7 @@ struct AnsiGrid {
 
     cursor_state: CursorState,
     saved_cursor_state: Option<CursorState>,
+    keyboard_handler: KeyboardHandler,
 }
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -773,6 +802,7 @@ impl AnsiGrid {
             text_format: vec![SgrState::default(); num_rows * num_cols],
             cursor_state,
             saved_cursor_state: None,
+            keyboard_handler: KeyboardHandler::default(),
         }
     }
 
@@ -942,6 +972,23 @@ impl AnsiGrid {
                         SgrControl::Unimplemented(_) => {
                             // noop
                         }
+                    }
+                }
+            }
+            PKC(op) => {
+                use ProgressiveKeyboardControl::*;
+                match op {
+                    SetFlags { flags, set_mode } => self
+                        .keyboard_handler
+                        .progressive_mode_set_flags(*flags, *set_mode),
+                    PushFlags { flags } => self
+                        .keyboard_handler
+                        .progressive_mode_push(keyboard_handler::ProgressiveMode(*flags)),
+                    PopFlags { num } => self.keyboard_handler.progressive_mode_pop(*num),
+                    // handled upstream
+                    QueryFlags => (),
+                    Unknown(params) => {
+                        info!("ignoring unknown progress keyboard control: {params}")
                     }
                 }
             }
