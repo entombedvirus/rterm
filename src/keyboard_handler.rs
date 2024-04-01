@@ -138,8 +138,9 @@ impl KeyboardHandler {
         };
 
         if modifiers.ctrl {
-            if let Some(ctrl_mapping) = legacy_ctrl_mapping(normalized_ascii_byte) {
-                output.push(ctrl_mapping as char);
+            if let Some(ctrl_mapping) = legacy_ctrl_mapping(normalized_ascii_byte, modifiers.shift)
+            {
+                output.push_str(ctrl_mapping.as_str());
                 return Ok(true);
             }
         }
@@ -217,40 +218,47 @@ fn handle_logical_key(logical_key: &winit::keyboard::Key, cursor_key_mode: bool)
 }
 
 fn shifted_lut(normalized: u8) -> Option<winit::keyboard::SmolStr> {
-    match normalized as char {
-        '`' => Some(SmolStr::new_static("~")),
-        '1' => Some(SmolStr::new_static("!")),
-        '2' => Some(SmolStr::new_static("@")),
-        '3' => Some(SmolStr::new_static("#")),
-        '4' => Some(SmolStr::new_static("$")),
-        '5' => Some(SmolStr::new_static("%")),
-        '6' => Some(SmolStr::new_static("^")),
-        '7' => Some(SmolStr::new_static("&")),
-        '8' => Some(SmolStr::new_static("*")),
-        '9' => Some(SmolStr::new_static("(")),
-        '0' => Some(SmolStr::new_static(")")),
-        '-' => Some(SmolStr::new_static("_")),
-        '=' => Some(SmolStr::new_static("+")),
-        '[' => Some(SmolStr::new_static("{")),
-        ']' => Some(SmolStr::new_static("}")),
-        '\\' => Some(SmolStr::new_static("|")),
-        ';' => Some(SmolStr::new_static(":")),
-        '\'' => Some(SmolStr::new_static("\"")),
-        ',' => Some(SmolStr::new_static("<")),
-        '.' => Some(SmolStr::new_static(">")),
-        '/' => Some(SmolStr::new_static("?")),
-        ch @ 'a'..='z' => Some(ch.to_uppercase().to_string().into()),
+    match normalized {
+        b'\x09' => Some(SmolStr::new_static("\x1b[Z")),
+        b'\x20' | b'\x0d' | b'\x1b' | b'\x7f' => Some(SmolStr::new_inline(unsafe {
+            std::str::from_utf8_unchecked(&[normalized])
+        })),
+        b'`' => Some(SmolStr::new_static("~")),
+        b'1' => Some(SmolStr::new_static("!")),
+        b'2' => Some(SmolStr::new_static("@")),
+        b'3' => Some(SmolStr::new_static("#")),
+        b'4' => Some(SmolStr::new_static("$")),
+        b'5' => Some(SmolStr::new_static("%")),
+        b'6' => Some(SmolStr::new_static("^")),
+        b'7' => Some(SmolStr::new_static("&")),
+        b'8' => Some(SmolStr::new_static("*")),
+        b'9' => Some(SmolStr::new_static("(")),
+        b'0' => Some(SmolStr::new_static(")")),
+        b'-' => Some(SmolStr::new_static("_")),
+        b'=' => Some(SmolStr::new_static("+")),
+        b'[' => Some(SmolStr::new_static("{")),
+        b']' => Some(SmolStr::new_static("}")),
+        b'\\' => Some(SmolStr::new_static("|")),
+        b';' => Some(SmolStr::new_static(":")),
+        b'\'' => Some(SmolStr::new_static("\"")),
+        b',' => Some(SmolStr::new_static("<")),
+        b'.' => Some(SmolStr::new_static(">")),
+        b'/' => Some(SmolStr::new_static("?")),
+        ch @ b'a'..=b'z' => Some((ch as char).to_uppercase().to_string().into()),
         _ => None,
     }
 }
 
 // See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/#id10
-fn legacy_ctrl_mapping(mut ch: u8) -> Option<u8> {
+fn legacy_ctrl_mapping(mut ch: u8, shift_pressed: bool) -> Option<SmolStr> {
     if matches!(ch, b'a'..=b'z') {
         ch.make_ascii_uppercase();
     }
-    Some(match ch {
-        b' ' => 0,
+    let ret = match ch {
+        b'\x20' => 0,
+        b'\x7f' => b'\x08',
+        b'\x09' if shift_pressed => return Some(SmolStr::new_static("\x1b[Z")),
+        b'\x0d' | b'\x1b' | b'\x09' => ch,
         // See: https://pbxbook.com/other/ctrlcods.html
         b'@'..=b'_' => ch & 0b0011_1111,
         b'/' => 31,
@@ -266,5 +274,9 @@ fn legacy_ctrl_mapping(mut ch: u8) -> Option<u8> {
         b'9' => 57,
         b'?' => 127,
         _other => return None,
-    })
+    };
+
+    let str_bytes = [ret];
+    let as_str = unsafe { std::str::from_utf8_unchecked(&str_bytes) };
+    Some(SmolStr::new_inline(as_str))
 }
