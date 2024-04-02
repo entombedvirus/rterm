@@ -1,5 +1,11 @@
-use anyhow::Result;
-use winit::{keyboard::SmolStr, platform::modifier_supplement::KeyEventExtModifierSupplement};
+use std::fmt::Write;
+
+use anyhow::{Context, Result};
+use glow::SHORT;
+use winit::{
+    event::Modifiers, keyboard::SmolStr,
+    platform::modifier_supplement::KeyEventExtModifierSupplement,
+};
 
 #[repr(u8)]
 #[derive(Debug, Default)]
@@ -14,6 +20,184 @@ enum ProgressiveEnhancementFlag {
 
 #[derive(Debug)]
 pub struct ProgressiveMode(pub u8);
+
+#[derive(Debug)]
+enum KeyRepr {
+    // for:
+    //  - Enter | Tab | Space | Backspace | Escape
+    C0(u8, egui::Modifiers),
+
+    // for:
+    //  - a-z 0-9 ` - = [ ] \ ; ' , . /
+    LegacyAscii(u8, egui::Modifiers),
+
+    CsiTilde {
+        num: u8,
+        modifiers: Option<SmolStr>,
+    },
+    CsiLetter {
+        letter: char,
+        modifiers: Option<SmolStr>,
+    },
+    Ss3 {
+        letter: char,
+    },
+    CsiUnicode {
+        code_point: u32,
+        modifiers: Option<SmolStr>,
+    },
+}
+
+impl std::fmt::Display for KeyRepr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeyRepr::C0(normalized_ascii_byte, modifiers) => {
+                format_normalized_byte(*normalized_ascii_byte, f, modifiers)
+            }
+
+            KeyRepr::LegacyAscii(normalized_ascii_byte, modifiers) => {
+                format_normalized_byte(*normalized_ascii_byte, f, modifiers)
+            }
+
+            KeyRepr::CsiTilde {
+                num,
+                modifiers: None,
+            } => write!(f, "\x1b[{num}~"),
+
+            KeyRepr::CsiTilde {
+                num,
+                modifiers: Some(mods),
+            } => write!(f, "\x1b[{num};{mods}~"),
+
+            KeyRepr::CsiLetter {
+                letter,
+                modifiers: None,
+            } => write!(f, "\x1b[{letter}"),
+
+            KeyRepr::CsiLetter {
+                letter,
+                modifiers: Some(mods),
+            } => write!(f, "\x1b[1;{mods}{letter}"),
+
+            KeyRepr::Ss3 { letter } => write!(f, "\x1b\x4f{letter}"),
+
+            KeyRepr::CsiUnicode {
+                code_point,
+                modifiers: None,
+            } => write!(f, "\x1b[{code_point}u"),
+
+            KeyRepr::CsiUnicode {
+                code_point,
+                modifiers: Some(mods),
+            } => write!(f, "\x1b[{code_point};{mods}u"),
+        }
+    }
+}
+
+fn format_normalized_byte(
+    normalized_ascii_byte: u8,
+    f: &mut std::fmt::Formatter<'_>,
+    modifiers: &egui::Modifiers,
+) -> std::fmt::Result {
+    if !supported_in_legacy_mode(
+        matches!(normalized_ascii_byte, 0xd | 0x1b | 0x8 | 0x9 | 0x20),
+        modifiers,
+    ) {
+        let repr = KeyRepr::csi_unicode(normalized_ascii_byte as char as u32, modifiers);
+        return f.write_fmt(format_args!("{repr}"));
+    }
+    if normalized_ascii_byte == 0x8 {
+        let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+        let alt_shift = egui::Modifiers::ALT | egui::Modifiers::SHIFT;
+        let ctrl_alt = egui::Modifiers::CTRL | egui::Modifiers::ALT;
+        let as_str = match *modifiers {
+            egui::Modifiers::NONE => "\x08",
+            egui::Modifiers::CTRL => "\x7f",
+            egui::Modifiers::ALT => "\x1b\x7f",
+            egui::Modifiers::SHIFT => "\x7f",
+            x if x == ctrl_shift => "\x08",
+            x if x == alt_shift => "\x1b\x7f",
+            x if x == ctrl_alt => "\x1b\x08",
+            _ => unreachable!(
+                "supported_in_legacy_mode check earlier eliminates other possibilities"
+            ),
+        };
+        return f.write_str(as_str);
+    }
+
+    if modifiers.alt {
+        f.write_char('\x1b')?;
+    }
+
+    if modifiers.ctrl {
+        if let Some(ctrl_mapping) = legacy_ctrl_mapping(normalized_ascii_byte, modifiers.shift) {
+            return f.write_str(ctrl_mapping.as_str());
+        }
+    }
+
+    if modifiers.shift {
+        if let Some(shifted) = shifted_lut(normalized_ascii_byte) {
+            return f.write_str(shifted.as_str());
+        }
+    }
+
+    f.write_char(normalized_ascii_byte as char)
+}
+
+impl KeyRepr {
+    fn csi_tilde(num: u8, mods: &egui::Modifiers) -> Self {
+        if supported_in_legacy_mode(false, mods) {
+            let modifiers = mods.any().then(|| encode_modifiers(mods));
+            Self::CsiTilde { num, modifiers }
+        } else {
+            Self::csi_unicode(num as u32, mods)
+        }
+    }
+
+    fn csi_letter(letter: char, mods: &egui::Modifiers) -> Self {
+        if supported_in_legacy_mode(false, mods) {
+            let modifiers = mods.any().then(|| encode_modifiers(mods));
+            Self::CsiLetter { letter, modifiers }
+        } else {
+            Self::csi_unicode(letter as u32, mods)
+        }
+    }
+
+    fn ss3(letter: char, mods: &egui::Modifiers) -> Self {
+        if mods.any() {
+            Self::csi_letter(letter, mods)
+        } else {
+            Self::Ss3 { letter }
+        }
+    }
+
+    fn csi_unicode(code_point: u32, mods: &egui::Modifiers) -> Self {
+        let modifiers = mods.any().then(|| encode_modifiers(mods));
+        Self::CsiUnicode {
+            code_point,
+            modifiers,
+        }
+    }
+}
+
+fn supported_in_legacy_mode(is_c0_special: bool, mods: &egui::Modifiers) -> bool {
+    use egui::Modifiers;
+    let supported_combos = [
+        Modifiers::NONE,
+        Modifiers::CTRL,
+        Modifiers::ALT,
+        Modifiers::SHIFT,
+        Modifiers::ALT | Modifiers::SHIFT,
+        Modifiers::ALT | Modifiers::CTRL,
+    ];
+
+    let ret = supported_combos.contains(mods);
+    if is_c0_special {
+        ret || (*mods == (Modifiers::CTRL | Modifiers::SHIFT))
+    } else {
+        ret
+    }
+}
 
 #[derive(Debug)]
 pub struct KeyboardHandler {
@@ -141,45 +325,33 @@ impl KeyboardHandler {
                 Ok(true)
             }
             // - printable chars without any modifiers, like 'a', 'b', '[' etc
-            winit::keyboard::Key::Character(_) => {
-                output.push_str(encode_logical_key(&logical_key, &modifiers).as_str());
+            winit::keyboard::Key::Character(ch) => {
+                match ch.as_str().as_bytes() {
+                    //  - a-z 0-9 ` - = [ ] \ ; ' , . /
+                    [ch @ (b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'`'
+                    | b'-'
+                    | b'='
+                    | b'['
+                    | b']'
+                    | b'\\'
+                    | b';'
+                    | b'\''
+                    | b','
+                    | b'.'
+                    | b'/')] => {
+                        let _ = output
+                            .write_fmt(format_args!("{}", KeyRepr::LegacyAscii(*ch, modifiers)))
+                            .context("legacy ascii encoding failed")?;
+                    }
+                    _ => output.push_str(ch.as_str()),
+                };
                 Ok(true)
             }
             _ => Ok(false),
         }
     }
-}
-
-fn encode_logical_key(logical_key: &winit::keyboard::Key, modifiers: &egui::Modifiers) -> SmolStr {
-    let mut output = String::new();
-    // alt always causes an ESC
-    if modifiers.alt {
-        output.push_str("\x1b");
-    }
-
-    let Some(normalized_ascii_byte) = logical_key
-        .to_text()
-        .and_then(|txt| txt.as_bytes().first().copied())
-    else {
-        return "".into();
-    };
-
-    if modifiers.ctrl {
-        if let Some(ctrl_mapping) = legacy_ctrl_mapping(normalized_ascii_byte, modifiers.shift) {
-            output.push_str(ctrl_mapping.as_str());
-            return output.into();
-        }
-    }
-
-    if modifiers.shift {
-        if let Some(shifted) = shifted_lut(normalized_ascii_byte) {
-            output.push_str(&shifted);
-            return output.into();
-        }
-    }
-
-    output.push(normalized_ascii_byte as char);
-    output.into()
 }
 
 fn handle_legacy_functional_encoding(
@@ -194,49 +366,28 @@ fn handle_legacy_functional_encoding(
         cursor_key_mode = false;
     }
 
-    let encoded_modifiers = modifiers.any().then_some(encode_modifiers(modifiers));
-    // CSI number ; modifier ~, where modifier is optional
-    let csi_num = |num: u8| -> SmolStr {
-        if let Some(mods) = encoded_modifiers.as_ref() {
-            format!("\x1b[{num};{mods}~").into()
-        } else {
-            format!("\x1b[{num}~").into()
-        }
-    };
-    // CSI 1 ; modifier {ABCDEFHPQS}, where modifier is optional
-    let csi_letter = |letter: char| -> SmolStr {
-        if let Some(mods) = encoded_modifiers.as_ref() {
-            format!("\x1b[1;{mods}{letter}").into()
-        } else {
-            format!("\x1b[{letter}").into()
-        }
-    };
-    // SS3 {PQRS}
-    let ss3_letter = |letter: char| -> SmolStr {
-        if let Some(mods) = encoded_modifiers.as_ref() {
-            format!("\x1b[1;{mods}{letter}").into()
-        } else {
-            format!("\x1b\x4f{letter}").into()
-        }
-    };
+    let c0 = |normalized_byte: u8| KeyRepr::C0(normalized_byte, *modifiers);
+    let csi_tilde = |num: u8| KeyRepr::csi_tilde(num, modifiers);
+    let ss3 = |letter: char| KeyRepr::ss3(letter, modifiers);
+    let csi_letter = |letter: char| KeyRepr::csi_letter(letter, modifiers);
 
-    let c0_special_handling = || -> SmolStr {
-        let logical_key = winit::keyboard::Key::Named(*functional_key);
-        encode_logical_key(&logical_key, modifiers)
-    };
+    let repr = match functional_key {
+        // C0 control code special handling
+        Enter | Tab | Space | Backspace | Escape => c0(functional_key
+            .to_text()
+            .and_then(|s| s.as_bytes().first())
+            .copied()
+            .expect("these keys have ascii representation")),
 
-    match functional_key {
-        Enter | Tab | Space | Backspace | Escape => c0_special_handling(),
+        Insert => csi_tilde(2),
+        Delete => csi_tilde(3),
 
-        Insert => csi_num(2),
-        Delete => csi_num(3),
-
-        ArrowUp if cursor_key_mode => "\x1bOA".into(),
-        ArrowDown if cursor_key_mode => "\x1bOB".into(),
-        ArrowRight if cursor_key_mode => "\x1bOC".into(),
-        ArrowLeft if cursor_key_mode => "\x1bDD".into(),
-        Home if cursor_key_mode => "\x1bOH".into(),
-        End if cursor_key_mode => "\x1bOF".into(),
+        ArrowUp if cursor_key_mode => ss3('A'),
+        ArrowDown if cursor_key_mode => ss3('B'),
+        ArrowRight if cursor_key_mode => ss3('C'),
+        ArrowLeft if cursor_key_mode => ss3('D'),
+        Home if cursor_key_mode => ss3('H'),
+        End if cursor_key_mode => ss3('F'),
 
         ArrowUp => csi_letter('A'),
         ArrowDown => csi_letter('B'),
@@ -245,30 +396,33 @@ fn handle_legacy_functional_encoding(
 
         Home => csi_letter('H'),
         End => csi_letter('F'),
-        PageUp => csi_num(5),
-        PageDown => csi_num(6),
+        PageUp => csi_tilde(5),
+        PageDown => csi_tilde(6),
 
-        F1 => ss3_letter('P'),
-        F2 => ss3_letter('Q'),
-        F3 => ss3_letter('R'),
-        F4 => ss3_letter('S'),
-        F5 => csi_num(15),
-        F6 => csi_num(17),
-        F7 => csi_num(18),
-        F8 => csi_num(19),
-        F9 => csi_num(20),
-        F10 => csi_num(21),
-        F11 => csi_num(23),
-        F12 => csi_num(24),
-        ContextMenu => csi_num(29),
-        _ => "".into(),
-    }
+        F1 => ss3('P'),
+        F2 => ss3('Q'),
+        F3 => ss3('R'),
+        F4 => ss3('S'),
+        F5 => csi_tilde(15),
+        F6 => csi_tilde(17),
+        F7 => csi_tilde(18),
+        F8 => csi_tilde(19),
+        F9 => csi_tilde(20),
+        F10 => csi_tilde(21),
+        F11 => csi_tilde(23),
+        F12 => csi_tilde(24),
+        ContextMenu => csi_tilde(29),
+        _ => return "".into(),
+    };
+
+    repr.to_string().into()
 }
 
 fn shifted_lut(normalized: u8) -> Option<winit::keyboard::SmolStr> {
     match normalized {
+        b'\x08' => Some(SmolStr::new_static("\x7f")),
         b'\x09' => Some(SmolStr::new_static("\x1b[Z")),
-        b'\x20' | b'\x0d' | b'\x1b' | b'\x7f' => Some(SmolStr::new_inline(unsafe {
+        b'\x20' | b'\x0d' | b'\x1b' => Some(SmolStr::new_inline(unsafe {
             std::str::from_utf8_unchecked(&[normalized])
         })),
         b'`' => Some(SmolStr::new_static("~")),
@@ -304,7 +458,7 @@ fn legacy_ctrl_mapping(mut ch: u8, shift_pressed: bool) -> Option<SmolStr> {
     }
     let ret = match ch {
         b'\x20' => 0,
-        b'\x7f' => b'\x08',
+        b'\x08' => b'\x7f',
         b'\x09' if shift_pressed => return Some(SmolStr::new_static("\x1b[Z")),
         b'\x0d' | b'\x1b' | b'\x09' => ch,
         // See: https://pbxbook.com/other/ctrlcods.html
@@ -440,8 +594,8 @@ mod tests {
             on_press![CTRL,SHIFT+Escape    -> "\x1b"],
             on_press![ALT,SHIFT+Escape     -> "\x1b\x1b"],
             on_press![CTRL,ALT+Escape      -> "\x1b\x1b"],
-            on_press![Backspace            -> "\x7f"],
-            on_press![CTRL+Backspace       -> "\x08"],
+            on_press![Backspace            -> "\x08"],
+            on_press![CTRL+Backspace       -> "\x7f"],
             on_press![ALT+Backspace        -> "\x1b\x7f"],
             on_press![SHIFT+Backspace      -> "\x7f"],
             on_press![CTRL,SHIFT+Backspace -> "\x08"],
@@ -479,7 +633,42 @@ mod tests {
             on_press![SHIFT,ALT+key "i" -> "\x1bI"],
             on_press![ALT,CTRL+key "i" -> "\x1b\t"],
             on_press![CTRL,SHIFT+key "i" -> "\x1b[105;6u"],
+            on_press![key "3" -> "3"],
+            on_press![SHIFT+key "3" -> "#"],
+            on_press![ALT+key "3" -> "\x1b3"],
+            on_press![CTRL+key "3" -> "\x1b"],
+            on_press![SHIFT,ALT+key "3" -> "\x1b#"],
+            on_press![ALT,CTRL+key "3" -> "\x1b\x1b"],
+            on_press![CTRL,SHIFT+key "3" -> "\x1b[51;6u"],
+            on_press![F1 -> "\x1b\x4fP"],
+            on_press![CTRL+F1 -> "\x1b[1;5P"],
+            on_press![ArrowUp -> "\x1b[A"],
             on_press![ALT+ArrowUp -> "\x1b[1;3A"],
+        ];
+        for test_case in test_cases {
+            test_case.run(&handler);
+        }
+    }
+
+    #[test]
+    fn test_cursor_key_mode() {
+        let mut handler = KeyboardHandler::default();
+        handler.set_cursor_keys_mode(true);
+
+        let test_cases = vec![
+            on_press![ArrowUp    -> "\x1b\x4fA"],
+            on_press![ArrowDown  -> "\x1b\x4fB"],
+            on_press![ArrowRight -> "\x1b\x4fC"],
+            on_press![ArrowLeft  -> "\x1b\x4fD"],
+            on_press![Home       -> "\x1b\x4fH"],
+            on_press![End        -> "\x1b\x4fF"],
+            // when modifiers are used, CSI form is used
+            on_press![ALT,SHIFT+ArrowUp    -> "\x1b[1;4A"],
+            on_press![ALT,SHIFT+ArrowDown  -> "\x1b[1;4B"],
+            on_press![ALT,SHIFT+ArrowRight -> "\x1b[1;4C"],
+            on_press![ALT,SHIFT+ArrowLeft  -> "\x1b[1;4D"],
+            on_press![ALT,SHIFT+Home       -> "\x1b[1;4H"],
+            on_press![ALT,SHIFT+End        -> "\x1b[1;4F"],
         ];
         for test_case in test_cases {
             test_case.run(&handler);

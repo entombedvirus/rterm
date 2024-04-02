@@ -749,7 +749,7 @@ mod tests {
             ],
             vec![
                 AnsiToken::EraseControl(FromCursorToEndOfLine),
-                AnsiToken::Unknown("\u{1b}[?2004h".to_string()),
+                AnsiToken::ModeControl(ModeControl::BracketedPasteEnter),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::SGR(vec![SgrControl::Reset]),
