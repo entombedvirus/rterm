@@ -59,7 +59,13 @@ impl KeyboardHandler {
         if self.is_in_progressive_mode() {
             self.progressive_mode(ev, modifiers, output)
         } else {
-            self.legacy_mode(ev, modifiers, output)
+            self.legacy_mode(
+                ev.logical_key.clone(),
+                ev.key_without_modifiers(),
+                modifiers,
+                ev.state,
+                output,
+            )
         }
     }
 
@@ -102,118 +108,160 @@ impl KeyboardHandler {
 
     fn legacy_mode(
         &self,
-        ev: &winit::event::KeyEvent,
+        mut logical_key: winit::keyboard::Key,
+        key_without_modifiers: winit::keyboard::Key,
         mut modifiers: egui::Modifiers,
+        state: winit::event::ElementState,
         output: &mut String,
     ) -> anyhow::Result<bool> {
-        if !ev.state.is_pressed() {
+        if !state.is_pressed() {
             // legacy mode can only handle press event and not release
             return Ok(false);
         }
 
-        let mut logical_key = ev.logical_key.clone();
-
         if modifiers.alt && self.option_key_is_meta {
             // ignore the special non-ascii char
-            logical_key = ev.key_without_modifiers();
+            logical_key = key_without_modifiers;
         } else {
             // option_key_is_meta turns the case where there is only alt to a no modifier case
             modifiers.alt = false;
         }
 
-        // - printable chars without any modifiers, like 'a', 'b', '[' etc
-        // - non-printable chars like backspace, tab, escape, F1 etc.
-        if modifiers.is_none() {
-            output.push_str(handle_logical_key(&logical_key, self.cursor_key_mode).as_str());
-            return Ok(true);
-        }
-
-        // alt always causes an ESC
-        if modifiers.alt {
-            output.push_str("\x1b");
-        }
-
-        let Some(normalized_ascii_byte) = logical_key_to_ascii(&logical_key) else {
-            return Ok(false);
-        };
-
-        if modifiers.ctrl {
-            if let Some(ctrl_mapping) = legacy_ctrl_mapping(normalized_ascii_byte, modifiers.shift)
-            {
-                output.push_str(ctrl_mapping.as_str());
-                return Ok(true);
+        match logical_key {
+            // - non-printable chars like backspace, tab, escape, F1 etc.
+            winit::keyboard::Key::Named(functional_key) => {
+                output.push_str(
+                    handle_legacy_functional_encoding(
+                        &functional_key,
+                        &modifiers,
+                        self.cursor_key_mode,
+                    )
+                    .as_str(),
+                );
+                Ok(true)
             }
-        }
-
-        if modifiers.shift {
-            if let Some(shifted) = shifted_lut(normalized_ascii_byte) {
-                output.push_str(&shifted);
-                return Ok(true);
+            // - printable chars without any modifiers, like 'a', 'b', '[' etc
+            winit::keyboard::Key::Character(_) => {
+                output.push_str(encode_logical_key(&logical_key, &modifiers).as_str());
+                Ok(true)
             }
+            _ => Ok(false),
         }
-
-        Ok(false)
     }
 }
 
-fn logical_key_to_ascii(logical_key: &winit::keyboard::Key) -> Option<u8> {
-    use winit::keyboard::Key::*;
-    use winit::keyboard::NamedKey::*;
-    match logical_key {
-        Named(Enter) => b'\x0d'.into(),
-        Named(Tab) => b'\x09'.into(),
-        Named(Space) => b'\x20'.into(),
-        Named(Backspace) => b'\x7f'.into(),
-        Named(Escape) => b'\x1b'.into(),
-        Character(ch) if ch.is_ascii() => ch.as_bytes().first().copied(),
-        _ => None,
+fn encode_logical_key(logical_key: &winit::keyboard::Key, modifiers: &egui::Modifiers) -> SmolStr {
+    let mut output = String::new();
+    // alt always causes an ESC
+    if modifiers.alt {
+        output.push_str("\x1b");
     }
+
+    let Some(normalized_ascii_byte) = logical_key
+        .to_text()
+        .and_then(|txt| txt.as_bytes().first().copied())
+    else {
+        return "".into();
+    };
+
+    if modifiers.ctrl {
+        if let Some(ctrl_mapping) = legacy_ctrl_mapping(normalized_ascii_byte, modifiers.shift) {
+            output.push_str(ctrl_mapping.as_str());
+            return output.into();
+        }
+    }
+
+    if modifiers.shift {
+        if let Some(shifted) = shifted_lut(normalized_ascii_byte) {
+            output.push_str(&shifted);
+            return output.into();
+        }
+    }
+
+    output.push(normalized_ascii_byte as char);
+    output.into()
 }
 
-fn handle_logical_key(logical_key: &winit::keyboard::Key, cursor_key_mode: bool) -> SmolStr {
-    use winit::keyboard::Key::*;
+fn handle_legacy_functional_encoding(
+    functional_key: &winit::keyboard::NamedKey,
+    modifiers: &egui::Modifiers,
+    mut cursor_key_mode: bool,
+) -> SmolStr {
     use winit::keyboard::NamedKey::*;
-    match logical_key {
-        Named(Enter) => "\x0d".into(),
-        Named(Tab) => "\x09".into(),
-        Named(Space) => "\x20".into(),
-        Named(Backspace) => "\x7f".into(),
-        Named(Insert) => "\x1b[2~".into(),
-        Named(Delete) => "\x1b[3~".into(),
-        Named(Escape) => "\x1b".into(),
 
-        Named(ArrowUp) if cursor_key_mode => "\x1bOA".into(),
-        Named(ArrowDown) if cursor_key_mode => "\x1bOB".into(),
-        Named(ArrowRight) if cursor_key_mode => "\x1bOC".into(),
-        Named(ArrowLeft) if cursor_key_mode => "\x1bDD".into(),
-        Named(ArrowUp) => "\x1b[A".into(),
-        Named(ArrowDown) => "\x1b[B".into(),
-        Named(ArrowRight) => "\x1b[C".into(),
-        Named(ArrowLeft) => "\x1b[D".into(),
+    if cursor_key_mode && modifiers.any() {
+        // cursor keys mode is only supported when there are no modifiers
+        cursor_key_mode = false;
+    }
 
-        Named(Home) if cursor_key_mode => "\x1bOH".into(),
-        Named(Home) => "\x1b[H".into(),
-        Named(End) if cursor_key_mode => "\x1bOF".into(),
-        Named(End) => "\x1b[F".into(),
-        Named(PageUp) => "\x1b[5~".into(),
-        Named(PageDown) => "\x1b[6~".into(),
+    let encoded_modifiers = modifiers.any().then_some(encode_modifiers(modifiers));
+    // CSI number ; modifier ~, where modifier is optional
+    let csi_num = |num: u8| -> SmolStr {
+        if let Some(mods) = encoded_modifiers.as_ref() {
+            format!("\x1b[{num};{mods}~").into()
+        } else {
+            format!("\x1b[{num}~").into()
+        }
+    };
+    // CSI 1 ; modifier {ABCDEFHPQS}, where modifier is optional
+    let csi_letter = |letter: char| -> SmolStr {
+        if let Some(mods) = encoded_modifiers.as_ref() {
+            format!("\x1b[1;{mods}{letter}").into()
+        } else {
+            format!("\x1b[{letter}").into()
+        }
+    };
+    // SS3 {PQRS}
+    let ss3_letter = |letter: char| -> SmolStr {
+        if let Some(mods) = encoded_modifiers.as_ref() {
+            format!("\x1b[1;{mods}{letter}").into()
+        } else {
+            format!("\x1b\x4f{letter}").into()
+        }
+    };
 
-        Named(F1) => "\x1bOP".into(),
-        Named(F2) => "\x1bOQ".into(),
-        Named(F3) => "\x1bOR".into(),
-        Named(F4) => "\x1bOS".into(),
-        Named(F5) => "\x1b[15~".into(),
-        Named(F6) => "\x1b[17~".into(),
-        Named(F7) => "\x1b[18~".into(),
-        Named(F8) => "\x1b[19~".into(),
-        Named(F9) => "\x1b[20~".into(),
-        Named(F10) => "\x1b[21~".into(),
-        Named(F11) => "\x1b[23~".into(),
-        Named(F12) => "\x1b[24~".into(),
-        Named(ContextMenu) => "\x1b[29~".into(),
+    let c0_special_handling = || -> SmolStr {
+        let logical_key = winit::keyboard::Key::Named(*functional_key);
+        encode_logical_key(&logical_key, modifiers)
+    };
 
-        Character(txt) => txt.clone(),
-        Named(_) | Unidentified(_) | Dead(_) => "".into(),
+    match functional_key {
+        Enter | Tab | Space | Backspace | Escape => c0_special_handling(),
+
+        Insert => csi_num(2),
+        Delete => csi_num(3),
+
+        ArrowUp if cursor_key_mode => "\x1bOA".into(),
+        ArrowDown if cursor_key_mode => "\x1bOB".into(),
+        ArrowRight if cursor_key_mode => "\x1bOC".into(),
+        ArrowLeft if cursor_key_mode => "\x1bDD".into(),
+        Home if cursor_key_mode => "\x1bOH".into(),
+        End if cursor_key_mode => "\x1bOF".into(),
+
+        ArrowUp => csi_letter('A'),
+        ArrowDown => csi_letter('B'),
+        ArrowRight => csi_letter('C'),
+        ArrowLeft => csi_letter('D'),
+
+        Home => csi_letter('H'),
+        End => csi_letter('F'),
+        PageUp => csi_num(5),
+        PageDown => csi_num(6),
+
+        F1 => ss3_letter('P'),
+        F2 => ss3_letter('Q'),
+        F3 => ss3_letter('R'),
+        F4 => ss3_letter('S'),
+        F5 => csi_num(15),
+        F6 => csi_num(17),
+        F7 => csi_num(18),
+        F8 => csi_num(19),
+        F9 => csi_num(20),
+        F10 => csi_num(21),
+        F11 => csi_num(23),
+        F12 => csi_num(24),
+        ContextMenu => csi_num(29),
+        _ => "".into(),
     }
 }
 
@@ -279,4 +327,162 @@ fn legacy_ctrl_mapping(mut ch: u8, shift_pressed: bool) -> Option<SmolStr> {
     let str_bytes = [ret];
     let as_str = unsafe { std::str::from_utf8_unchecked(&str_bytes) };
     Some(SmolStr::new_inline(as_str))
+}
+
+fn encode_modifiers(mods: &egui::Modifiers) -> SmolStr {
+    let mut ret = 0;
+    if mods.shift {
+        ret |= 0b1;
+    }
+    if mods.alt {
+        ret |= 0b10;
+    }
+    if mods.ctrl {
+        ret |= 0b100;
+    }
+    if mods.mac_cmd {
+        ret |= 0b1000;
+    }
+    SmolStr::new_inline(&format!("{}", 1 + ret))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct LegacyHandlingTestCase {
+        logical_key: winit::keyboard::Key,
+        key_without_modifiers: winit::keyboard::Key,
+        modifiers: egui::Modifiers,
+        state: winit::event::ElementState,
+
+        expected_output: &'static str,
+    }
+
+    impl LegacyHandlingTestCase {
+        fn run(&self, handler: &KeyboardHandler) {
+            let Self {
+                logical_key,
+                key_without_modifiers,
+                modifiers,
+                state,
+
+                expected_output,
+            } = self;
+            let mut actual_output = String::new();
+            let result = handler.legacy_mode(
+                logical_key.clone(),
+                key_without_modifiers.clone(),
+                *modifiers,
+                *state,
+                &mut actual_output,
+            );
+            assert!(
+                result.is_ok(),
+                "expected handling to not return an error for {self:?}"
+            );
+            assert_eq!(
+                actual_output.as_str(),
+                *expected_output,
+                "key handling output did not match expectation. {self:?}"
+            );
+        }
+    }
+
+    macro_rules! on_press {
+        (key $k:literal -> $expected:literal) => {
+            on_press![NONE+key $k -> $expected]
+        };
+        ($($modifier:ident),+ + key $k:literal -> $expected:literal) => {
+            LegacyHandlingTestCase {
+                logical_key: winit::keyboard::Key::Character(winit::keyboard::SmolStr::new_static($k)),
+                key_without_modifiers: winit::keyboard::Key::Character(
+                    winit::keyboard::SmolStr::new_static($k)
+                ),
+                modifiers: $(egui::Modifiers::$modifier)|+,
+                state: winit::event::ElementState::Pressed,
+                expected_output: $expected,
+            }
+        };
+        ($key_variant:ident -> $expected:literal) => {
+            on_press![NONE+$key_variant -> $expected]
+        };
+        ($($modifier:ident),+ + $key_variant:ident -> $expected:literal) => {
+            LegacyHandlingTestCase {
+                logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
+                key_without_modifiers: winit::keyboard::Key::Named(
+                    winit::keyboard::NamedKey::$key_variant,
+                ),
+                modifiers: $(egui::Modifiers::$modifier)|+,
+                state: winit::event::ElementState::Pressed,
+                expected_output: $expected,
+            }
+        };
+    }
+
+    #[test]
+    fn test_legacy_special_case_key_handling() {
+        let handler = KeyboardHandler::default();
+
+        let test_cases = vec![
+            on_press![Enter                -> "\x0d"],
+            on_press![CTRL+Enter           -> "\x0d"],
+            on_press![ALT+Enter            -> "\x1b\x0d"],
+            on_press![SHIFT+Enter          -> "\x0d"],
+            on_press![CTRL,SHIFT+Enter     -> "\x0d"],
+            on_press![ALT,SHIFT+Enter      -> "\x1b\x0d"],
+            on_press![CTRL,ALT+Enter       -> "\x1b\x0d"],
+            on_press![Escape               -> "\x1b"],
+            on_press![CTRL+Escape          -> "\x1b"],
+            on_press![ALT+Escape           -> "\x1b\x1b"],
+            on_press![SHIFT+Escape         -> "\x1b"],
+            on_press![CTRL,SHIFT+Escape    -> "\x1b"],
+            on_press![ALT,SHIFT+Escape     -> "\x1b\x1b"],
+            on_press![CTRL,ALT+Escape      -> "\x1b\x1b"],
+            on_press![Backspace            -> "\x7f"],
+            on_press![CTRL+Backspace       -> "\x08"],
+            on_press![ALT+Backspace        -> "\x1b\x7f"],
+            on_press![SHIFT+Backspace      -> "\x7f"],
+            on_press![CTRL,SHIFT+Backspace -> "\x08"],
+            on_press![ALT,SHIFT+Backspace  -> "\x1b\x7f"],
+            on_press![CTRL,ALT+Backspace   -> "\x1b\x08"],
+            on_press![Tab                  -> "\x09"],
+            on_press![CTRL+Tab             -> "\x09"],
+            on_press![ALT+Tab              -> "\x1b\x09"],
+            on_press![SHIFT+Tab            -> "\x1b[Z"],
+            on_press![CTRL,SHIFT+Tab       -> "\x1b[Z"],
+            on_press![ALT,SHIFT+Tab        -> "\x1b\x1b[Z"],
+            on_press![CTRL,ALT+Tab         -> "\x1b\x09"],
+            on_press![Space                -> "\x20"],
+            on_press![CTRL+Space           -> "\x00"],
+            on_press![ALT+Space            -> "\x1b\x20"],
+            on_press![SHIFT+Space          -> "\x20"],
+            on_press![CTRL,SHIFT+Space     -> "\x00"],
+            on_press![ALT,SHIFT+Space      -> "\x1b\x20"],
+            on_press![CTRL,ALT+Space       -> "\x1b\x00"],
+        ];
+        for test_case in test_cases {
+            test_case.run(&handler);
+        }
+    }
+
+    #[test]
+    fn test_legacy_non_special_keys() {
+        let handler = KeyboardHandler::default();
+
+        let test_cases = vec![
+            on_press![key "i" -> "i"],
+            on_press![SHIFT+key "i" -> "I"],
+            on_press![ALT+key "i" -> "\x1bi"],
+            on_press![CTRL+key "i" -> "\t"],
+            on_press![SHIFT,ALT+key "i" -> "\x1bI"],
+            on_press![ALT,CTRL+key "i" -> "\x1b\t"],
+            on_press![CTRL,SHIFT+key "i" -> "\x1b[105;6u"],
+            on_press![ALT+ArrowUp -> "\x1b[1;3A"],
+        ];
+        for test_case in test_cases {
+            test_case.run(&handler);
+        }
+    }
 }

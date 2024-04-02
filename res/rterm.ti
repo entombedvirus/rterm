@@ -111,6 +111,8 @@ rterm|80-column dumb tty,
 	khome=\EOH,
 # cursor_end
 	kend=\EOF,
+# key_backspace               kbs      kb     backspace key
+	kbs=^H,
 # funtion keys
 	kf1=\EOP,
 	kf2=\EOQ,
