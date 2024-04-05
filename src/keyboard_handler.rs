@@ -1,9 +1,8 @@
 use std::{collections::BTreeMap, fmt::Write};
 
-use anyhow::{Context, Result};
-use glow::{MAX, SHORT};
+use anyhow::Context;
 use winit::{
-    event::{ElementState, KeyEvent, Modifiers},
+    event::{ElementState, KeyEvent},
     keyboard::{Key, KeyLocation, NamedKey, SmolStr},
     platform::modifier_supplement::KeyEventExtModifierSupplement,
 };
@@ -25,6 +24,18 @@ pub struct ProgressiveMode(pub u8);
 impl ProgressiveMode {
     fn has(&self, flag: ProgressiveEnhancementFlag) -> bool {
         self.0 & flag as u8 != 0
+    }
+
+    fn all() -> Self {
+        use ProgressiveEnhancementFlag::*;
+        let flags = [
+            DisambiguateEscapeCodes,
+            ReportEventTypes,
+            ReportAlternateKeys,
+            ReportAllKeysAsEscapeCodes,
+            ReportAssociatedText,
+        ];
+        Self(flags.into_iter().fold(0u8, |a, b| a | b as u8))
     }
 }
 
@@ -117,7 +128,16 @@ impl std::fmt::Display for KeyRepr {
                 suffix_ascii_byte: suffix,
             } => {
                 write!(f, "\x1b[")?;
-                write!(f, "{key_code}")?;
+                if *key_code != 1
+                    || [modifiers, event_type, text_as_codepoints]
+                        .into_iter()
+                        .any(Option::is_some)
+                    || [shifted_key_code, base_key_code]
+                        .into_iter()
+                        .any(Option::is_some)
+                {
+                    write!(f, "{key_code}")?;
+                }
 
                 match (shifted_key_code, base_key_code) {
                     (None, None) => (),
@@ -126,14 +146,18 @@ impl std::fmt::Display for KeyRepr {
                     (Some(shifted), Some(base)) => write!(f, ":{shifted}:{base}")?,
                 }
 
+                let mut needs_sep = false;
                 match (modifiers, event_type) {
-                    (None, None) => write!(f, ";")?,
+                    (None, None) => needs_sep = true,
                     (Some(mods), None) => write!(f, ";{mods}")?,
                     (None, Some(event_type)) => write!(f, ";1:{event_type}")?,
                     (Some(mods), Some(event_type)) => write!(f, ";{mods}:{event_type}")?,
                 }
 
                 if let Some(txt) = text_as_codepoints {
+                    if needs_sep {
+                        write!(f, ";")?;
+                    }
                     write!(f, ";{txt}")?;
                 }
                 write!(f, "{}", *suffix as char)
@@ -229,13 +253,22 @@ impl KeyRepr {
 
     fn progressive_csi_unicode(
         key_code: u32,
-        ev: &winit::event::KeyEvent,
-        modifiers: &egui::Modifiers,
+        suffix_ascii_byte: u8,
         mode: ProgressiveMode,
+        ctx: &KeyContext<'_>,
     ) -> Self {
+        let KeyContext {
+            logical_key,
+            text_with_all_modifiers,
+            key_without_modifiers,
+            state,
+            location,
+            repeat,
+            modifiers,
+        } = ctx;
         let shifted_key_code =
             if mode.has(ProgressiveEnhancementFlag::ReportAlternateKeys) && modifiers.shift {
-                ev.logical_key.to_text().and_then(|txt| {
+                text_with_all_modifiers.and_then(|txt| {
                     txt.chars()
                         .next()
                         .map(u32::from)
@@ -245,28 +278,34 @@ impl KeyRepr {
                 None
             };
         let base_key_code = if mode.has(ProgressiveEnhancementFlag::ReportAlternateKeys) {
-            Self::lookup_key_code(&ev.key_without_modifiers(), ev.location)
+            Self::lookup_key_code(key_without_modifiers, *location)
                 .filter(|base_key_code| *base_key_code != key_code)
         } else {
             None
         };
 
-        let modifiers = modifiers.any().then(|| {
-            if ev.state == ElementState::Released {
-                // reset the modifier being released
-                let mut new_mods = modifiers.clone();
-                match ev.logical_key {
-                    Key::Named(NamedKey::Control) => new_mods.ctrl = false,
-                    Key::Named(NamedKey::Shift) => new_mods.shift = false,
-                    Key::Named(NamedKey::Alt) => new_mods.alt = false,
-                    Key::Named(NamedKey::Super) => new_mods.mac_cmd = false,
-                    _ => (),
-                }
-                encode_modifiers(&new_mods)
-            } else {
-                encode_modifiers(modifiers)
+        let modifiers = if matches!(
+            logical_key,
+            Key::Named(NamedKey::Control | NamedKey::Shift | NamedKey::Alt | NamedKey::Super)
+        ) {
+            // set or reset the modifier bit on the event for the modifier key since winit doesn't do that
+            let mut new_mods = *modifiers;
+            let is_set = *state == ElementState::Pressed;
+            match logical_key {
+                Key::Named(NamedKey::Control) => new_mods.ctrl = is_set,
+                Key::Named(NamedKey::Shift) => new_mods.shift = is_set,
+                Key::Named(NamedKey::Alt) => new_mods.alt = is_set,
+                Key::Named(NamedKey::Super) => new_mods.mac_cmd = is_set,
+                _ => (),
             }
-        });
+            Some(encode_modifiers(&new_mods))
+        } else if modifiers.any() {
+            eprintln!("here: {modifiers:?}");
+            Some(encode_modifiers(&modifiers))
+        } else {
+            None
+        };
+
         fn excepted_key(key: &Key) -> bool {
             matches!(
                 key,
@@ -275,32 +314,26 @@ impl KeyRepr {
         }
 
         let event_type = {
-            let should_report = mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes)
+            let mut should_report = mode
+                .has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes)
                 || (mode.has(ProgressiveEnhancementFlag::ReportEventTypes)
-                    && !excepted_key(&ev.logical_key));
+                    && !excepted_key(&logical_key));
 
-            should_report.then_some(if ev.repeat {
-                "2".into()
-            } else if !ev.state.is_pressed() {
-                "3".into()
-            } else {
-                "1".into()
-            })
+            should_report &= !state.is_pressed() || *repeat;
+            should_report.then_some(if *repeat { "2".into() } else { "3".into() })
         };
 
         let text_as_codepoints = mode
             .has(ProgressiveEnhancementFlag::ReportAssociatedText)
             .then(|| {
-                ev.text_with_all_modifiers()
+                text_with_all_modifiers
                     .and_then(|txt| txt.chars().next())
-                    .filter(|ch| ch.is_ascii_control())
+                    .filter(|ch| !ch.is_ascii_control())
                     .map(u32::from)
-                    .filter(|alt_codepoint| *alt_codepoint != key_code)
+                    .filter(|cp| *cp != key_code)
                     .map(|code| format!("{code}").into())
             })
             .flatten();
-
-        let suffix_ascii_byte = b'u';
 
         Self::ProgressiveCsiUnicode {
             key_code,
@@ -391,30 +424,40 @@ fn modifier_supported_in_legacy_mode(is_c0_special: bool, mods: &egui::Modifiers
     }
 }
 
-#[derive(Debug)]
-struct KeyContext<'a> {
-    mode: ProgressiveMode,
-    event: &'a KeyEvent,
-    modifiers: &'a egui::Modifiers,
+#[derive(Debug, Clone)]
+pub struct KeyContext<'a> {
+    logical_key: Key,
+    key_without_modifiers: Key,
+    text_with_all_modifiers: Option<&'a str>,
+    state: ElementState,
+    location: KeyLocation,
+    repeat: bool,
+    modifiers: egui::Modifiers,
 }
 
 impl<'a> KeyContext<'a> {
-    fn should_ignore(&self) -> bool {
-        if self
-            .mode
-            .has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes)
-        {
-            return false;
+    pub fn new(ev: &'a KeyEvent, mods: egui::Modifiers) -> Self {
+        Self {
+            logical_key: ev.logical_key.clone(),
+            key_without_modifiers: ev.key_without_modifiers(),
+            text_with_all_modifiers: ev.text_with_all_modifiers(),
+            state: ev.state,
+            location: ev.location,
+            repeat: ev.repeat,
+            modifiers: mods,
         }
-        let txt = self.event.text_with_all_modifiers();
-        !self.event.state.is_pressed() || txt.is_none()
     }
 
-    fn should_emit_control_code(&self) -> bool {
-        if self
-            .mode
-            .has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes)
-        {
+    fn should_ignore(&self, mode: ProgressiveMode) -> bool {
+        if mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
+            return false;
+        }
+        let txt = self.text_with_all_modifiers;
+        !self.state.is_pressed() || txt.is_none()
+    }
+
+    fn should_emit_control_code(&self, mode: ProgressiveMode) -> bool {
+        if mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
             return true;
         }
 
@@ -423,17 +466,15 @@ impl<'a> KeyContext<'a> {
         has_modifier && has_known_control_seq
     }
 
-    fn try_numpad(&self) -> Option<KeyRepr> {
-        if self.event.location != KeyLocation::Numpad
+    fn try_numpad(&self, mode: ProgressiveMode) -> Option<KeyRepr> {
+        if self.location != KeyLocation::Numpad
             || self.modifiers.is_none()
-            || !self
-                .mode
-                .has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes)
+            || !mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes)
         {
             return None;
         }
 
-        let code_point: u32 = match self.event.logical_key.as_ref() {
+        let code_point: u32 = match self.logical_key.as_ref() {
             Key::Character("0") => 57399,
             Key::Character("1") => 57400,
             Key::Character("2") => 57401,
@@ -466,71 +507,127 @@ impl<'a> KeyContext<'a> {
             },
             _ => return None,
         };
-        Some(self.build_csi_repr(code_point))
+        Some(self.build_csi_repr(code_point, b'u', mode))
     }
 
-    fn try_c0_special_keys(&self) -> Option<KeyRepr> {
-        if self
-            .mode
-            .has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes)
-        {
+    fn try_c0_special_keys(&self, mode: ProgressiveMode) -> Option<KeyRepr> {
+        if mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
             return None;
         }
 
-        match self.event.logical_key.as_ref() {
+        match self.logical_key.as_ref() {
             Key::Named(key @ (NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)) => {
                 let code_point = key
                     .to_text()
                     .and_then(|txt| txt.as_bytes().first())
                     .copied()
                     .expect("enter, tab and backspaced are expected to have textual representaion");
-                Some(KeyRepr::C0(code_point, *self.modifiers))
+                Some(KeyRepr::C0(code_point, self.modifiers))
             }
             _ => None,
         }
     }
 
-    fn try_as_csi_functional_key(&self) -> Option<KeyRepr> {
-        let named_key = match self.event.logical_key.as_ref() {
+    fn try_as_csi_functional_key(&self, mode: ProgressiveMode) -> Option<KeyRepr> {
+        let named_key = match self.logical_key.as_ref() {
             Key::Named(named_key) => named_key,
             _ => return None,
         };
 
-        let code_point = match (named_key, self.event.location) {
-            (NamedKey::Tab, _) => 9,
-            (NamedKey::Enter, _) => 13,
-            (NamedKey::Escape, _) => 27,
-            (NamedKey::Space, _) => 32,
-            (NamedKey::Backspace, _) => 127,
-            (NamedKey::Shift, KeyLocation::Left) => 57441,
-            (NamedKey::Control, KeyLocation::Left) => 57442,
-            (NamedKey::Alt, KeyLocation::Left) => 57443,
-            (NamedKey::Super, KeyLocation::Left) => 57444,
-            (NamedKey::Hyper, KeyLocation::Left) => 57445,
-            (NamedKey::Meta, KeyLocation::Left) => 57446,
-            (NamedKey::Shift, _) => 57447,
-            (NamedKey::Control, _) => 57448,
-            (NamedKey::Alt, _) => 57449,
-            (NamedKey::Super, _) => 57450,
-            (NamedKey::Hyper, _) => 57451,
-            (NamedKey::Meta, _) => 57452,
-            (NamedKey::CapsLock, _) => 57358,
-            (NamedKey::NumLock, _) => 57360,
+        let (code_point, suffix) = match (named_key, self.location) {
+            (NamedKey::Tab, _) => (9, b'u'),
+            (NamedKey::Enter, _) => (13, b'u'),
+            (NamedKey::Escape, _) => (27, b'u'),
+            (NamedKey::Space, _) => (32, b'u'),
+            (NamedKey::Backspace, _) => (127, b'u'),
+            (NamedKey::Shift, KeyLocation::Left) => (57441, b'u'),
+            (NamedKey::Control, KeyLocation::Left) => (57442, b'u'),
+            (NamedKey::Alt, KeyLocation::Left) => (57443, b'u'),
+            (NamedKey::Super, KeyLocation::Left) => (57444, b'u'),
+            (NamedKey::Hyper, KeyLocation::Left) => (57445, b'u'),
+            (NamedKey::Meta, KeyLocation::Left) => (57446, b'u'),
+            (NamedKey::Shift, _) => (57447, b'u'),
+            (NamedKey::Control, _) => (57448, b'u'),
+            (NamedKey::Alt, _) => (57449, b'u'),
+            (NamedKey::Super, _) => (57450, b'u'),
+            (NamedKey::Hyper, _) => (57451, b'u'),
+            (NamedKey::Meta, _) => (57452, b'u'),
+            (NamedKey::CapsLock, _) => (57358, b'u'),
+            (NamedKey::NumLock, _) => (57360, b'u'),
+            (NamedKey::ScrollLock, _) => (57359, b'u'),
+            (NamedKey::PrintScreen, _) => (57361, b'u'),
+            (NamedKey::Pause, _) => (57362, b'u'),
+
+            (NamedKey::ArrowUp, _) => (1, b'A'),
+            (NamedKey::ArrowDown, _) => (1, b'B'),
+            (NamedKey::ArrowRight, _) => (1, b'C'),
+            (NamedKey::ArrowLeft, _) => (1, b'D'),
+
+            (NamedKey::Home, _) => (1, b'H'),
+            (NamedKey::End, _) => (1, b'F'),
+            (NamedKey::PageUp, _) => (5, b'~'),
+            (NamedKey::PageDown, _) => (6, b'~'),
+
+            (NamedKey::F1, _) => (1, b'P'),
+            (NamedKey::F2, _) => (1, b'Q'),
+            (NamedKey::F3, _) => (13, b'~'),
+            (NamedKey::F4, _) => (1, b'S'),
+            (NamedKey::F5, _) => (15, b'~'),
+            (NamedKey::F6, _) => (17, b'~'),
+            (NamedKey::F7, _) => (18, b'~'),
+            (NamedKey::F8, _) => (19, b'~'),
+            (NamedKey::F9, _) => (20, b'~'),
+            (NamedKey::F10, _) => (21, b'~'),
+            (NamedKey::F11, _) => (23, b'~'),
+            (NamedKey::F12, _) => (24, b'~'),
+            (NamedKey::F13, _) => (57376, b'u'),
+            (NamedKey::F14, _) => (57377, b'u'),
+            (NamedKey::F15, _) => (57378, b'u'),
+            (NamedKey::F16, _) => (57379, b'u'),
+            (NamedKey::F17, _) => (57380, b'u'),
+            (NamedKey::F18, _) => (57381, b'u'),
+            (NamedKey::F19, _) => (57382, b'u'),
+            (NamedKey::F20, _) => (57383, b'u'),
+            (NamedKey::F21, _) => (57384, b'u'),
+            (NamedKey::F22, _) => (57385, b'u'),
+            (NamedKey::F23, _) => (57386, b'u'),
+            (NamedKey::F24, _) => (57387, b'u'),
+            (NamedKey::F25, _) => (57388, b'u'),
+            (NamedKey::F26, _) => (57389, b'u'),
+            (NamedKey::F27, _) => (57390, b'u'),
+            (NamedKey::F28, _) => (57391, b'u'),
+            (NamedKey::F29, _) => (57392, b'u'),
+            (NamedKey::F30, _) => (57393, b'u'),
+            (NamedKey::F31, _) => (57394, b'u'),
+            (NamedKey::F32, _) => (57395, b'u'),
+            (NamedKey::F33, _) => (57396, b'u'),
+            (NamedKey::F34, _) => (57397, b'u'),
+            (NamedKey::F35, _) => (57398, b'u'),
+            (NamedKey::ContextMenu, _) => (57363, b'u'),
+            (NamedKey::MediaPlay, _) => (57428, b'u'),
+            (NamedKey::MediaPause, _) => (57429, b'u'),
+            (NamedKey::MediaPlayPause, _) => (57430, b'u'),
+            (NamedKey::MediaStop, _) => (57432, b'u'),
+            (NamedKey::MediaFastForward, _) => (57433, b'u'),
+            (NamedKey::MediaRewind, _) => (57434, b'u'),
+            (NamedKey::MediaTrackNext, _) => (57435, b'u'),
+            (NamedKey::MediaTrackPrevious, _) => (57436, b'u'),
+            (NamedKey::MediaRecord, _) => (57437, b'u'),
+            (NamedKey::AudioVolumeDown, _) => (57438, b'u'),
+            (NamedKey::AudioVolumeUp, _) => (57439, b'u'),
+            (NamedKey::AudioVolumeMute, _) => (57440, b'u'),
+
             _ => return None,
         };
 
-        Some(self.build_csi_repr(code_point))
+        Some(self.build_csi_repr(code_point, suffix, mode))
     }
 
-    fn try_as_csi_text(&self) -> Option<KeyRepr> {
-        let txt = match self.event.logical_key.as_ref() {
-            Key::Character(txt) => txt.to_lowercase(),
+    fn try_as_csi_text(&self, mode: ProgressiveMode) -> Option<KeyRepr> {
+        let txt = match self.key_without_modifiers.as_ref() {
+            Key::Character(txt) if !txt.is_empty() => txt.to_lowercase(),
             _ => return None,
         };
-
-        if txt.is_empty() {
-            return None;
-        }
 
         let code_point = if txt.chars().count() == 1 {
             txt.chars()
@@ -543,11 +640,11 @@ impl<'a> KeyContext<'a> {
             // code point set to zero
             0
         };
-        Some(self.build_csi_repr(code_point))
+        Some(self.build_csi_repr(code_point, b'u', mode))
     }
 
-    fn build_csi_repr(&self, code_point: u32) -> KeyRepr {
-        KeyRepr::progressive_csi_unicode(code_point, self.event, self.modifiers, self.mode)
+    fn build_csi_repr(&self, code_point: u32, suffix: u8, mode: ProgressiveMode) -> KeyRepr {
+        KeyRepr::progressive_csi_unicode(code_point, suffix, mode, self)
     }
 }
 
@@ -590,29 +687,22 @@ impl KeyboardHandler {
     // - pressed vs released vs repeat if in progressive handling mode
     pub fn on_keyboard_event(
         &self,
-        mut ev: winit::event::KeyEvent,
-        mut modifiers: egui::Modifiers,
+        mut ctx: KeyContext<'_>,
         output: &mut String,
     ) -> anyhow::Result<bool> {
         // on mac, if option is not meta, don't treat solitary option key as a modifier since
         // the user is trying to enter some unicode text
-        if !self.option_key_is_meta && modifiers == egui::Modifiers::ALT {
-            modifiers.alt = false;
+        if !self.option_key_is_meta && ctx.modifiers == egui::Modifiers::ALT {
+            ctx.modifiers.alt = false;
         }
-        if self.option_key_is_meta && modifiers.alt {
-            ev.logical_key = ev.key_without_modifiers();
+        if self.option_key_is_meta && ctx.modifiers.alt {
+            ctx.logical_key = ctx.key_without_modifiers.clone();
         }
 
-        if let Some(mode) = self.current_progressive_mode() {
-            self.progressive_mode(mode, &ev, modifiers, output)
+        if let Some(_) = self.current_progressive_mode() {
+            self.progressive_mode(ctx, output)
         } else {
-            self.legacy_mode(
-                ev.logical_key.clone(),
-                ev.key_without_modifiers(),
-                modifiers,
-                ev.state,
-                output,
-            )
+            self.legacy_mode(ctx, output)
         }
     }
 
@@ -655,36 +745,31 @@ impl KeyboardHandler {
         self.progressive_mode_stack.last().copied()
     }
 
-    fn progressive_mode(
-        &self,
-        mode: ProgressiveMode,
-        ev: &winit::event::KeyEvent,
-        modifiers: egui::Modifiers,
-        output: &mut String,
-    ) -> anyhow::Result<bool> {
-        let ctx = KeyContext {
-            mode,
-            event: ev,
-            modifiers: &modifiers,
-        };
+    fn progressive_mode(&self, ctx: KeyContext<'_>, output: &mut String) -> anyhow::Result<bool> {
+        let KeyContext {
+            logical_key,
+            text_with_all_modifiers,
+            ..
+        } = &ctx;
 
-        if ctx.should_ignore() {
+        let mode = self
+            .current_progressive_mode()
+            .unwrap_or(ProgressiveMode(0));
+        if ctx.should_ignore(mode) {
             log::info!(
-                "ignoring key event: {:?}, physical_key: {:?}",
-                ev.text_with_all_modifiers(),
-                ev.physical_key
+                "ignoring key event: {:?}, logical_key: {:?}",
+                text_with_all_modifiers,
+                logical_key,
             );
             return Ok(false);
         }
 
-        log::info!("event: {ev:?}");
-
-        if ctx.should_emit_control_code() {
+        if ctx.should_emit_control_code(mode) {
             let repr = ctx
-                .try_numpad()
-                .or_else(|| ctx.try_c0_special_keys())
-                .or_else(|| ctx.try_as_csi_functional_key())
-                .or_else(|| ctx.try_as_csi_text());
+                .try_numpad(mode)
+                .or_else(|| ctx.try_c0_special_keys(mode))
+                .or_else(|| ctx.try_as_csi_functional_key(mode))
+                .or_else(|| ctx.try_as_csi_text(mode));
 
             dbg!(&repr);
             match repr {
@@ -693,13 +778,13 @@ impl KeyboardHandler {
                     return Ok(true);
                 }
                 None => {
-                    log::info!("key ignored due to not being handled: {:?}", ev);
+                    log::info!("key ignored due to not being handled: {:?}", logical_key);
                 }
             }
         }
 
         // pass through as utf-8 bytes
-        if let Some(txt) = ev.text_with_all_modifiers() {
+        if let Some(txt) = text_with_all_modifiers {
             dbg!(&txt);
             output.push_str(txt);
             return Ok(true);
@@ -708,25 +793,16 @@ impl KeyboardHandler {
         Ok(false)
     }
 
-    fn legacy_mode(
-        &self,
-        mut logical_key: Key,
-        key_without_modifiers: Key,
-        mut modifiers: egui::Modifiers,
-        state: winit::event::ElementState,
-        output: &mut String,
-    ) -> anyhow::Result<bool> {
+    fn legacy_mode(&self, ctx: KeyContext<'_>, output: &mut String) -> anyhow::Result<bool> {
+        let KeyContext {
+            logical_key,
+            state,
+            modifiers,
+            ..
+        } = ctx;
         if !state.is_pressed() {
             // legacy mode can only handle press event and not release
             return Ok(false);
-        }
-
-        if modifiers.alt && self.option_key_is_meta {
-            // ignore the special non-ascii char
-            logical_key = key_without_modifiers;
-        } else {
-            // option_key_is_meta turns the case where there is only alt to a no modifier case
-            modifiers.alt = false;
         }
 
         match logical_key {
@@ -769,18 +845,6 @@ impl KeyboardHandler {
             }
             _ => Ok(false),
         }
-    }
-
-    // one of the following two forms:
-    // CSI number; modifier u
-    // CSI 1; modifier [~ABCDEFHPQS]
-    fn handle_progressive_encoding(
-        &self,
-        mode: ProgressiveMode,
-        ev: &winit::event::KeyEvent,
-        modifiers: &egui::Modifiers,
-    ) -> Option<KeyRepr> {
-        todo!()
     }
 }
 
@@ -1110,7 +1174,7 @@ fn encode_modifiers(mods: &egui::Modifiers) -> SmolStr {
     if mods.ctrl {
         ret |= 0b100;
     }
-    if mods.mac_cmd {
+    if mods.mac_cmd | mods.command {
         ret |= 0b1000;
     }
     SmolStr::new_inline(&format!("{}", 1 + ret))
@@ -1121,40 +1185,23 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct LegacyHandlingTestCase {
-        logical_key: winit::keyboard::Key,
-        key_without_modifiers: winit::keyboard::Key,
-        modifiers: egui::Modifiers,
-        state: winit::event::ElementState,
-
+    struct TestCase<'a> {
+        ctx: KeyContext<'a>,
+        // modifiers: egui::Modifiers,
         expected_output: &'static str,
     }
 
-    impl LegacyHandlingTestCase {
-        fn run(&self, handler: &KeyboardHandler) {
-            let Self {
-                logical_key,
-                key_without_modifiers,
-                modifiers,
-                state,
-
-                expected_output,
-            } = self;
+    impl TestCase<'_> {
+        fn run(self, handler: &KeyboardHandler) {
             let mut actual_output = String::new();
-            let result = handler.legacy_mode(
-                logical_key.clone(),
-                key_without_modifiers.clone(),
-                *modifiers,
-                *state,
-                &mut actual_output,
-            );
+            let result = handler.on_keyboard_event(self.ctx.clone(), &mut actual_output);
             assert!(
                 result.is_ok(),
                 "expected handling to not return an error for {self:?}"
             );
             assert_eq!(
                 actual_output.as_str(),
-                *expected_output,
+                self.expected_output,
                 "key handling output did not match expectation. {self:?}"
             );
         }
@@ -1165,27 +1212,67 @@ mod tests {
             on_press![NONE+key $k -> $expected]
         };
         ($($modifier:ident),+ + key $k:literal -> $expected:literal) => {
-            LegacyHandlingTestCase {
-                logical_key: winit::keyboard::Key::Character(winit::keyboard::SmolStr::new_static($k)),
-                key_without_modifiers: winit::keyboard::Key::Character(
-                    winit::keyboard::SmolStr::new_static($k)
-                ),
-                modifiers: $(egui::Modifiers::$modifier)|+,
-                state: winit::event::ElementState::Pressed,
-                expected_output: $expected,
-            }
+            on_press![
+                base_case:
+                winit::keyboard::Key::Character(winit::keyboard::SmolStr::new_static($k)),
+                winit::keyboard::Key::Character(winit::keyboard::SmolStr::new_static($k)),
+                Some($k),
+                winit::keyboard::KeyLocation::Standard,
+                winit::event::ElementState::Pressed,
+                $($modifier),+
+                -> $expected
+            ]
         };
         ($key_variant:ident -> $expected:literal) => {
             on_press![NONE+$key_variant -> $expected]
         };
+        (LEFT $key_variant:ident -> $expected:literal) => {
+            on_press![
+                base_case:
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
+                None,
+                winit::keyboard::KeyLocation::Left,
+                winit::event::ElementState::Pressed,
+                NONE
+                -> $expected
+            ]
+        };
+        (RIGHT $key_variant:ident -> $expected:literal) => {
+            on_press![
+                base_case:
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
+                None,
+                winit::keyboard::KeyLocation::Right,
+                winit::event::ElementState::Pressed,
+                NONE
+                -> $expected
+            ]
+        };
         ($($modifier:ident),+ + $key_variant:ident -> $expected:literal) => {
-            LegacyHandlingTestCase {
-                logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
-                key_without_modifiers: winit::keyboard::Key::Named(
-                    winit::keyboard::NamedKey::$key_variant,
-                ),
-                modifiers: $(egui::Modifiers::$modifier)|+,
-                state: winit::event::ElementState::Pressed,
+            on_press![
+                base_case:
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
+                None,
+                winit::keyboard::KeyLocation::Standard,
+                winit::event::ElementState::Pressed,
+                $($modifier),+
+                -> $expected
+            ]
+        };
+        (base_case: $logical_key:expr, $key_without_mods:expr, $txt_with_mods:expr, $location:expr, $state:expr, $($modifier:ident),+ -> $expected:literal) => {
+            TestCase {
+                ctx: KeyContext {
+                    logical_key: $logical_key,
+                    text_with_all_modifiers: $txt_with_mods,
+                    key_without_modifiers: $key_without_mods,
+                    location: $location,
+                    state: $state,
+                    repeat: false,
+                    modifiers: $(egui::Modifiers::$modifier)|+,
+                },
                 expected_output: $expected,
             }
         };
@@ -1286,6 +1373,41 @@ mod tests {
             on_press![ALT,SHIFT+Home       -> "\x1b[1;4H"],
             on_press![ALT,SHIFT+End        -> "\x1b[1;4F"],
         ];
+        for test_case in test_cases {
+            test_case.run(&handler);
+        }
+    }
+
+    #[test]
+    fn test_progressive_mode_option_is_alt() {
+        let mut handler = KeyboardHandler::default();
+        handler.option_key_is_meta = true;
+        handler.progressive_mode_push(ProgressiveMode::all());
+
+        let test_cases = vec![
+            // modifier key, by itself
+            on_press![LEFT Alt -> "\x1b[57443;3u"],
+            on_press![RIGHT Alt -> "\x1b[57449;3u"],
+            // keys with text representation
+            on_press![key "a" -> "\x1b[97u"],
+            on_press![ALT+key "a" -> "\x1b[97;3u"],
+            on_press![SHIFT,ALT+key "a" -> "\x1b[97;4u"],
+            on_press![base_case: Key::Character("#".into()), Key::Character("3".into()), Some("#".into()), KeyLocation::Standard, ElementState::Pressed, SHIFT -> "\x1b[51:35;2;35u"],
+            on_press![base_case: Key::Character("#".into()), Key::Character("3".into()), Some("#".into()), KeyLocation::Standard, ElementState::Pressed, SHIFT,ALT -> "\x1b[51:35;4;35u"],
+            // keys without text
+            on_press![ArrowUp    -> "\x1b[A"],
+            on_press![ALT,SHIFT+ArrowUp    -> "\x1b[1;4A"],
+            on_press![PageDown    -> "\x1b[6~"],
+            on_press![CTRL,SHIFT+PageDown    -> "\x1b[6;6~"],
+            on_press![F5    -> "\x1b[15~"],
+            on_press![CTRL+F5    -> "\x1b[15;5~"],
+            on_press![Backspace    -> "\x1b[127u"],
+            on_press![SHIFT+Backspace    -> "\x1b[127;2u"],
+            on_press![F3 -> "\x1b[13~"],
+            on_press![CTRL,SHIFT+F3 -> "\x1b[13;6~"],
+            on_press![MediaPlayPause -> "\x1b[57430u"],
+        ];
+
         for test_case in test_cases {
             test_case.run(&handler);
         }

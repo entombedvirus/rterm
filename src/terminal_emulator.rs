@@ -3,7 +3,7 @@ use crate::{
     bootstrap,
     config::{self, Config},
     fonts::{FontDesc, FontManager},
-    keyboard_handler::{self, KeyboardHandler},
+    keyboard_handler::{self, KeyContext, KeyboardHandler},
     pty, terminal_input,
 };
 use anyhow::Context;
@@ -219,11 +219,11 @@ impl bootstrap::App for TerminalEmulator {
             .alternate_grid
             .as_mut()
             .unwrap_or(&mut self.primary_grid);
-        match grid.keyboard_handler.on_keyboard_event(
-            event.clone(),
-            modifiers,
-            &mut self.buffered_input,
-        ) {
+        let ctx = KeyContext::new(event, modifiers);
+        match grid
+            .keyboard_handler
+            .on_keyboard_event(ctx, &mut self.buffered_input)
+        {
             Ok(should_repaint) => should_repaint,
             Err(err) => {
                 log::warn!("kbd handler failed: {err}");
