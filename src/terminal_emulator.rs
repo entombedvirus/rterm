@@ -52,7 +52,6 @@ pub struct TerminalEmulator {
     config: Config,
     font_manager: FontManager,
     child_process: Option<ChildProcess>,
-    kbd_handler: KeyboardHandler,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
 
@@ -216,10 +215,15 @@ impl bootstrap::App for TerminalEmulator {
         event: &winit::event::KeyEvent,
         modifiers: egui::Modifiers,
     ) -> bool {
-        match self
-            .kbd_handler
-            .on_keyboard_event(event, modifiers, &mut self.buffered_input)
-        {
+        let grid = self
+            .alternate_grid
+            .as_mut()
+            .unwrap_or(&mut self.primary_grid);
+        match grid.keyboard_handler.on_keyboard_event(
+            event.clone(),
+            modifiers,
+            &mut self.buffered_input,
+        ) {
             Ok(should_repaint) => should_repaint,
             Err(err) => {
                 log::warn!("kbd handler failed: {err}");
@@ -249,7 +253,6 @@ impl TerminalEmulator {
         Ok(Self {
             config,
             font_manager,
-            kbd_handler: KeyboardHandler::default(),
             child_process: None,
             buffered_input: String::new(),
             primary_grid: AnsiGrid::new(24, 80, 5000),
@@ -998,10 +1001,13 @@ impl AnsiGrid {
                     SetFlags { flags, set_mode } => self
                         .keyboard_handler
                         .progressive_mode_set_flags(*flags, *set_mode),
-                    PushFlags { flags } => self
-                        .keyboard_handler
-                        .progressive_mode_push(keyboard_handler::ProgressiveMode(*flags)),
-                    PopFlags { num } => self.keyboard_handler.progressive_mode_pop(*num),
+                    PushFlags { flags } => {
+                        self.keyboard_handler
+                            .progressive_mode_push(keyboard_handler::ProgressiveMode(*flags));
+                    }
+                    PopFlags { num } => {
+                        self.keyboard_handler.progressive_mode_pop(*num);
+                    }
                     // handled upstream
                     QueryFlags => (),
                     Unknown(params) => {
