@@ -268,7 +268,13 @@ impl KeyRepr {
         } = ctx;
         let shifted_key_code =
             if mode.has(ProgressiveEnhancementFlag::ReportAlternateKeys) && modifiers.shift {
-                text_with_all_modifiers.and_then(|txt| {
+                key_without_modifiers.to_text().and_then(|txt| {
+                    let txt = txt
+                        .as_bytes()
+                        .first()
+                        .copied()
+                        .and_then(shifted_lut)
+                        .unwrap_or(txt.into());
                     txt.chars()
                         .next()
                         .map(u32::from)
@@ -300,7 +306,6 @@ impl KeyRepr {
             }
             Some(encode_modifiers(&new_mods))
         } else if modifiers.any() {
-            eprintln!("here: {modifiers:?}");
             Some(encode_modifiers(&modifiers))
         } else {
             None
@@ -690,11 +695,6 @@ impl KeyboardHandler {
         mut ctx: KeyContext<'_>,
         output: &mut String,
     ) -> anyhow::Result<bool> {
-        // on mac, if option is not meta, don't treat solitary option key as a modifier since
-        // the user is trying to enter some unicode text
-        if !self.option_key_is_meta && ctx.modifiers == egui::Modifiers::ALT {
-            ctx.modifiers.alt = false;
-        }
         if self.option_key_is_meta && ctx.modifiers.alt {
             ctx.logical_key = ctx.key_without_modifiers.clone();
         }
@@ -720,7 +720,6 @@ impl KeyboardHandler {
             self.progressive_mode_stack.remove(0);
         }
         self.progressive_mode_stack.push(mode);
-        dbg!("pushing", mode);
     }
 
     pub fn progressive_mode_pop(&mut self, num: u8) {
@@ -771,7 +770,6 @@ impl KeyboardHandler {
                 .or_else(|| ctx.try_as_csi_functional_key(mode))
                 .or_else(|| ctx.try_as_csi_text(mode));
 
-            dbg!(&repr);
             match repr {
                 Some(repr) => {
                     write!(output, "{repr}")?;
@@ -785,7 +783,6 @@ impl KeyboardHandler {
 
         // pass through as utf-8 bytes
         if let Some(txt) = text_with_all_modifiers {
-            dbg!(&txt);
             output.push_str(txt);
             return Ok(true);
         }
@@ -1391,7 +1388,7 @@ mod tests {
             // keys with text representation
             on_press![key "a" -> "\x1b[97u"],
             on_press![ALT+key "a" -> "\x1b[97;3u"],
-            on_press![SHIFT,ALT+key "a" -> "\x1b[97;4u"],
+            on_press![SHIFT,ALT+key "a" -> "\x1b[97:65;4u"],
             on_press![base_case: Key::Character("#".into()), Key::Character("3".into()), Some("#".into()), KeyLocation::Standard, ElementState::Pressed, SHIFT -> "\x1b[51:35;2;35u"],
             on_press![base_case: Key::Character("#".into()), Key::Character("3".into()), Some("#".into()), KeyLocation::Standard, ElementState::Pressed, SHIFT,ALT -> "\x1b[51:35;4;35u"],
             // keys without text
@@ -1406,6 +1403,25 @@ mod tests {
             on_press![F3 -> "\x1b[13~"],
             on_press![CTRL,SHIFT+F3 -> "\x1b[13;6~"],
             on_press![MediaPlayPause -> "\x1b[57430u"],
+        ];
+
+        for test_case in test_cases {
+            test_case.run(&handler);
+        }
+    }
+
+    #[test]
+    fn test_progressive_option_is_not_alt() {
+        let mut handler = KeyboardHandler::default();
+        handler.option_key_is_meta = false;
+        handler.progressive_mode_push(ProgressiveMode::all());
+
+        let test_cases = vec![
+            // modifier key, by itself
+            on_press![LEFT Alt -> "\x1b[57443;3u"],
+            // keys with text representation
+            on_press![base_case: Key::Character("å".into()), Key::Character("a".into()), Some("å".into()), KeyLocation::Standard, ElementState::Pressed, ALT -> "\x1b[97;3;229u"],
+            on_press![base_case: Key::Character("Ø".into()), Key::Character("o".into()), Some("Ø".into()), KeyLocation::Standard, ElementState::Pressed, ALT,SHIFT -> "\x1b[111:79;4;216u"],
         ];
 
         for test_case in test_cases {
