@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Write};
+use std::{collections::BTreeMap, fmt::Write, ops::BitOr};
 
 use anyhow::Context;
 use winit::{
@@ -16,6 +16,30 @@ enum ProgressiveEnhancementFlag {
     ReportAlternateKeys = 0b100,
     ReportAllKeysAsEscapeCodes = 0b1000,
     ReportAssociatedText = 0b10000,
+}
+
+impl std::ops::BitOr for ProgressiveEnhancementFlag {
+    type Output = ProgressiveMode;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        ProgressiveMode(self as u8 | rhs as u8)
+    }
+}
+
+impl std::ops::BitAnd for ProgressiveEnhancementFlag {
+    type Output = ProgressiveMode;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        ProgressiveMode(self as u8 & rhs as u8)
+    }
+}
+
+impl std::ops::BitXor for ProgressiveEnhancementFlag {
+    type Output = ProgressiveMode;
+
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        ProgressiveMode(self as u8 ^ rhs as u8)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +60,12 @@ impl ProgressiveMode {
             ReportAssociatedText,
         ];
         Self(flags.into_iter().fold(0u8, |a, b| a | b as u8))
+    }
+}
+
+impl std::convert::From<ProgressiveEnhancementFlag> for ProgressiveMode {
+    fn from(value: ProgressiveEnhancementFlag) -> Self {
+        Self(value as u8)
     }
 }
 
@@ -457,24 +487,53 @@ impl<'a> KeyContext<'a> {
         if mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
             return false;
         }
-        let txt = self.text_with_all_modifiers;
-        !self.state.is_pressed() || txt.is_none()
+        if !mode.has(ProgressiveEnhancementFlag::ReportEventTypes) && !self.state.is_pressed() {
+            return true;
+        }
+        false
+        // if mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes) {
+        //     return self.modifiers.is_none()
+        //         && !matches!(self.logical_key, Key::Named(NamedKey::Escape));
+        // }
+        // let txt = self.text_with_all_modifiers;
+        // !self.state.is_pressed() || txt.is_none()
     }
 
     fn should_emit_control_code(&self, mode: ProgressiveMode) -> bool {
         if mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
             return true;
         }
+        if mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes) {
+            match &self.logical_key {
+                Key::Named(NamedKey::Escape) => return true,
+                _ => (),
+            }
+        }
 
-        let has_modifier = self.modifiers.any() && !self.modifiers.shift_only();
-        let has_known_control_seq = true; // todo
-        has_modifier && has_known_control_seq
+        match &self.logical_key {
+            Key::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)
+                if self.modifiers.is_none() =>
+            {
+                return false
+            }
+            Key::Named(
+                NamedKey::Control
+                | NamedKey::Shift
+                | NamedKey::Alt
+                | NamedKey::Super
+                | NamedKey::Hyper,
+            ) => false,
+            Key::Character(_) if self.modifiers.is_none() || self.modifiers.shift_only() => false,
+            _ => true,
+        }
     }
 
     fn try_numpad(&self, mode: ProgressiveMode) -> Option<KeyRepr> {
-        if self.location != KeyLocation::Numpad
-            || self.modifiers.is_none()
-            || !mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes)
+        if self.location != KeyLocation::Numpad {
+            return None;
+        }
+        if mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes)
+            && (self.modifiers.is_none() || self.modifiers.shift_only())
         {
             return None;
         }
@@ -517,6 +576,9 @@ impl<'a> KeyContext<'a> {
 
     fn try_c0_special_keys(&self, mode: ProgressiveMode) -> Option<KeyRepr> {
         if mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
+            return None;
+        }
+        if mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes) && self.modifiers.any() {
             return None;
         }
 
@@ -715,11 +777,11 @@ impl KeyboardHandler {
         }
     }
 
-    pub fn progressive_mode_push(&mut self, mode: ProgressiveMode) {
+    pub fn progressive_mode_push<T: Into<ProgressiveMode>>(&mut self, mode: T) {
         if self.progressive_mode_stack.len() + 1 >= Self::MAX_STACK_LEN {
             self.progressive_mode_stack.remove(0);
         }
-        self.progressive_mode_stack.push(mode);
+        self.progressive_mode_stack.push(mode.into());
     }
 
     pub fn progressive_mode_pop(&mut self, num: u8) {
@@ -780,6 +842,8 @@ impl KeyboardHandler {
                 }
             }
         }
+
+        log::info!("ctx: {ctx:?}");
 
         // pass through as utf-8 bytes
         if let Some(txt) = text_with_all_modifiers {
@@ -1412,8 +1476,10 @@ mod tests {
 
     #[test]
     fn test_progressive_option_is_not_alt() {
-        let mut handler = KeyboardHandler::default();
-        handler.option_key_is_meta = false;
+        let mut handler = KeyboardHandler {
+            option_key_is_meta: false,
+            ..Default::default()
+        };
         handler.progressive_mode_push(ProgressiveMode::all());
 
         let test_cases = vec![
@@ -1424,6 +1490,45 @@ mod tests {
             on_press![base_case: Key::Character("Ø".into()), Key::Character("o".into()), Some("Ø".into()), KeyLocation::Standard, ElementState::Pressed, ALT,SHIFT -> "\x1b[111:79;4;216u"],
         ];
 
+        for test_case in test_cases {
+            test_case.run(&handler);
+        }
+    }
+
+    #[test]
+    fn test_progressive_mode_disambiguate_escape_codes() {
+        let mut handler = KeyboardHandler::default();
+        handler.progressive_mode_push(ProgressiveEnhancementFlag::DisambiguateEscapeCodes);
+
+        let test_cases = vec![
+            // text producing keys are pass thru
+            on_press![key "a" -> "a"],
+            // esc is special in this mode and generate the CSI u form
+            on_press![Escape -> "\x1b[27u"],
+            on_press![CTRL,SHIFT+Escape -> "\x1b[27;6u"],
+            on_press![ALT,SHIFT+key "f" -> "\x1b[102;4u"],
+            // Ctrl-c generated CSI u code instead of 0x3
+            on_press![CTRL+key "c" -> "\x1b[99;5u"],
+            // numpad keys are unchanged unless modifiers are involved
+            on_press![base_case: Key::Character("3".into()), Key::Character("3".into()), Some("3".into()), KeyLocation::Numpad, ElementState::Pressed, NONE -> "3"],
+            on_press![base_case: Key::Character("3".into()), Key::Character("3".into()), Some("3".into()), KeyLocation::Numpad, ElementState::Pressed, ALT -> "\x1b[57402;3u"],
+            // enter, tab and backspace still generate legacy encoding
+            on_press![base_case: Key::Named(NamedKey::Enter), Key::Named(NamedKey::Enter), Some("\r".into()), KeyLocation::Standard, ElementState::Pressed, NONE -> "\r"],
+            on_press![base_case: Key::Named(NamedKey::Backspace), Key::Named(NamedKey::Backspace), Some("\x7f".into()), KeyLocation::Standard, ElementState::Pressed, NONE -> "\x7f"],
+            on_press![base_case: Key::Named(NamedKey::Tab), Key::Named(NamedKey::Tab), Some("\t".into()), KeyLocation::Standard, ElementState::Pressed, NONE -> "\x09"],
+            // but once modifiers are involved, switch to CSI encoding
+            on_press![base_case: Key::Named(NamedKey::Enter), Key::Named(NamedKey::Enter), Some("\r".into()), KeyLocation::Standard, ElementState::Pressed, CTRL -> "\x1b[13;5u"],
+            on_press![base_case: Key::Named(NamedKey::Backspace), Key::Named(NamedKey::Backspace), Some("\x7f".into()), KeyLocation::Standard, ElementState::Pressed, ALT -> "\x1b[127;3u"],
+            on_press![base_case: Key::Named(NamedKey::Tab), Key::Named(NamedKey::Tab), Some("\t".into()), KeyLocation::Standard, ElementState::Pressed, SHIFT -> "\x1b[9;2u"],
+            // modifier keys by themselves do not generate any output
+            on_press![Control -> ""],
+            on_press![RIGHT Shift -> ""],
+            on_press![Alt -> ""],
+            on_press![LEFT Super -> ""],
+            on_press![Hyper -> ""],
+            // key release events do not generate any output
+            on_press![base_case: Key::Character("(".into()), Key::Character("9".into()), Some("(".into()), KeyLocation::Standard, ElementState::Released, SHIFT -> ""],
+        ];
         for test_case in test_cases {
             test_case.run(&handler);
         }
