@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Write, ops::BitOr};
+use std::{collections::BTreeMap, fmt::Write};
 
 use anyhow::Context;
 use winit::{
@@ -202,19 +202,19 @@ fn format_normalized_byte(
     modifiers: &egui::Modifiers,
 ) -> std::fmt::Result {
     if !modifier_supported_in_legacy_mode(
-        matches!(normalized_ascii_byte, 0xd | 0x1b | 0x8 | 0x9 | 0x20),
+        matches!(normalized_ascii_byte, 0xd | 0x1b | 0x8 | 0x9 | 0x20 | 0x7f),
         modifiers,
     ) {
         let repr = KeyRepr::csi_unicode(normalized_ascii_byte as char as u32, modifiers);
         return f.write_fmt(format_args!("{repr}"));
     }
-    if normalized_ascii_byte == 0x8 {
+    if normalized_ascii_byte == 0x7f {
         let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
         let alt_shift = egui::Modifiers::ALT | egui::Modifiers::SHIFT;
         let ctrl_alt = egui::Modifiers::CTRL | egui::Modifiers::ALT;
         let as_str = match *modifiers {
-            egui::Modifiers::NONE => "\x08",
-            egui::Modifiers::CTRL => "\x7f",
+            egui::Modifiers::NONE => "\x7f",
+            egui::Modifiers::CTRL => "\x08",
             egui::Modifiers::ALT => "\x1b\x7f",
             egui::Modifiers::SHIFT => "\x7f",
             x if x == ctrl_shift => "\x08",
@@ -298,7 +298,7 @@ impl KeyRepr {
         } = ctx;
         let shifted_key_code =
             if mode.has(ProgressiveEnhancementFlag::ReportAlternateKeys) && modifiers.shift {
-                key_without_modifiers.to_text().and_then(|txt| {
+                key_to_text(key_without_modifiers).and_then(|txt| {
                     let txt = txt
                         .as_bytes()
                         .first()
@@ -440,6 +440,25 @@ impl KeyRepr {
     }
 }
 
+fn named_key_to_text(key: &NamedKey) -> Option<&'static str> {
+    Some(match key {
+        NamedKey::Enter => "\x0d",
+        NamedKey::Tab => "\x09",
+        NamedKey::Space => " ",
+        NamedKey::Backspace => "\x7f",
+        NamedKey::Escape => "\x1b",
+        _ => return None,
+    })
+}
+
+fn key_to_text(key: &Key) -> Option<SmolStr> {
+    match key {
+        Key::Named(named_key) => named_key_to_text(named_key).map(SmolStr::new_static),
+        Key::Character(txt) => Some(txt.clone()),
+        _ => None,
+    }
+}
+
 fn modifier_supported_in_legacy_mode(is_c0_special: bool, mods: &egui::Modifiers) -> bool {
     use egui::Modifiers;
     let supported_combos = [
@@ -487,16 +506,17 @@ impl<'a> KeyContext<'a> {
         if mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
             return false;
         }
-        if !mode.has(ProgressiveEnhancementFlag::ReportEventTypes) && !self.state.is_pressed() {
-            return true;
+        if !self.state.is_pressed() {
+            return if mode.has(ProgressiveEnhancementFlag::ReportEventTypes) {
+                matches!(
+                    &self.logical_key,
+                    Key::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)
+                )
+            } else {
+                true
+            };
         }
         false
-        // if mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes) {
-        //     return self.modifiers.is_none()
-        //         && !matches!(self.logical_key, Key::Named(NamedKey::Escape));
-        // }
-        // let txt = self.text_with_all_modifiers;
-        // !self.state.is_pressed() || txt.is_none()
     }
 
     fn should_emit_control_code(&self, mode: ProgressiveMode) -> bool {
@@ -507,6 +527,11 @@ impl<'a> KeyContext<'a> {
             match &self.logical_key {
                 Key::Named(NamedKey::Escape) => return true,
                 _ => (),
+            }
+        }
+        if mode.has(ProgressiveEnhancementFlag::ReportEventTypes) {
+            if self.repeat || !self.state.is_pressed() {
+                return true;
             }
         }
 
@@ -582,12 +607,10 @@ impl<'a> KeyContext<'a> {
             return None;
         }
 
-        match self.logical_key.as_ref() {
-            Key::Named(key @ (NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)) => {
-                let code_point = key
-                    .to_text()
-                    .and_then(|txt| txt.as_bytes().first())
-                    .copied()
+        match &self.logical_key {
+            Key::Named(named_key @ (NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)) => {
+                let code_point = named_key_to_text(named_key)
+                    .and_then(|txt| txt.as_bytes().first().copied())
                     .expect("enter, tab and backspaced are expected to have textual representaion");
                 Some(KeyRepr::C0(code_point, self.modifiers))
             }
@@ -777,7 +800,7 @@ impl KeyboardHandler {
         }
     }
 
-    pub fn progressive_mode_push<T: Into<ProgressiveMode>>(&mut self, mode: T) {
+    pub fn push_progressive_mode<T: Into<ProgressiveMode>>(&mut self, mode: T) {
         if self.progressive_mode_stack.len() + 1 >= Self::MAX_STACK_LEN {
             self.progressive_mode_stack.remove(0);
         }
@@ -807,6 +830,7 @@ impl KeyboardHandler {
     }
 
     fn progressive_mode(&self, ctx: KeyContext<'_>, output: &mut String) -> anyhow::Result<bool> {
+        log::info!("ctx: {ctx:?}");
         let KeyContext {
             logical_key,
             text_with_all_modifiers,
@@ -843,10 +867,8 @@ impl KeyboardHandler {
             }
         }
 
-        log::info!("ctx: {ctx:?}");
-
         // pass through as utf-8 bytes
-        if let Some(txt) = text_with_all_modifiers {
+        if let Some(txt) = key_to_text(logical_key).as_ref() {
             output.push_str(txt);
             return Ok(true);
         }
@@ -1047,9 +1069,8 @@ fn build_progressive_lut() -> BTreeMap<winit::keyboard::KeyCode, KeyRepr> {
 }
 
 fn normalized_ascii_byte(key: &winit::keyboard::NamedKey) -> u8 {
-    key.to_text()
-        .and_then(|s| s.as_bytes().first())
-        .copied()
+    named_key_to_text(key)
+        .and_then(|s| s.as_bytes().first().copied())
         .expect("these keys have ascii representation")
 }
 
@@ -1252,7 +1273,90 @@ mod tests {
         expected_output: &'static str,
     }
 
-    impl TestCase<'_> {
+    impl Default for TestCase<'_> {
+        fn default() -> Self {
+            Self {
+                ctx: KeyContext {
+                    logical_key: Key::Named(NamedKey::Escape),
+                    key_without_modifiers: Key::Named(NamedKey::Escape),
+                    text_with_all_modifiers: None,
+                    state: ElementState::Pressed,
+                    location: KeyLocation::Standard,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                expected_output: "",
+            }
+        }
+    }
+
+    impl<'a> TestCase<'a> {
+        fn with_key_location(mut self, loc: KeyLocation) -> Self {
+            self.ctx.location = loc;
+            self
+        }
+
+        fn with_text(mut self, txt: Option<&'a str>) -> Self {
+            self.ctx.text_with_all_modifiers = txt;
+            self
+        }
+
+        fn with_key_without_modifiers(mut self, key: Key) -> Self {
+            self.ctx.key_without_modifiers = key;
+            self
+        }
+
+        fn with_repeat(mut self, b: bool) -> Self {
+            self.ctx.repeat = b;
+            self
+        }
+
+        fn with_modifiers(mut self, mods: egui::Modifiers) -> Self {
+            self.ctx.modifiers = mods;
+            self
+        }
+
+        fn with_logical_key(mut self, key: Key) -> Self {
+            self.ctx.logical_key = key;
+            self
+        }
+
+        fn with_expected_output(mut self, v: &'static str) -> Self {
+            self.expected_output = v;
+            self
+        }
+
+        fn with_char(
+            mut self,
+            modifier: egui::Modifiers,
+            unmodified: &'a str,
+            modified: &'a str,
+        ) -> Self {
+            self.ctx.key_without_modifiers = Key::Character(unmodified.into());
+            self.ctx.text_with_all_modifiers = Some(modified);
+            self.ctx.logical_key = Key::Character(modified.into());
+            self.ctx.modifiers = modifier;
+            self
+        }
+
+        fn with_named_key(
+            mut self,
+            modifier: egui::Modifiers,
+            unmodified: NamedKey,
+            modified: &'a str,
+        ) -> Self {
+            self.ctx.key_without_modifiers = Key::Named(unmodified);
+            self.ctx.text_with_all_modifiers = Some(modified);
+            self.ctx.logical_key = Key::Named(unmodified);
+            self.ctx.modifiers = modifier;
+            self
+        }
+
+        fn with_state(mut self, state: ElementState) -> Self {
+            self.ctx.state = state;
+            self
+        }
+
         fn run(self, handler: &KeyboardHandler) {
             let mut actual_output = String::new();
             let result = handler.on_keyboard_event(self.ctx.clone(), &mut actual_output);
@@ -1268,74 +1372,92 @@ mod tests {
         }
     }
 
-    macro_rules! on_press {
-        (key $k:literal -> $expected:literal) => {
-            on_press![NONE+key $k -> $expected]
-        };
-        ($($modifier:ident),+ + key $k:literal -> $expected:literal) => {
-            on_press![
-                base_case:
-                winit::keyboard::Key::Character(winit::keyboard::SmolStr::new_static($k)),
-                winit::keyboard::Key::Character(winit::keyboard::SmolStr::new_static($k)),
-                Some($k),
-                winit::keyboard::KeyLocation::Standard,
-                winit::event::ElementState::Pressed,
-                $($modifier),+
-                -> $expected
-            ]
+    macro_rules! on_key {
+        ($k:literal -> $expected:literal) => {
+            on_key![NONE+ $k -> $expected]
         };
         ($key_variant:ident -> $expected:literal) => {
-            on_press![NONE+$key_variant -> $expected]
+            on_key![NONE+$key_variant -> $expected]
         };
-        (LEFT $key_variant:ident -> $expected:literal) => {
-            on_press![
-                base_case:
-                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
-                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
-                None,
-                winit::keyboard::KeyLocation::Left,
-                winit::event::ElementState::Pressed,
-                NONE
-                -> $expected
-            ]
-        };
-        (RIGHT $key_variant:ident -> $expected:literal) => {
-            on_press![
-                base_case:
-                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
-                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
-                None,
-                winit::keyboard::KeyLocation::Right,
-                winit::event::ElementState::Pressed,
-                NONE
-                -> $expected
-            ]
+        ($($modifier:ident),+ + $k:literal -> $expected:literal) => {
+            TestCase::default()
+                .with_modifiers($(egui::Modifiers::$modifier)|+)
+                .with_logical_key(winit::keyboard::Key::Character($k.into()))
+                .with_key_without_modifiers(winit::keyboard::Key::Character($k.into()))
+                .with_text(Some($k))
+                .with_expected_output($expected)
         };
         ($($modifier:ident),+ + $key_variant:ident -> $expected:literal) => {
-            on_press![
-                base_case:
-                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
-                winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant),
-                None,
-                winit::keyboard::KeyLocation::Standard,
-                winit::event::ElementState::Pressed,
-                $($modifier),+
-                -> $expected
-            ]
+            TestCase::default()
+                .with_modifiers($(egui::Modifiers::$modifier)|+)
+                .with_logical_key(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_key_without_modifiers(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_expected_output($expected)
         };
-        (base_case: $logical_key:expr, $key_without_mods:expr, $txt_with_mods:expr, $location:expr, $state:expr, $($modifier:ident),+ -> $expected:literal) => {
-            TestCase {
-                ctx: KeyContext {
-                    logical_key: $logical_key,
-                    text_with_all_modifiers: $txt_with_mods,
-                    key_without_modifiers: $key_without_mods,
-                    location: $location,
-                    state: $state,
-                    repeat: false,
-                    modifiers: $(egui::Modifiers::$modifier)|+,
-                },
-                expected_output: $expected,
-            }
+        (LEFT $key_variant:ident -> $expected:literal) => {
+            TestCase::default()
+                .with_logical_key(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_key_without_modifiers(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_key_location(winit::keyboard::KeyLocation::Left)
+                .with_expected_output($expected)
+        };
+        (RIGHT $key_variant:ident -> $expected:literal) => {
+            TestCase::default()
+                .with_logical_key(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_key_without_modifiers(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_key_location(winit::keyboard::KeyLocation::Right)
+                .with_expected_output($expected)
+        };
+        (NUMPAD $($modifier:ident),+ + $key_variant:ident -> $expected:literal) => {
+            TestCase::default()
+                .with_modifiers($(egui::Modifiers::$modifier)|+)
+                .with_logical_key(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_key_without_modifiers(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_key_location(winit::keyboard::KeyLocation::Numpad)
+                .with_expected_output($expected)
+        };
+        (NUMPAD $($modifier:ident),+ + $char:literal -> $expected:literal) => {
+            TestCase::default()
+                .with_modifiers($(egui::Modifiers::$modifier)|+)
+                .with_logical_key(winit::keyboard::Key::Character(winit::keyboard::SmolStr::new_static($char)))
+                .with_key_without_modifiers(winit::keyboard::Key::Character(winit::keyboard::SmolStr::new_static($char)))
+                .with_text(Some($char))
+                .with_key_location(winit::keyboard::KeyLocation::Numpad)
+                .with_expected_output($expected)
+        };
+        (released $($modifier:ident),+ + $key_variant:ident -> $expected:literal) => {
+            TestCase::default()
+                .with_modifiers($(egui::Modifiers::$modifier)|+)
+                .with_logical_key(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_key_without_modifiers(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_text(named_key_to_text(&winit::keyboard::NamedKey::$key_variant))
+                .with_state(winit::event::ElementState::Released)
+                .with_expected_output($expected)
+
+        };
+        (repeated $($modifier:ident),+ + $key_variant:ident -> $expected:literal) => {
+            TestCase::default()
+                .with_modifiers($(egui::Modifiers::$modifier)|+)
+                .with_logical_key(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_key_without_modifiers(winit::keyboard::Key::Named(winit::keyboard::NamedKey::$key_variant))
+                .with_text(named_key_to_text(&winit::keyboard::NamedKey::$key_variant))
+                .with_repeat(true)
+                .with_expected_output($expected)
+
+        };
+        (released $($modifier:ident),+ + $char:literal -> $expected:literal) => {
+            TestCase::default()
+                .with_char($(egui::Modifiers::$modifier)|+, $char, $char)
+                .with_state(winit::event::ElementState::Released)
+                .with_expected_output($expected)
+
+        };
+        (repeated $($modifier:ident),+ + $char:literal -> $expected:literal) => {
+            TestCase::default()
+                .with_char($(egui::Modifiers::$modifier)|+, $char, $char)
+                .with_repeat(true)
+                .with_expected_output($expected)
+
         };
     }
 
@@ -1344,41 +1466,41 @@ mod tests {
         let handler = KeyboardHandler::default();
 
         let test_cases = vec![
-            on_press![Enter                -> "\x0d"],
-            on_press![CTRL+Enter           -> "\x0d"],
-            on_press![ALT+Enter            -> "\x1b\x0d"],
-            on_press![SHIFT+Enter          -> "\x0d"],
-            on_press![CTRL,SHIFT+Enter     -> "\x0d"],
-            on_press![ALT,SHIFT+Enter      -> "\x1b\x0d"],
-            on_press![CTRL,ALT+Enter       -> "\x1b\x0d"],
-            on_press![Escape               -> "\x1b"],
-            on_press![CTRL+Escape          -> "\x1b"],
-            on_press![ALT+Escape           -> "\x1b\x1b"],
-            on_press![SHIFT+Escape         -> "\x1b"],
-            on_press![CTRL,SHIFT+Escape    -> "\x1b"],
-            on_press![ALT,SHIFT+Escape     -> "\x1b\x1b"],
-            on_press![CTRL,ALT+Escape      -> "\x1b\x1b"],
-            on_press![Backspace            -> "\x08"],
-            on_press![CTRL+Backspace       -> "\x7f"],
-            on_press![ALT+Backspace        -> "\x1b\x7f"],
-            on_press![SHIFT+Backspace      -> "\x7f"],
-            on_press![CTRL,SHIFT+Backspace -> "\x08"],
-            on_press![ALT,SHIFT+Backspace  -> "\x1b\x7f"],
-            on_press![CTRL,ALT+Backspace   -> "\x1b\x08"],
-            on_press![Tab                  -> "\x09"],
-            on_press![CTRL+Tab             -> "\x09"],
-            on_press![ALT+Tab              -> "\x1b\x09"],
-            on_press![SHIFT+Tab            -> "\x1b[Z"],
-            on_press![CTRL,SHIFT+Tab       -> "\x1b[Z"],
-            on_press![ALT,SHIFT+Tab        -> "\x1b\x1b[Z"],
-            on_press![CTRL,ALT+Tab         -> "\x1b\x09"],
-            on_press![Space                -> "\x20"],
-            on_press![CTRL+Space           -> "\x00"],
-            on_press![ALT+Space            -> "\x1b\x20"],
-            on_press![SHIFT+Space          -> "\x20"],
-            on_press![CTRL,SHIFT+Space     -> "\x00"],
-            on_press![ALT,SHIFT+Space      -> "\x1b\x20"],
-            on_press![CTRL,ALT+Space       -> "\x1b\x00"],
+            on_key![Enter                -> "\x0d"],
+            on_key![CTRL+Enter           -> "\x0d"],
+            on_key![ALT+Enter            -> "\x1b\x0d"],
+            on_key![SHIFT+Enter          -> "\x0d"],
+            on_key![CTRL,SHIFT+Enter     -> "\x0d"],
+            on_key![ALT,SHIFT+Enter      -> "\x1b\x0d"],
+            on_key![CTRL,ALT+Enter       -> "\x1b\x0d"],
+            on_key![Escape               -> "\x1b"],
+            on_key![CTRL+Escape          -> "\x1b"],
+            on_key![ALT+Escape           -> "\x1b\x1b"],
+            on_key![SHIFT+Escape         -> "\x1b"],
+            on_key![CTRL,SHIFT+Escape    -> "\x1b"],
+            on_key![ALT,SHIFT+Escape     -> "\x1b\x1b"],
+            on_key![CTRL,ALT+Escape      -> "\x1b\x1b"],
+            on_key![Backspace            -> "\x7f"],
+            on_key![CTRL+Backspace       -> "\x08"],
+            on_key![ALT+Backspace        -> "\x1b\x7f"],
+            on_key![SHIFT+Backspace      -> "\x7f"],
+            on_key![CTRL,SHIFT+Backspace -> "\x08"],
+            on_key![ALT,SHIFT+Backspace  -> "\x1b\x7f"],
+            on_key![CTRL,ALT+Backspace   -> "\x1b\x08"],
+            on_key![Tab                  -> "\x09"],
+            on_key![CTRL+Tab             -> "\x09"],
+            on_key![ALT+Tab              -> "\x1b\x09"],
+            on_key![SHIFT+Tab            -> "\x1b[Z"],
+            on_key![CTRL,SHIFT+Tab       -> "\x1b[Z"],
+            on_key![ALT,SHIFT+Tab        -> "\x1b\x1b[Z"],
+            on_key![CTRL,ALT+Tab         -> "\x1b\x09"],
+            on_key![Space                -> "\x20"],
+            on_key![CTRL+Space           -> "\x00"],
+            on_key![ALT+Space            -> "\x1b\x20"],
+            on_key![SHIFT+Space          -> "\x20"],
+            on_key![CTRL,SHIFT+Space     -> "\x00"],
+            on_key![ALT,SHIFT+Space      -> "\x1b\x20"],
+            on_key![CTRL,ALT+Space       -> "\x1b\x00"],
         ];
         for test_case in test_cases {
             test_case.run(&handler);
@@ -1390,24 +1512,24 @@ mod tests {
         let handler = KeyboardHandler::default();
 
         let test_cases = vec![
-            on_press![key "i" -> "i"],
-            on_press![SHIFT+key "i" -> "I"],
-            on_press![ALT+key "i" -> "\x1bi"],
-            on_press![CTRL+key "i" -> "\t"],
-            on_press![SHIFT,ALT+key "i" -> "\x1bI"],
-            on_press![ALT,CTRL+key "i" -> "\x1b\t"],
-            on_press![CTRL,SHIFT+key "i" -> "\x1b[105;6u"],
-            on_press![key "3" -> "3"],
-            on_press![SHIFT+key "3" -> "#"],
-            on_press![ALT+key "3" -> "\x1b3"],
-            on_press![CTRL+key "3" -> "\x1b"],
-            on_press![SHIFT,ALT+key "3" -> "\x1b#"],
-            on_press![ALT,CTRL+key "3" -> "\x1b\x1b"],
-            on_press![CTRL,SHIFT+key "3" -> "\x1b[51;6u"],
-            on_press![F1 -> "\x1b\x4fP"],
-            on_press![CTRL+F1 -> "\x1b[1;5P"],
-            on_press![ArrowUp -> "\x1b[A"],
-            on_press![ALT+ArrowUp -> "\x1b[1;3A"],
+            on_key!["i" -> "i"],
+            on_key![SHIFT+"i" -> "I"],
+            on_key![ALT+"i" -> "\x1bi"],
+            on_key![CTRL+"i" -> "\t"],
+            on_key![SHIFT,ALT+"i" -> "\x1bI"],
+            on_key![ALT,CTRL+"i" -> "\x1b\t"],
+            on_key![CTRL,SHIFT+"i" -> "\x1b[105;6u"],
+            on_key!["3" -> "3"],
+            on_key![SHIFT+"3" -> "#"],
+            on_key![ALT+"3" -> "\x1b3"],
+            on_key![CTRL+"3" -> "\x1b"],
+            on_key![SHIFT,ALT+"3" -> "\x1b#"],
+            on_key![ALT,CTRL+"3" -> "\x1b\x1b"],
+            on_key![CTRL,SHIFT+"3" -> "\x1b[51;6u"],
+            on_key![F1 -> "\x1b\x4fP"],
+            on_key![CTRL+F1 -> "\x1b[1;5P"],
+            on_key![ArrowUp -> "\x1b[A"],
+            on_key![ALT+ArrowUp -> "\x1b[1;3A"],
         ];
         for test_case in test_cases {
             test_case.run(&handler);
@@ -1420,19 +1542,19 @@ mod tests {
         handler.set_cursor_keys_mode(true);
 
         let test_cases = vec![
-            on_press![ArrowUp    -> "\x1b\x4fA"],
-            on_press![ArrowDown  -> "\x1b\x4fB"],
-            on_press![ArrowRight -> "\x1b\x4fC"],
-            on_press![ArrowLeft  -> "\x1b\x4fD"],
-            on_press![Home       -> "\x1b\x4fH"],
-            on_press![End        -> "\x1b\x4fF"],
+            on_key![ArrowUp    -> "\x1b\x4fA"],
+            on_key![ArrowDown  -> "\x1b\x4fB"],
+            on_key![ArrowRight -> "\x1b\x4fC"],
+            on_key![ArrowLeft  -> "\x1b\x4fD"],
+            on_key![Home       -> "\x1b\x4fH"],
+            on_key![End        -> "\x1b\x4fF"],
             // when modifiers are used, CSI form is used
-            on_press![ALT,SHIFT+ArrowUp    -> "\x1b[1;4A"],
-            on_press![ALT,SHIFT+ArrowDown  -> "\x1b[1;4B"],
-            on_press![ALT,SHIFT+ArrowRight -> "\x1b[1;4C"],
-            on_press![ALT,SHIFT+ArrowLeft  -> "\x1b[1;4D"],
-            on_press![ALT,SHIFT+Home       -> "\x1b[1;4H"],
-            on_press![ALT,SHIFT+End        -> "\x1b[1;4F"],
+            on_key![ALT,SHIFT+ArrowUp    -> "\x1b[1;4A"],
+            on_key![ALT,SHIFT+ArrowDown  -> "\x1b[1;4B"],
+            on_key![ALT,SHIFT+ArrowRight -> "\x1b[1;4C"],
+            on_key![ALT,SHIFT+ArrowLeft  -> "\x1b[1;4D"],
+            on_key![ALT,SHIFT+Home       -> "\x1b[1;4H"],
+            on_key![ALT,SHIFT+End        -> "\x1b[1;4F"],
         ];
         for test_case in test_cases {
             test_case.run(&handler);
@@ -1443,30 +1565,34 @@ mod tests {
     fn test_progressive_mode_option_is_alt() {
         let mut handler = KeyboardHandler::default();
         handler.option_key_is_meta = true;
-        handler.progressive_mode_push(ProgressiveMode::all());
+        handler.push_progressive_mode(ProgressiveMode::all());
 
         let test_cases = vec![
             // modifier key, by itself
-            on_press![LEFT Alt -> "\x1b[57443;3u"],
-            on_press![RIGHT Alt -> "\x1b[57449;3u"],
+            on_key![LEFT Alt -> "\x1b[57443;3u"],
+            on_key![RIGHT Alt -> "\x1b[57449;3u"],
             // keys with text representation
-            on_press![key "a" -> "\x1b[97u"],
-            on_press![ALT+key "a" -> "\x1b[97;3u"],
-            on_press![SHIFT,ALT+key "a" -> "\x1b[97:65;4u"],
-            on_press![base_case: Key::Character("#".into()), Key::Character("3".into()), Some("#".into()), KeyLocation::Standard, ElementState::Pressed, SHIFT -> "\x1b[51:35;2;35u"],
-            on_press![base_case: Key::Character("#".into()), Key::Character("3".into()), Some("#".into()), KeyLocation::Standard, ElementState::Pressed, SHIFT,ALT -> "\x1b[51:35;4;35u"],
+            on_key!["a" -> "\x1b[97u"],
+            on_key![ALT+"a" -> "\x1b[97;3u"],
+            on_key![SHIFT,ALT+"a" -> "\x1b[97:65;4u"],
+            TestCase::default()
+                .with_char(egui::Modifiers::SHIFT, "3", "#")
+                .with_expected_output("\x1b[51:35;2;35u"),
+            TestCase::default()
+                .with_char(egui::Modifiers::SHIFT | egui::Modifiers::ALT, "3", "#")
+                .with_expected_output("\x1b[51:35;4;35u"),
             // keys without text
-            on_press![ArrowUp    -> "\x1b[A"],
-            on_press![ALT,SHIFT+ArrowUp    -> "\x1b[1;4A"],
-            on_press![PageDown    -> "\x1b[6~"],
-            on_press![CTRL,SHIFT+PageDown    -> "\x1b[6;6~"],
-            on_press![F5    -> "\x1b[15~"],
-            on_press![CTRL+F5    -> "\x1b[15;5~"],
-            on_press![Backspace    -> "\x1b[127u"],
-            on_press![SHIFT+Backspace    -> "\x1b[127;2u"],
-            on_press![F3 -> "\x1b[13~"],
-            on_press![CTRL,SHIFT+F3 -> "\x1b[13;6~"],
-            on_press![MediaPlayPause -> "\x1b[57430u"],
+            on_key![ArrowUp    -> "\x1b[A"],
+            on_key![ALT,SHIFT+ArrowUp    -> "\x1b[1;4A"],
+            on_key![PageDown    -> "\x1b[6~"],
+            on_key![CTRL,SHIFT+PageDown    -> "\x1b[6;6~"],
+            on_key![F5    -> "\x1b[15~"],
+            on_key![CTRL+F5    -> "\x1b[15;5~"],
+            on_key![Backspace    -> "\x1b[127u"],
+            on_key![SHIFT+Backspace    -> "\x1b[127;2u"],
+            on_key![F3 -> "\x1b[13~"],
+            on_key![CTRL,SHIFT+F3 -> "\x1b[13;6~"],
+            on_key![MediaPlayPause -> "\x1b[57430u"],
         ];
 
         for test_case in test_cases {
@@ -1480,14 +1606,18 @@ mod tests {
             option_key_is_meta: false,
             ..Default::default()
         };
-        handler.progressive_mode_push(ProgressiveMode::all());
+        handler.push_progressive_mode(ProgressiveMode::all());
 
         let test_cases = vec![
             // modifier key, by itself
-            on_press![LEFT Alt -> "\x1b[57443;3u"],
+            on_key![LEFT Alt -> "\x1b[57443;3u"],
             // keys with text representation
-            on_press![base_case: Key::Character("å".into()), Key::Character("a".into()), Some("å".into()), KeyLocation::Standard, ElementState::Pressed, ALT -> "\x1b[97;3;229u"],
-            on_press![base_case: Key::Character("Ø".into()), Key::Character("o".into()), Some("Ø".into()), KeyLocation::Standard, ElementState::Pressed, ALT,SHIFT -> "\x1b[111:79;4;216u"],
+            TestCase::default()
+                .with_char(egui::Modifiers::ALT, "a", "å")
+                .with_expected_output("\x1b[97;3;229u"),
+            TestCase::default()
+                .with_char(egui::Modifiers::ALT | egui::Modifiers::SHIFT, "o", "Ø")
+                .with_expected_output("\x1b[111:79;4;216u"),
         ];
 
         for test_case in test_cases {
@@ -1498,37 +1628,83 @@ mod tests {
     #[test]
     fn test_progressive_mode_disambiguate_escape_codes() {
         let mut handler = KeyboardHandler::default();
-        handler.progressive_mode_push(ProgressiveEnhancementFlag::DisambiguateEscapeCodes);
+        handler.push_progressive_mode(ProgressiveEnhancementFlag::DisambiguateEscapeCodes);
 
         let test_cases = vec![
             // text producing keys are pass thru
-            on_press![key "a" -> "a"],
+            on_key!["a" -> "a"],
             // esc is special in this mode and generate the CSI u form
-            on_press![Escape -> "\x1b[27u"],
-            on_press![CTRL,SHIFT+Escape -> "\x1b[27;6u"],
-            on_press![ALT,SHIFT+key "f" -> "\x1b[102;4u"],
+            on_key![Escape -> "\x1b[27u"],
+            on_key![CTRL,SHIFT+Escape -> "\x1b[27;6u"],
+            on_key![ALT,SHIFT+"f" -> "\x1b[102;4u"],
             // Ctrl-c generated CSI u code instead of 0x3
-            on_press![CTRL+key "c" -> "\x1b[99;5u"],
+            on_key![CTRL+"c" -> "\x1b[99;5u"],
             // numpad keys are unchanged unless modifiers are involved
-            on_press![base_case: Key::Character("3".into()), Key::Character("3".into()), Some("3".into()), KeyLocation::Numpad, ElementState::Pressed, NONE -> "3"],
-            on_press![base_case: Key::Character("3".into()), Key::Character("3".into()), Some("3".into()), KeyLocation::Numpad, ElementState::Pressed, ALT -> "\x1b[57402;3u"],
+            on_key![NUMPAD NONE+"3" -> "3"],
+            // on_key![base_case: Key::Character("3".into()), Key::Character("3".into()), Some("3".into()), KeyLocation::Numpad, ElementState::Pressed, NONE -> "3"],
+            // on_key![base_case: Key::Character("3".into()), Key::Character("3".into()), Some("3".into()), KeyLocation::Numpad, ElementState::Pressed, ALT -> "\x1b[57402;3u"],
+            on_key![NUMPAD ALT+"3" -> "\x1b[57402;3u"],
             // enter, tab and backspace still generate legacy encoding
-            on_press![base_case: Key::Named(NamedKey::Enter), Key::Named(NamedKey::Enter), Some("\r".into()), KeyLocation::Standard, ElementState::Pressed, NONE -> "\r"],
-            on_press![base_case: Key::Named(NamedKey::Backspace), Key::Named(NamedKey::Backspace), Some("\x7f".into()), KeyLocation::Standard, ElementState::Pressed, NONE -> "\x7f"],
-            on_press![base_case: Key::Named(NamedKey::Tab), Key::Named(NamedKey::Tab), Some("\t".into()), KeyLocation::Standard, ElementState::Pressed, NONE -> "\x09"],
+            TestCase::default()
+                .with_named_key(egui::Modifiers::NONE, NamedKey::Enter, "\r")
+                .with_expected_output("\x0d"),
+            TestCase::default()
+                .with_named_key(egui::Modifiers::NONE, NamedKey::Backspace, "\x7f")
+                .with_expected_output("\x7f"),
+            TestCase::default()
+                .with_named_key(egui::Modifiers::NONE, NamedKey::Tab, "\t")
+                .with_expected_output("\x09"),
             // but once modifiers are involved, switch to CSI encoding
-            on_press![base_case: Key::Named(NamedKey::Enter), Key::Named(NamedKey::Enter), Some("\r".into()), KeyLocation::Standard, ElementState::Pressed, CTRL -> "\x1b[13;5u"],
-            on_press![base_case: Key::Named(NamedKey::Backspace), Key::Named(NamedKey::Backspace), Some("\x7f".into()), KeyLocation::Standard, ElementState::Pressed, ALT -> "\x1b[127;3u"],
-            on_press![base_case: Key::Named(NamedKey::Tab), Key::Named(NamedKey::Tab), Some("\t".into()), KeyLocation::Standard, ElementState::Pressed, SHIFT -> "\x1b[9;2u"],
+            TestCase::default()
+                .with_named_key(egui::Modifiers::CTRL, NamedKey::Enter, "\r")
+                .with_expected_output("\x1b[13;5u"),
+            TestCase::default()
+                .with_named_key(egui::Modifiers::ALT, NamedKey::Backspace, "\x7f")
+                .with_expected_output("\x1b[127;3u"),
+            TestCase::default()
+                .with_named_key(egui::Modifiers::SHIFT, NamedKey::Tab, "\t")
+                .with_expected_output("\x1b[9;2u"),
             // modifier keys by themselves do not generate any output
-            on_press![Control -> ""],
-            on_press![RIGHT Shift -> ""],
-            on_press![Alt -> ""],
-            on_press![LEFT Super -> ""],
-            on_press![Hyper -> ""],
+            on_key![Control -> ""],
+            on_key![RIGHT Shift -> ""],
+            on_key![Alt -> ""],
+            on_key![LEFT Super -> ""],
+            on_key![Hyper -> ""],
             // key release events do not generate any output
-            on_press![base_case: Key::Character("(".into()), Key::Character("9".into()), Some("(".into()), KeyLocation::Standard, ElementState::Released, SHIFT -> ""],
+            TestCase::default()
+                .with_char(egui::Modifiers::SHIFT, "9", "(")
+                .with_state(ElementState::Released)
+                .with_expected_output(""),
         ];
+        for test_case in test_cases {
+            test_case.run(&handler);
+        }
+    }
+
+    #[test]
+    fn test_progressive_report_event_types() {
+        let mut handler = KeyboardHandler::default();
+        handler.push_progressive_mode(ProgressiveEnhancementFlag::ReportEventTypes);
+
+        let test_cases = vec![
+            // keys generate release events
+            on_key![released NONE+"b" -> "\x1b[98;1:3u"],
+            on_key![released NONE+F1 -> "\x1b[1;1:3P"],
+            on_key![released ALT+"q" -> "\x1b[113;3:3u"],
+            // keys generate repeat events
+            on_key![repeated NONE+"b" -> "\x1b[98;1:2u"],
+            on_key![repeated NONE+F1 -> "\x1b[1;1:2P"],
+            on_key![repeated ALT+"q" -> "\x1b[113;3:2u"],
+            // enter, tab, backspace do not generate release or repeat events
+            on_key![released NONE+Enter -> ""],
+            on_key![released NONE+Tab -> ""],
+            on_key![released NONE+Backspace -> ""],
+            on_key![repeated NONE+Enter -> "\x0d"],
+            on_key![repeated NONE+Tab -> "\x09"],
+            on_key![Backspace -> "\x7f"],
+            on_key![repeated NONE+Backspace -> "\x7f"],
+        ];
+
         for test_case in test_cases {
             test_case.run(&handler);
         }

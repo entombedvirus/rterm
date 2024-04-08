@@ -1003,7 +1003,7 @@ impl AnsiGrid {
                         .progressive_mode_set_flags(*flags, *set_mode),
                     PushFlags { flags } => {
                         self.keyboard_handler
-                            .progressive_mode_push(keyboard_handler::ProgressiveMode(*flags));
+                            .push_progressive_mode(keyboard_handler::ProgressiveMode(*flags));
                     }
                     PopFlags { num } => {
                         self.keyboard_handler.progressive_mode_pop(*num);
