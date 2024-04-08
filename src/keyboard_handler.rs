@@ -285,7 +285,7 @@ impl KeyRepr {
         key_code: u32,
         suffix_ascii_byte: u8,
         mode: ProgressiveMode,
-        ctx: &KeyContext<'_>,
+        ctx: &KeyContext,
     ) -> Self {
         let KeyContext {
             logical_key,
@@ -362,6 +362,7 @@ impl KeyRepr {
             .has(ProgressiveEnhancementFlag::ReportAssociatedText)
             .then(|| {
                 text_with_all_modifiers
+                    .as_ref()
                     .and_then(|txt| txt.chars().next())
                     .filter(|ch| !ch.is_ascii_control())
                     .map(u32::from)
@@ -479,22 +480,22 @@ fn modifier_supported_in_legacy_mode(is_c0_special: bool, mods: &egui::Modifiers
 }
 
 #[derive(Debug, Clone)]
-pub struct KeyContext<'a> {
+pub struct KeyContext {
     logical_key: Key,
     key_without_modifiers: Key,
-    text_with_all_modifiers: Option<&'a str>,
+    text_with_all_modifiers: Option<SmolStr>,
     state: ElementState,
     location: KeyLocation,
     repeat: bool,
     modifiers: egui::Modifiers,
 }
 
-impl<'a> KeyContext<'a> {
-    pub fn new(ev: &'a KeyEvent, mods: egui::Modifiers) -> Self {
+impl KeyContext {
+    pub fn new(ev: &KeyEvent, mods: egui::Modifiers) -> Self {
         Self {
             logical_key: ev.logical_key.clone(),
             key_without_modifiers: ev.key_without_modifiers(),
-            text_with_all_modifiers: ev.text_with_all_modifiers(),
+            text_with_all_modifiers: ev.text_with_all_modifiers().map(SmolStr::new),
             state: ev.state,
             location: ev.location,
             repeat: ev.repeat,
@@ -783,7 +784,7 @@ impl KeyboardHandler {
     // - pressed vs released vs repeat if in progressive handling mode
     pub fn on_keyboard_event(
         &self,
-        mut ctx: KeyContext<'_>,
+        mut ctx: KeyContext,
         output: &mut String,
     ) -> anyhow::Result<bool> {
         if self.option_key_is_meta && ctx.modifiers.alt {
@@ -838,7 +839,7 @@ impl KeyboardHandler {
             .copied()
     }
 
-    fn progressive_mode(&self, ctx: KeyContext<'_>, output: &mut String) -> anyhow::Result<bool> {
+    fn progressive_mode(&self, ctx: KeyContext, output: &mut String) -> anyhow::Result<bool> {
         log::info!("ctx: {ctx:?}");
         let KeyContext {
             logical_key,
@@ -885,7 +886,7 @@ impl KeyboardHandler {
         Ok(false)
     }
 
-    fn legacy_mode(&self, ctx: KeyContext<'_>, output: &mut String) -> anyhow::Result<bool> {
+    fn legacy_mode(&self, ctx: KeyContext, output: &mut String) -> anyhow::Result<bool> {
         let KeyContext {
             logical_key,
             state,
@@ -1276,13 +1277,13 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct TestCase<'a> {
-        ctx: KeyContext<'a>,
+    struct TestCase {
+        ctx: KeyContext,
         // modifiers: egui::Modifiers,
         expected_output: &'static str,
     }
 
-    impl Default for TestCase<'_> {
+    impl Default for TestCase {
         fn default() -> Self {
             Self {
                 ctx: KeyContext {
@@ -1299,14 +1300,14 @@ mod tests {
         }
     }
 
-    impl<'a> TestCase<'a> {
+    impl TestCase {
         fn with_key_location(mut self, loc: KeyLocation) -> Self {
             self.ctx.location = loc;
             self
         }
 
-        fn with_text(mut self, txt: Option<&'a str>) -> Self {
-            self.ctx.text_with_all_modifiers = txt;
+        fn with_text(mut self, txt: Option<&str>) -> Self {
+            self.ctx.text_with_all_modifiers = txt.map(SmolStr::new);
             self
         }
 
@@ -1338,11 +1339,11 @@ mod tests {
         fn with_char(
             mut self,
             modifier: egui::Modifiers,
-            unmodified: &'a str,
-            modified: &'a str,
+            unmodified: &str,
+            modified: &str,
         ) -> Self {
             self.ctx.key_without_modifiers = Key::Character(unmodified.into());
-            self.ctx.text_with_all_modifiers = Some(modified);
+            self.ctx.text_with_all_modifiers = Some(modified.into());
             self.ctx.logical_key = Key::Character(modified.into());
             self.ctx.modifiers = modifier;
             self
@@ -1352,10 +1353,10 @@ mod tests {
             mut self,
             modifier: egui::Modifiers,
             unmodified: NamedKey,
-            modified: &'a str,
+            modified: &str,
         ) -> Self {
             self.ctx.key_without_modifiers = Key::Named(unmodified);
-            self.ctx.text_with_all_modifiers = Some(modified);
+            self.ctx.text_with_all_modifiers = Some(modified.into());
             self.ctx.logical_key = Key::Named(unmodified);
             self.ctx.modifiers = modifier;
             self
