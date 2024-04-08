@@ -42,7 +42,7 @@ impl std::ops::BitXor for ProgressiveEnhancementFlag {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressiveMode(pub u8);
 
 impl ProgressiveMode {
@@ -519,7 +519,7 @@ impl<'a> KeyContext<'a> {
         false
     }
 
-    fn should_emit_control_code(&self, mode: ProgressiveMode) -> bool {
+    fn should_emit_control_code(&self, mode: ProgressiveMode, option_key_is_meta: bool) -> bool {
         if mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
             return true;
         }
@@ -548,7 +548,13 @@ impl<'a> KeyContext<'a> {
                 | NamedKey::Super
                 | NamedKey::Hyper,
             ) => false,
-            Key::Character(_) if self.modifiers.is_none() || self.modifiers.shift_only() => false,
+            Key::Character(_)
+                if self.modifiers.is_none()
+                    || self.modifiers == egui::Modifiers::SHIFT
+                    || (!option_key_is_meta && self.modifiers.alt) =>
+            {
+                false
+            }
             _ => true,
         }
     }
@@ -760,7 +766,7 @@ impl Default for KeyboardHandler {
         Self {
             cursor_key_mode: false,
             progressive_mode_stack: vec![],
-            option_key_is_meta: true,
+            option_key_is_meta: false,
         }
     }
 }
@@ -826,7 +832,10 @@ impl KeyboardHandler {
     }
 
     fn current_progressive_mode(&self) -> Option<ProgressiveMode> {
-        self.progressive_mode_stack.last().copied()
+        self.progressive_mode_stack
+            .last()
+            .filter(|pm| **pm != ProgressiveMode(0))
+            .copied()
     }
 
     fn progressive_mode(&self, ctx: KeyContext<'_>, output: &mut String) -> anyhow::Result<bool> {
@@ -849,7 +858,7 @@ impl KeyboardHandler {
             return Ok(false);
         }
 
-        if ctx.should_emit_control_code(mode) {
+        if ctx.should_emit_control_code(mode, self.option_key_is_meta) {
             let repr = ctx
                 .try_numpad(mode)
                 .or_else(|| ctx.try_c0_special_keys(mode))
@@ -1705,6 +1714,37 @@ mod tests {
             on_key![repeated NONE+Backspace -> "\x7f"],
         ];
 
+        for test_case in test_cases {
+            test_case.run(&handler);
+        }
+    }
+
+    #[test]
+    fn test_progressive_report_alternate_keys() {
+        let mut handler = KeyboardHandler::default();
+        handler.option_key_is_meta = false;
+        handler.push_progressive_mode(ProgressiveEnhancementFlag::ReportAlternateKeys);
+
+        let test_cases = vec![
+            // shift a -> A by itself does not generate control codes
+            TestCase::default()
+                .with_char(egui::Modifiers::SHIFT, "a", "A")
+                .with_expected_output("A"),
+            // mac's alt keys that send unicode works
+            TestCase::default()
+                .with_char(egui::Modifiers::ALT, "'", "æ")
+                .with_expected_output("æ"),
+            TestCase::default()
+                .with_char(egui::Modifiers::ALT | egui::Modifiers::SHIFT, "'", "Æ")
+                .with_expected_output("Æ"),
+            // but does with other modifiers
+            TestCase::default()
+                .with_char(egui::Modifiers::SHIFT | egui::Modifiers::CTRL, "a", "A")
+                .with_expected_output("\x1b[97:65;6u"),
+            TestCase::default()
+                .with_char(egui::Modifiers::SHIFT | egui::Modifiers::ALT, "y", "Y")
+                .with_expected_output("\x1b[121:89;4u"),
+        ];
         for test_case in test_cases {
             test_case.run(&handler);
         }
