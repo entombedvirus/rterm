@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, fmt::Write};
 
 use anyhow::Context;
+use nix::NixPath;
 use winit::{
     event::{ElementState, KeyEvent},
     keyboard::{Key, KeyLocation, NamedKey, SmolStr},
@@ -495,7 +496,10 @@ impl KeyContext {
         Self {
             logical_key: ev.logical_key.clone(),
             key_without_modifiers: ev.key_without_modifiers(),
-            text_with_all_modifiers: ev.text_with_all_modifiers().map(SmolStr::new),
+            text_with_all_modifiers: ev
+                .text_with_all_modifiers()
+                .filter(|txt| !txt.is_empty())
+                .map(SmolStr::new),
             state: ev.state,
             location: ev.location,
             repeat: ev.repeat,
@@ -504,60 +508,86 @@ impl KeyContext {
     }
 
     fn should_ignore(&self, mode: ProgressiveMode) -> bool {
-        if mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
-            return false;
+        if !mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes)
+            && is_modifier_key(&self.logical_key)
+        {
+            return true;
         }
-        if !self.state.is_pressed() {
-            return if mode.has(ProgressiveEnhancementFlag::ReportEventTypes) {
-                matches!(
-                    &self.logical_key,
-                    Key::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)
-                )
-            } else {
-                true
-            };
+
+        let has_known_key = matches!(self.logical_key, Key::Named(_) | Key::Character(_));
+        let has_text = self
+            .text_with_all_modifiers
+            .as_ref()
+            .map(|txt| !starts_with_ascii_control(txt))
+            .unwrap_or(false);
+        if !has_known_key && !has_text {
+            return true;
+        }
+
+        let is_release = !self.state.is_pressed();
+        if !mode.has(ProgressiveEnhancementFlag::ReportEventTypes) && is_release {
+            return true;
+        }
+        if mode.has(ProgressiveEnhancementFlag::ReportEventTypes) && is_release {
+            return matches!(
+                &self.logical_key,
+                Key::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)
+            );
         }
         false
     }
 
-    fn should_emit_control_code(&self, mode: ProgressiveMode, option_key_is_meta: bool) -> bool {
-        if mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
+    fn should_emit_control_code(&self, mode: ProgressiveMode) -> bool {
+        let has_text = self
+            .text_with_all_modifiers
+            .as_ref()
+            .map(|txt| !starts_with_ascii_control(txt))
+            .unwrap_or(false);
+
+        if !mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes)
+            && has_text
+            && !self.state.is_pressed()
+        {
+            return false;
+        } else {
             return true;
         }
-        if mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes) {
-            match &self.logical_key {
-                Key::Named(NamedKey::Escape) => return true,
-                _ => (),
-            }
-        }
-        if mode.has(ProgressiveEnhancementFlag::ReportEventTypes) {
-            if self.repeat || !self.state.is_pressed() {
-                return true;
-            }
-        }
 
-        match &self.logical_key {
-            Key::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)
-                if self.modifiers.is_none() =>
-            {
-                return false
-            }
-            Key::Named(
-                NamedKey::Control
-                | NamedKey::Shift
-                | NamedKey::Alt
-                | NamedKey::Super
-                | NamedKey::Hyper,
-            ) => false,
-            Key::Character(_)
-                if self.modifiers.is_none()
-                    || self.modifiers == egui::Modifiers::SHIFT
-                    || (!option_key_is_meta && self.modifiers.alt) =>
-            {
-                false
-            }
-            _ => true,
-        }
+        // --
+        // if mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes) {
+        //     match &self.logical_key {
+        //         Key::Named(NamedKey::Escape) => return true,
+        //         _ => (),
+        //     }
+        // }
+        // if mode.has(ProgressiveEnhancementFlag::ReportEventTypes) {
+        //     if self.repeat || !self.state.is_pressed() {
+        //         return true;
+        //     }
+        // }
+
+        // match &self.logical_key {
+        //     Key::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)
+        //         if self.modifiers.is_none() =>
+        //     {
+        //         return false
+        //     }
+        //     Key::Named(
+        //         NamedKey::Control
+        //         | NamedKey::Shift
+        //         | NamedKey::Alt
+        //         | NamedKey::Super
+        //         | NamedKey::Hyper,
+        //     ) => false,
+        //     Key::Character(_)
+        //         if self.modifiers.is_none()
+        //             || self.modifiers == egui::Modifiers::SHIFT
+        //             || (!option_key_is_meta && self.modifiers.alt) =>
+        //     {
+        //         false
+        //     }
+        //     _ => true,
+        // }
     }
 
     fn try_numpad(&self, mode: ProgressiveMode) -> Option<KeyRepr> {
@@ -625,12 +655,66 @@ impl KeyContext {
         }
     }
 
-    fn try_as_csi_functional_key(&self, mode: ProgressiveMode) -> Option<KeyRepr> {
+    fn try_as_csi_functional_key(
+        &self,
+        mode: ProgressiveMode,
+        cursor_keys_mode: bool,
+    ) -> Option<KeyRepr> {
         let named_key = match self.logical_key.as_ref() {
             Key::Named(named_key) => named_key,
             _ => return None,
         };
 
+        let legacy_mode = !mode.has(ProgressiveEnhancementFlag::ReportEventTypes)
+            && !mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes);
+
+        if cursor_keys_mode && legacy_mode && self.modifiers.is_none() {
+            if let Some(repr) = match named_key {
+                NamedKey::ArrowUp => Some(KeyRepr::ss3('A', &self.modifiers)),
+                NamedKey::ArrowDown => Some(KeyRepr::ss3('B', &self.modifiers)),
+                NamedKey::ArrowRight => Some(KeyRepr::ss3('C', &self.modifiers)),
+                NamedKey::ArrowLeft => Some(KeyRepr::ss3('D', &self.modifiers)),
+                // NamedKey::Begin if self.location == KeyLocation::Numpad => Some(KeyRepr::ss3( 'E' , &self.modifiers)),
+                NamedKey::End => Some(KeyRepr::ss3('F', &self.modifiers)),
+                NamedKey::Home => Some(KeyRepr::ss3('H', &self.modifiers)),
+                _ => None,
+            } {
+                return Some(repr);
+            }
+        }
+
+        if self.modifiers.is_none() {
+            if !mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes)
+                && !mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes)
+                && named_key == NamedKey::Escape
+            {
+                return Some(KeyRepr::C0(0x1b, egui::Modifiers::NONE));
+            }
+
+            if legacy_mode {
+                if let Some(repr) = match named_key {
+                    NamedKey::F1 => Some(KeyRepr::ss3('P', &self.modifiers)),
+                    NamedKey::F2 => Some(KeyRepr::ss3('Q', &self.modifiers)),
+                    NamedKey::F3 => Some(KeyRepr::ss3('R', &self.modifiers)),
+                    NamedKey::F4 => Some(KeyRepr::ss3('S', &self.modifiers)),
+                    _ => None,
+                } {
+                    return Some(repr);
+                }
+            }
+
+            if !mode.has(ProgressiveEnhancementFlag::ReportAllKeysAsEscapeCodes) {
+                if let Some(repr) = match named_key {
+                    NamedKey::Enter => Some(KeyRepr::C0(0x0d, egui::Modifiers::NONE)),
+                    NamedKey::Backspace => Some(KeyRepr::C0(0x7f, egui::Modifiers::NONE)),
+                    NamedKey::Tab => Some(KeyRepr::C0(0x09, egui::Modifiers::NONE)),
+                    _ => None,
+                } {
+                    return Some(repr);
+                }
+            }
+        }
+        // --
         let (code_point, suffix) = match (named_key, self.location) {
             (NamedKey::Tab, _) => (9, b'u'),
             (NamedKey::Enter, _) => (13, b'u'),
@@ -745,6 +829,14 @@ impl KeyContext {
     }
 }
 
+fn starts_with_ascii_control<T: AsRef<str>>(txt: T) -> bool {
+    if let Some(ch) = txt.as_ref().chars().next() {
+        ch.is_ascii_control()
+    } else {
+        false
+    }
+}
+
 #[derive(Debug)]
 pub struct KeyboardHandler {
     /// CSI number ; modifier ~
@@ -839,17 +931,25 @@ impl KeyboardHandler {
             .copied()
     }
 
-    fn progressive_mode(&self, ctx: KeyContext, output: &mut String) -> anyhow::Result<bool> {
+    fn progressive_mode(&self, mut ctx: KeyContext, output: &mut String) -> anyhow::Result<bool> {
         log::info!("ctx: {ctx:?}");
+
+        let mode = self
+            .current_progressive_mode()
+            .unwrap_or(ProgressiveMode(0));
+
+        if !mode.has(ProgressiveEnhancementFlag::DisambiguateEscapeCodes)
+            && ctx.location == KeyLocation::Numpad
+        {
+            ctx.location = KeyLocation::Standard;
+        }
+
         let KeyContext {
             logical_key,
             text_with_all_modifiers,
             ..
         } = &ctx;
 
-        let mode = self
-            .current_progressive_mode()
-            .unwrap_or(ProgressiveMode(0));
         if ctx.should_ignore(mode) {
             log::info!(
                 "ignoring key event: {:?}, logical_key: {:?}",
@@ -859,11 +959,14 @@ impl KeyboardHandler {
             return Ok(false);
         }
 
-        if ctx.should_emit_control_code(mode, self.option_key_is_meta) {
+        if ctx.should_emit_control_code(mode) {
+            // let repr = ctx
+            //     .try_numpad(mode)
+            //     .or_else(|| ctx.try_c0_special_keys(mode))
+            //     .or_else(|| ctx.try_as_csi_functional_key(mode))
+            //     .or_else(|| ctx.try_as_csi_text(mode));
             let repr = ctx
-                .try_numpad(mode)
-                .or_else(|| ctx.try_c0_special_keys(mode))
-                .or_else(|| ctx.try_as_csi_functional_key(mode))
+                .try_as_csi_functional_key(mode)
                 .or_else(|| ctx.try_as_csi_text(mode));
 
             match repr {
@@ -938,6 +1041,14 @@ impl KeyboardHandler {
             }
             _ => Ok(false),
         }
+    }
+}
+
+fn is_modifier_key(key: &Key) -> bool {
+    use NamedKey::*;
+    match key {
+        Key::Named(Alt | Control | Shift | Meta | Hyper | Super) => true,
+        _ => false,
     }
 }
 
