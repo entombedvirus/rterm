@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fmt::Write,
     ops::{Neg, Range},
     os::fd::{AsFd, AsRawFd, OwnedFd},
@@ -86,6 +86,11 @@ impl eframe::App for TerminalEmulator {
                 |ctx, _window_class| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         puffin_egui::profiler_ui(ui);
+                    });
+                    self.show_profiler = !ctx.input_mut(|input| {
+                        input.viewport().close_requested()
+                            || input.consume_key(egui::Modifiers::COMMAND, Key::W)
+                            || input.consume_key(egui::Modifiers::NONE, Key::Escape)
                     });
                 },
             );
@@ -294,39 +299,66 @@ impl TerminalEmulator {
             .font_manager
             .get_or_init("regular", &self.config.regular_font);
 
-        for (line_chars, formats) in grid.lines(visible_rows) {
-            puffin::profile_scope!("render_line");
+        let build_text_format = |format: &SgrState| -> egui::text::TextFormat {
+            let font_id = egui::FontId::new(
+                self.config.font_size,
+                if format.bold && format.italic {
+                    font_bold_italic.clone()
+                } else if format.bold {
+                    font_bold.clone()
+                } else if format.italic {
+                    font_italic.clone()
+                } else {
+                    font_regular.clone()
+                },
+            );
+            egui::text::TextFormat {
+                font_id,
+                color: format.fg_color.into(),
+                background: format.bg_color.into(),
+                ..Default::default()
+            }
+        };
+
+        let build_line_layout = |line_chars: &[char], formats: &[SgrState]| -> LayoutJob {
+            puffin::profile_function!("build_line_layout");
             let mut layout = LayoutJob::default();
             layout.wrap = egui::text::TextWrapping::no_max_width();
+
+            let mut last_sgr_state = None;
             for (&ch, format) in line_chars.into_iter().zip(formats) {
-                let byte_range = layout.text.len()..layout.text.len() + ch.len_utf8();
+                if last_sgr_state == Some(format) {
+                    let last_section = layout
+                        .sections
+                        .last_mut()
+                        .expect("last_sgr_state being Some means this wont' be none");
+                    last_section.byte_range =
+                        last_section.byte_range.start..last_section.byte_range.end + ch.len_utf8();
+                } else {
+                    last_sgr_state = Some(format);
+                    let format = build_text_format(format);
+                    let byte_range = layout.text.len()..layout.text.len() + ch.len_utf8();
+                    let section = egui::text::LayoutSection {
+                        leading_space: 0.0,
+                        byte_range,
+                        format,
+                    };
+                    layout.sections.push(section);
+                }
+
                 layout.text.push(ch);
-                let font_id = egui::FontId::new(
-                    self.config.font_size,
-                    if format.bold && format.italic {
-                        font_bold_italic.clone()
-                    } else if format.bold {
-                        font_bold.clone()
-                    } else if format.italic {
-                        font_italic.clone()
-                    } else {
-                        font_regular.clone()
-                    },
-                );
-                let format = egui::text::TextFormat {
-                    font_id,
-                    color: format.fg_color.into(),
-                    background: format.bg_color.into(),
-                    ..Default::default()
-                };
-                let section = egui::text::LayoutSection {
-                    leading_space: 0.0,
-                    byte_range,
-                    format,
-                };
-                layout.sections.push(section);
             }
-            let galley = ui.fonts(|fonts| fonts.layout_job(layout));
+
+            layout
+        };
+
+        for (line_chars, formats) in grid.lines(visible_rows) {
+            puffin::profile_scope!("render_line");
+            let layout = build_line_layout(line_chars, formats);
+            let galley = ui.fonts(|fonts| {
+                puffin::profile_scope!("galley_construction");
+                fonts.layout_job(layout)
+            });
             label_responses.push(ui.label(galley));
         }
         label_responses
@@ -1068,7 +1100,7 @@ impl AnsiGrid {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SgrState {
     fg_color: ansi::Color,
     bg_color: ansi::Color,
