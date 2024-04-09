@@ -1,3 +1,4 @@
+use puffin_egui::puffin;
 use terminal_emulator::TerminalEmulator;
 
 mod ansi;

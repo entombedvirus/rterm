@@ -17,6 +17,7 @@ use anyhow::Context;
 use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, Rect};
 use log::info;
 use nix::errno::Errno;
+use puffin_egui::puffin;
 
 #[derive(Debug)]
 struct ChildProcess {
@@ -61,6 +62,8 @@ pub struct TerminalEmulator {
     show_settings: bool,
     settings_state: Option<SettingsState>,
 
+    show_profiler: bool,
+
     enable_bracketed_paste: bool,
     enable_focus_tracking: bool,
     enable_application_escape: bool,
@@ -69,6 +72,25 @@ pub struct TerminalEmulator {
 
 impl eframe::App for TerminalEmulator {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        puffin::set_scopes_on(self.show_profiler);
+        puffin::profile_function!();
+
+        if self.show_profiler {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("profiler_ui"),
+                egui::ViewportBuilder::default()
+                    .with_min_inner_size((1024.0, 768.0))
+                    .with_resizable(true)
+                    .with_active(true)
+                    .with_title("rterm - profiler"),
+                |ctx, _window_class| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        puffin_egui::profiler_ui(ui);
+                    });
+                },
+            );
+        }
+
         if self.show_settings {
             self.settings_state
                 .get_or_insert_with(|| SettingsState::new(&self.font_manager))
@@ -77,6 +99,7 @@ impl eframe::App for TerminalEmulator {
                     &mut self.config,
                     &mut self.enable_debug_render,
                     &mut self.show_settings,
+                    &mut self.show_profiler,
                 );
         }
 
@@ -227,6 +250,7 @@ impl TerminalEmulator {
             alternate_grid: None,
             char_dimensions: None,
             enable_debug_render: false,
+            show_profiler: false,
             show_settings: false,
             settings_state: None,
             enable_bracketed_paste: false,
@@ -236,6 +260,7 @@ impl TerminalEmulator {
     }
 
     fn init_fonts(config: &Config, font_manager: &mut FontManager) {
+        puffin::profile_function!();
         for (family_name, font_postscript_name) in [
             ("regular", &config.regular_font),
             ("bold", &config.bold_font),
@@ -252,9 +277,25 @@ impl TerminalEmulator {
         ui: &mut egui::Ui,
         visible_rows: Range<usize>,
     ) -> Vec<egui::Response> {
+        puffin::profile_function!();
         let mut label_responses = Vec::new();
         let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
+
+        let font_bold_italic = self
+            .font_manager
+            .get_or_init("bold_italic", &self.config.bold_italic_font);
+        let font_bold = self
+            .font_manager
+            .get_or_init("bold", &self.config.bold_font);
+        let font_italic = self
+            .font_manager
+            .get_or_init("italic", &self.config.italic_font);
+        let font_regular = self
+            .font_manager
+            .get_or_init("regular", &self.config.regular_font);
+
         for (line_chars, formats) in grid.lines(visible_rows) {
+            puffin::profile_scope!("render_line");
             let mut layout = LayoutJob::default();
             layout.wrap = egui::text::TextWrapping::no_max_width();
             for (&ch, format) in line_chars.into_iter().zip(formats) {
@@ -263,17 +304,13 @@ impl TerminalEmulator {
                 let font_id = egui::FontId::new(
                     self.config.font_size,
                     if format.bold && format.italic {
-                        self.font_manager
-                            .get_or_init("bold_italic", &self.config.bold_italic_font)
+                        font_bold_italic.clone()
                     } else if format.bold {
-                        self.font_manager
-                            .get_or_init("bold", &self.config.bold_font)
+                        font_bold.clone()
                     } else if format.italic {
-                        self.font_manager
-                            .get_or_init("italic", &self.config.italic_font)
+                        font_italic.clone()
                     } else {
-                        self.font_manager
-                            .get_or_init("regular", &self.config.regular_font)
+                        font_regular.clone()
                     },
                 );
                 let format = egui::text::TextFormat {
@@ -296,6 +333,7 @@ impl TerminalEmulator {
     }
 
     pub fn write_to_pty(&mut self) -> anyhow::Result<()> {
+        puffin::profile_function!();
         if self.buffered_input.is_empty() {
             return Ok(());
         }
@@ -331,6 +369,7 @@ impl TerminalEmulator {
         input_state: &egui::InputState,
         event: &egui::Event,
     ) -> anyhow::Result<()> {
+        puffin::profile_function!();
         match event {
             egui::Event::WindowFocused(is_focused) => {
                 if self.enable_focus_tracking {
@@ -451,6 +490,7 @@ impl TerminalEmulator {
     }
 
     fn read_from_pty(&mut self, ctx: &egui::Context) -> anyhow::Result<bool> {
+        puffin::profile_function!();
         let token_stream = self
             .child_process
             .as_ref()
@@ -612,6 +652,7 @@ impl SettingsState {
         config: &mut Config,
         enable_debug_render: &mut bool,
         show_settings: &mut bool,
+        show_profiler: &mut bool,
     ) {
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("settings_ui"),
@@ -627,6 +668,7 @@ impl SettingsState {
                         ui.add(DragValue::new(&mut config.font_size).clamp_range(2.0..=88.0));
                     });
                     ui.checkbox(enable_debug_render, "Enable Debug Renderer");
+                    ui.checkbox(show_profiler, "Show Profiler Window");
 
                     ui.separator();
                     ui.collapsing("Fonts", |ui| {
@@ -985,6 +1027,7 @@ impl AnsiGrid {
         &'a self,
         visible_rows: Range<usize>,
     ) -> impl Iterator<Item = (&'a [char], &'a [SgrState])> + 'a {
+        puffin::profile_function!();
         // let start = self.cursor_position_to_buf_pos(&(0, 0));
         // let end = start + (self.num_rows * self.num_cols);
         self.cells
