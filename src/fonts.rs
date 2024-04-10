@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf, sync::mpsc};
 
+use crate::puffin;
 use anyhow::Context;
-use puffin_egui::puffin;
 
 #[derive(Debug)]
 pub struct FontManager {

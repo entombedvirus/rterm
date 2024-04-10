@@ -1,9 +1,10 @@
-use puffin_egui::puffin;
+pub use puffin_egui::puffin;
 use terminal_emulator::TerminalEmulator;
 
 mod ansi;
 mod config;
 mod fonts;
+mod grid;
 mod pty;
 mod terminal_emulator;
 mod terminal_input;

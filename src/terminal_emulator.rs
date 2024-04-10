@@ -1,11 +1,11 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
-    fmt::Write,
+    collections::VecDeque,
     ops::{Neg, Range},
     os::fd::{AsFd, AsRawFd, OwnedFd},
     sync::{mpsc, Arc},
 };
 
+use crate::puffin;
 use crate::{
     ansi::{self, AnsiToken, SgrControl},
     config::{self, Config},
@@ -17,7 +17,6 @@ use anyhow::Context;
 use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, Rect};
 use log::info;
 use nix::errno::Errno;
-use puffin_egui::puffin;
 
 #[derive(Debug)]
 struct ChildProcess {
@@ -603,6 +602,7 @@ impl TerminalEmulator {
     }
 
     fn handle_osc_token(&mut self, ctx: &egui::Context, osc_ctrl: ansi::OscControl) {
+        puffin::profile_function!();
         use ansi::OscControl::*;
         match osc_ctrl {
             GetDefaultFgColor => {
@@ -870,6 +870,7 @@ impl AnsiGrid {
     }
 
     fn update(&mut self, token: &ansi::AnsiToken) {
+        puffin::profile_function!();
         use ansi::AnsiToken::*;
         use ansi::AsciiControl;
         use ansi::CursorControl;
@@ -880,6 +881,7 @@ impl AnsiGrid {
                 self.clear_including_scrollback();
             }
             Text(txt) => {
+                puffin::profile_scope!("grid: Text");
                 for ch in txt.chars() {
                     // before inserting txt, check if a wrap is pending
                     if self.cursor_state.pending_wrap {
@@ -1017,6 +1019,7 @@ impl AnsiGrid {
     }
 
     fn move_cursor(&mut self, new_row: usize, new_col: usize) {
+        puffin::profile_function!();
         assert!(new_col < self.num_cols);
         self.cursor_state.pending_wrap = false;
 
@@ -1029,11 +1032,13 @@ impl AnsiGrid {
         // if we can't grow the buffer, create room at the end by shifting everything up
         let num_new_lines = new_row - self.num_rows + 1;
         if self.cells.len() >= self.max_rows_scrollback * self.num_cols {
+            puffin::profile_scope!("shifting buffer");
             let _ = self.cells.drain(0..num_new_lines * self.num_cols);
             let _ = self.text_format.drain(0..num_new_lines * self.num_cols);
         }
 
         // we can grow to accomodate
+        puffin::profile_scope!("growing buffer");
         let new_len = self.cells.len() + num_new_lines * self.num_cols;
         self.cells.resize(new_len, Self::FILL_CHAR);
         self.text_format.resize(new_len, SgrState::default());
