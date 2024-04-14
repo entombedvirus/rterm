@@ -1,16 +1,16 @@
 use std::{
     collections::VecDeque,
+    fmt::Write,
     ops::{Neg, Range},
     os::fd::{AsFd, AsRawFd, OwnedFd},
     sync::{mpsc, Arc},
 };
 
-use crate::puffin;
 use crate::{
     ansi::{self, AnsiToken, SgrControl},
     config::{self, Config},
     fonts::{FontDesc, FontManager},
-    pty, terminal_input,
+    grid, pty, puffin, terminal_input,
 };
 use ansi::AsciiControl;
 use anyhow::Context;
@@ -54,9 +54,9 @@ pub struct TerminalEmulator {
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
 
-    primary_grid: AnsiGrid,
+    primary_grid: grid::Grid2,
     // used for fullscreen apps. does not have scrollback
-    alternate_grid: Option<AnsiGrid>,
+    alternate_grid: Option<grid::Grid2>,
 
     show_settings: bool,
     settings_state: Option<SettingsState>,
@@ -177,21 +177,21 @@ impl eframe::App for TerminalEmulator {
 
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::TOP), |ui| {
                     let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
-                    ui.set_height(grid.num_rows as f32 * char_dims.y);
-                    ui.set_width(grid.num_cols as f32 * char_dims.x);
+                    ui.set_height(grid.num_rows() as f32 * char_dims.y);
+                    ui.set_width(grid.num_cols() as f32 * char_dims.x);
                     if self.enable_debug_render {
                         ctx.debug_painter()
                             .debug_rect(ui.max_rect(), Color32::GREEN, "layout");
                     }
 
-                    let grid_cols = grid.num_cols;
+                    let grid_cols = grid.num_cols();
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .stick_to_bottom(true)
                         .show_rows(
                             ui,
                             char_dims.y,
-                            grid.num_current_rows(),
+                            grid.num_current_display_rows(),
                             |ui, visible_rows| -> anyhow::Result<()> {
                                 if self.enable_debug_render {
                                     ctx.debug_painter().debug_rect(
@@ -245,12 +245,14 @@ impl TerminalEmulator {
         let mut font_manager = FontManager::new(cc.egui_ctx.clone());
         Self::init_fonts(&config, &mut font_manager);
 
+        let mut primary_grid = grid::Grid2::new(24, 80);
+        primary_grid.max_scrollback_lines(5000);
         Ok(Self {
             config,
             font_manager,
+            primary_grid,
             child_process: None,
             buffered_input: String::new(),
-            primary_grid: AnsiGrid::new(24, 80, 5000),
             alternate_grid: None,
             char_dimensions: None,
             enable_debug_render: false,
@@ -298,7 +300,7 @@ impl TerminalEmulator {
             .font_manager
             .get_or_init("regular", &self.config.regular_font);
 
-        let build_text_format = |format: &SgrState| -> egui::text::TextFormat {
+        let build_text_format = |format: &grid::SgrState| -> egui::text::TextFormat {
             let font_id = egui::FontId::new(
                 self.config.font_size,
                 if format.bold && format.italic {
@@ -319,46 +321,46 @@ impl TerminalEmulator {
             }
         };
 
-        let build_line_layout = |line_chars: &[char], formats: &[SgrState]| -> LayoutJob {
+        let build_line_layout = |line: grid::DisplayLine| -> LayoutJob {
             puffin::profile_function!("build_line_layout");
             let mut layout = LayoutJob::default();
+            layout.break_on_newline = false;
             layout.wrap = egui::text::TextWrapping::no_max_width();
+            layout.text = line.padded_text;
+            layout.sections = line
+                .format_attributes
+                .into_iter()
+                .map(|attrs| egui::text::LayoutSection {
+                    leading_space: 0.0,
+                    byte_range: attrs.byte_range,
+                    format: build_text_format(attrs.sgr_state),
+                })
+                .collect();
 
-            let mut last_sgr_state = None;
-            for (&ch, format) in line_chars.into_iter().zip(formats) {
-                if last_sgr_state == Some(format) {
-                    let last_section = layout
-                        .sections
-                        .last_mut()
-                        .expect("last_sgr_state being Some means this wont' be none");
-                    last_section.byte_range =
-                        last_section.byte_range.start..last_section.byte_range.end + ch.len_utf8();
-                } else {
-                    last_sgr_state = Some(format);
-                    let format = build_text_format(format);
-                    let byte_range = layout.text.len()..layout.text.len() + ch.len_utf8();
-                    let section = egui::text::LayoutSection {
-                        leading_space: 0.0,
-                        byte_range,
-                        format,
-                    };
-                    layout.sections.push(section);
-                }
-
-                layout.text.push(ch);
-            }
+            //             for format in formats {
+            //                 let format = build_text_format(format);
+            //                 let byte_range = layout.text.len()..layout.text.len() + ch.len_utf8();
+            //                 let section = egui::text::LayoutSection {
+            //                     leading_space: 0.0,
+            //                     byte_range,
+            //                     format,
+            //                 };
+            //                 layout.sections.push(section);
+            //             }
 
             layout
         };
 
-        for (line_chars, formats) in grid.lines(visible_rows) {
-            puffin::profile_scope!("render_line");
-            let layout = build_line_layout(line_chars, formats);
-            let galley = ui.fonts(|fonts| {
-                puffin::profile_scope!("galley_construction");
-                fonts.layout_job(layout)
-            });
-            label_responses.push(ui.label(galley));
+        {
+            puffin::profile_scope!("render_lines");
+            for line in grid.display_lines(visible_rows) {
+                let layout = build_line_layout(line);
+                let galley = ui.fonts(|fonts| {
+                    puffin::profile_scope!("galley_construction");
+                    fonts.layout_job(layout)
+                });
+                label_responses.push(ui.label(galley));
+            }
         }
         label_responses
     }
@@ -490,7 +492,6 @@ impl TerminalEmulator {
             egui::Event::Key { pressed: false, .. } => (),
             egui::Event::PointerMoved { .. } => (),
             egui::Event::PointerGone { .. } => (),
-            egui::Event::WindowFocused { .. } => (),
             egui::Event::Scroll { .. } => (),
             egui::Event::MouseWheel { .. } => (),
             _ => log::trace!("unhandled event: {event:?}"),
@@ -504,7 +505,7 @@ impl TerminalEmulator {
         visible_rows: &Range<usize>,
     ) -> anyhow::Result<egui::Rect> {
         let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
-        let (cursor_row_in_screen_space, cursor_col) = grid.cursor_state.position;
+        let (cursor_row_in_screen_space, cursor_col) = grid.cursor_position();
         let cursor_row_in_scrollback_space =
             grid.first_visible_line_no() + cursor_row_in_screen_space;
         let num_rows_from_top = cursor_row_in_scrollback_space.saturating_sub(visible_rows.start);
@@ -579,11 +580,123 @@ impl TerminalEmulator {
                             );
                         }
                         _ => {
+                            use ansi::CursorControl;
+                            use ansi::EraseControl;
                             let grid = self
                                 .alternate_grid
                                 .as_mut()
                                 .unwrap_or(&mut self.primary_grid);
-                            grid.update(&token);
+                            match token {
+                                AnsiToken::ResetToInitialState => {
+                                    grid.clear_including_scrollback();
+                                }
+                                AnsiToken::Text(txt) => {
+                                    grid.write_text_at_cursor(&txt);
+                                }
+                                AnsiToken::AsciiControl(AsciiControl::Backspace) => {
+                                    grid.move_cursor_relative(0, -1);
+                                }
+                                AnsiToken::AsciiControl(AsciiControl::Tab) => {
+                                    grid.move_cursor_relative(0, 4);
+                                }
+                                AnsiToken::AsciiControl(AsciiControl::LineFeed) => {
+                                    grid.write_text_at_cursor("\n");
+                                    grid.move_cursor_relative(1, 0);
+                                }
+                                AnsiToken::AsciiControl(AsciiControl::CarriageReturn) => {
+                                    let (current_row, _) = grid.cursor_position();
+                                    grid.move_cursor(current_row, 0);
+                                }
+                                AnsiToken::CursorControl(CursorControl::MoveUp { lines }) => {
+                                    grid.move_cursor_relative(
+                                        lines.try_into().unwrap_or(0_isize).neg(),
+                                        0,
+                                    );
+                                }
+                                AnsiToken::CursorControl(CursorControl::MoveDown { lines }) => {
+                                    grid.move_cursor_relative(
+                                        lines.try_into().unwrap_or(0_isize),
+                                        0,
+                                    );
+                                }
+                                AnsiToken::CursorControl(CursorControl::MoveLeft { cols }) => {
+                                    grid.move_cursor_relative(
+                                        0,
+                                        cols.try_into().unwrap_or(0_isize).neg(),
+                                    );
+                                }
+                                AnsiToken::CursorControl(CursorControl::MoveRight { cols }) => {
+                                    grid.move_cursor_relative(
+                                        0,
+                                        cols.try_into().unwrap_or(0_isize),
+                                    );
+                                }
+                                AnsiToken::CursorControl(CursorControl::MoveTo { line, col }) => {
+                                    grid.move_cursor(line.saturating_sub(1), col.saturating_sub(1));
+                                }
+                                AnsiToken::CursorControl(CursorControl::ScrollUpFromHome) => {
+                                    let (cursor_row, _) = grid.cursor_position();
+                                    if cursor_row > 0 {
+                                        // no need to scroll
+                                        grid.move_cursor_relative(-1, 0);
+                                    } else {
+                                        grid.move_lines_down(0, 1);
+                                    }
+                                }
+                                AnsiToken::CursorControl(CursorControl::SavePositionDEC) => {
+                                    grid.save_cursor_state();
+                                }
+                                AnsiToken::CursorControl(CursorControl::RestorePositionDEC) => {
+                                    grid.restore_cursor_state();
+                                }
+                                AnsiToken::EraseControl(EraseControl::Screen) => {
+                                    grid.clear_screen();
+                                }
+                                AnsiToken::EraseControl(EraseControl::ScreenAndScrollback) => {
+                                    grid.clear_including_scrollback();
+                                }
+                                AnsiToken::EraseControl(EraseControl::FromCursorToEndOfScreen) => {
+                                    grid.erase_from_cursor_to_screen();
+                                }
+                                AnsiToken::EraseControl(EraseControl::FromCursorToEndOfLine) => {
+                                    grid.erase_from_cursor_to_eol();
+                                }
+                                AnsiToken::SGR(params) => {
+                                    let sgr_state = grid.cursor_format_mut();
+                                    for sgr in params {
+                                        match sgr {
+                                            SgrControl::Bold => {
+                                                sgr_state.bold = true;
+                                            }
+                                            SgrControl::EnterItalicsMode => {
+                                                sgr_state.italic = true;
+                                            }
+                                            SgrControl::ExitItalicsMode => {
+                                                sgr_state.italic = false;
+                                            }
+                                            SgrControl::ForgroundColor(color) => {
+                                                sgr_state.fg_color = color;
+                                            }
+                                            SgrControl::BackgroundColor(color) => {
+                                                sgr_state.bg_color = color;
+                                            }
+                                            SgrControl::Reset => {
+                                                *sgr_state = grid::SgrState::default();
+                                            }
+                                            SgrControl::ResetFgColor => {
+                                                sgr_state.fg_color = ansi::Color::DefaultFg;
+                                            }
+                                            SgrControl::ResetBgColor => {
+                                                sgr_state.bg_color = ansi::Color::DefaultBg;
+                                            }
+                                            SgrControl::Unimplemented(_) => {
+                                                // noop
+                                            }
+                                        }
+                                    }
+                                }
+                                ignored => info!("ignoring ansii token: {ignored:?}"),
+                            }
                         }
                     }
                 }
@@ -630,9 +743,9 @@ impl TerminalEmulator {
     fn enter_alternate_screen(&mut self) {
         self.alternate_grid.get_or_insert_with(|| {
             self.primary_grid.save_cursor_state();
-            let num_rows = self.primary_grid.num_rows;
-            let num_cols = self.primary_grid.num_cols;
-            AnsiGrid::new(num_rows, num_cols, 0)
+            let num_rows = self.primary_grid.num_rows();
+            let num_cols = self.primary_grid.num_cols();
+            grid::Grid2::new(num_rows, num_cols)
         });
     }
 
@@ -813,8 +926,6 @@ struct CursorState {
     sgr_state: SgrState,
     pending_wrap: bool,
 }
-
-impl CursorState {}
 
 impl AnsiGrid {
     const FILL_CHAR: char = '-';

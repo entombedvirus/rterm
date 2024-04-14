@@ -17,5 +17,6 @@ libc = "0.2.153"
 log = "0.4.20"
 nix = {version = "0.27.1", features = ["process", "term", "fs", "ioctl"]}
 puffin_egui = "0.26.0"
+ropey = "1.6.1"
 serde = { version = "1.0.197", features = ["derive"] }
 toml = "0.8.10"
