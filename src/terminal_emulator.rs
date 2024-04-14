@@ -580,6 +580,7 @@ impl TerminalEmulator {
                             );
                         }
                         _ => {
+                            puffin::profile_scope!("grid token handling");
                             use ansi::CursorControl;
                             use ansi::EraseControl;
                             let grid = self
@@ -600,7 +601,6 @@ impl TerminalEmulator {
                                     grid.move_cursor_relative(0, 4);
                                 }
                                 AnsiToken::AsciiControl(AsciiControl::LineFeed) => {
-                                    grid.write_text_at_cursor("\n");
                                     grid.move_cursor_relative(1, 0);
                                 }
                                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn) => {
