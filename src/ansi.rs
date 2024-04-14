@@ -169,6 +169,7 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
         [b'h', rem @ ..] => Some((
             rem,
             match params.as_str() {
+                "?1" => AnsiToken::ModeControl(ModeControl::CursorKeysEnter),
                 "?2004" => AnsiToken::ModeControl(ModeControl::BracketedPasteEnter),
                 "?1049" => AnsiToken::ModeControl(ModeControl::AlternateScreenEnter),
                 "?1004" => AnsiToken::ModeControl(ModeControl::FocusTrackEnter),
@@ -179,6 +180,7 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
         [b'l', rem @ ..] => Some((
             rem,
             match params.as_str() {
+                "?1" => AnsiToken::ModeControl(ModeControl::CursorKeysExit),
                 "?2004" => AnsiToken::ModeControl(ModeControl::BracketedPasteExit),
                 "?1049" => AnsiToken::ModeControl(ModeControl::AlternateScreenExit),
                 "?1004" => AnsiToken::ModeControl(ModeControl::FocusTrackExit),
@@ -194,6 +196,27 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
                 _unknown => AnsiToken::DA(DeviceAttributes::Unknown(params)),
             },
         )),
+        // progressive keyboard
+        [b'u', rem @ ..] => Some((rem, {
+            AnsiToken::PKC(match params.split_at(1) {
+                ("=", args) => {
+                    if let Some(flags) = extract_param(args, 0) {
+                        let set_mode = extract_param(args, 1).unwrap_or(1);
+                        ProgressiveKeyboardControl::SetFlags { flags, set_mode }
+                    } else {
+                        ProgressiveKeyboardControl::Unknown(params)
+                    }
+                }
+                ("?", "") => ProgressiveKeyboardControl::QueryFlags,
+                (">", args) => ProgressiveKeyboardControl::PushFlags {
+                    flags: extract_param(args, 0).unwrap_or(0),
+                },
+                ("<", args) => ProgressiveKeyboardControl::PopFlags {
+                    num: extract_param(args, 0).unwrap_or(1),
+                },
+                _ => ProgressiveKeyboardControl::Unknown(params),
+            })
+        })),
 
         [unknown, rem @ ..] => Some((
             rem,
@@ -300,7 +323,7 @@ fn parse_normal_text(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
     }
 }
 
-fn extract_param<'a>(params: &'a str, num: usize) -> Option<usize> {
+fn extract_param<'a, N: std::str::FromStr>(params: &'a str, num: usize) -> Option<N> {
     let p = params.split(';').nth(num)?;
     if p.is_empty() {
         None
@@ -321,6 +344,7 @@ pub enum AnsiToken {
     OSC(OscControl),
     DA(DeviceAttributes),
     ModeControl(ModeControl),
+    PKC(ProgressiveKeyboardControl),
     Unknown(String),
 }
 
@@ -342,6 +366,17 @@ pub enum ModeControl {
     FocusTrackExit,
     ApplicationEscEnter,
     ApplicationEscExit,
+    CursorKeysEnter,
+    CursorKeysExit,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgressiveKeyboardControl {
+    SetFlags { flags: u8, set_mode: u8 },
+    QueryFlags,
+    PushFlags { flags: u8 },
+    PopFlags { num: u8 },
     Unknown(String),
 }
 
@@ -629,7 +664,7 @@ impl From<Color> for egui::Color32 {
     fn from(value: Color) -> Self {
         match value {
             Color::DefaultFg => egui::Color32::LIGHT_GRAY,
-            Color::DefaultBg => egui::Color32::BLACK,
+            Color::DefaultBg => egui::Color32::from_black_alpha(128),
             Color::Indexed(i) => COLOR_LUT[i as usize],
             Color::TrueColor(r, g, b) => egui::Color32::from_rgb(r, g, b),
 
@@ -714,7 +749,7 @@ mod tests {
             ],
             vec![
                 AnsiToken::EraseControl(FromCursorToEndOfLine),
-                AnsiToken::Unknown("\u{1b}[?2004h".to_string()),
+                AnsiToken::ModeControl(ModeControl::BracketedPasteEnter),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::SGR(vec![SgrControl::Reset]),
