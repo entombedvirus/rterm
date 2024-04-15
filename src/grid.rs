@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     ops::{Range, RangeBounds},
     rc::Rc,
 };
@@ -9,7 +8,7 @@ use crate::puffin;
 use crate::ansi;
 
 #[derive(Debug)]
-pub struct Grid2 {
+pub struct Grid {
     num_screen_rows: ScreenCoord,
     num_screen_cols: ScreenCoord,
     num_current_rows: BufferCoord, // between num_screen_rows and max_rows
@@ -45,12 +44,12 @@ pub struct FormatAttribute<'a> {
 // Invariants
 //  - max_rows >= num_rows
 //  - each newline separated line in the rope is exactly num_cols + 1 chars wide
-impl Grid2 {
+impl Grid {
     #[cfg(test)]
     const FILL_CHAR: u8 = b'-';
 
     #[cfg(not(test))]
-    const FILL_CHAR: u8 = b'-';
+    const FILL_CHAR: u8 = b' ';
 
     pub fn new(num_rows: usize, num_cols: usize) -> Self {
         let cursor_state = CursorState::default();
@@ -402,14 +401,6 @@ impl Grid2 {
         let char_idx = self.text.line_to_char(line_idx);
         BufferCoord(char_idx + col)
     }
-
-    #[cfg(test)]
-    fn get_line(&self, line_idx: usize) -> Option<String> {
-        self.text
-            .get_lines_at(line_idx)?
-            .next()
-            .map(|rslice| rslice.to_string())
-    }
 }
 
 fn resolve_range<R: RangeBounds<usize>>(
@@ -471,216 +462,6 @@ impl Default for SgrState {
         }
     }
 }
-
-// #[derive(Debug)]
-// struct RingBuffer<T> {
-//     // VecDeque's capacity is different from what we pass in
-//     capacity: usize,
-//     inner: VecDeque<T>,
-// }
-
-// impl<T> RingBuffer<T>
-// where
-//     T: Clone,
-// {
-//     pub fn with_capacity(capacity: usize) -> Self {
-//         Self {
-//             capacity,
-//             inner: VecDeque::new(), // allocate lazily
-//         }
-//     }
-
-//     pub fn push(&mut self, item: T) {
-//         if self.inner.len() == self.capacity {
-//             self.inner.pop_front();
-//             self.inner.push_back(item);
-//             debug_assert!(self.inner.len() == self.capacity);
-//         } else {
-//             self.inner.push_back(item);
-//         }
-//     }
-
-//     pub fn pop(&mut self) -> Option<T> {
-//         self.inner.pop_front()
-//     }
-
-//     fn fill(&mut self, item: T) {
-//         self.inner.clear();
-//         for _ in 0..self.capacity {
-//             self.push(item.clone());
-//         }
-//     }
-
-//     fn len(&self) -> usize {
-//         self.inner.len()
-//     }
-
-//     fn capacity(&self) -> usize {
-//         self.capacity
-//     }
-
-//     fn iter(&self) -> impl ExactSizeIterator<Item = &T> {
-//         self.inner.iter()
-//     }
-
-//     fn iter_mut(&mut self) -> impl ExactSizeIterator<Item = &mut T> + DoubleEndedIterator {
-//         self.inner.iter_mut()
-//     }
-//     // fn resize_with(&mut self, new_len: usize, fill_elem: &T) {
-//     //     match self.len().cmp(&new_len) {
-//     //         std::cmp::Ordering::Equal => return,
-//     //         std::cmp::Ordering::Less => {
-//     //             let additional = new_len - self.len();
-//     //             self.inner.reserve(additional);
-//     //             self.inner.resize_with(new_len, || fill_elem.clone());
-//     //         }
-//     //         std::cmp::Ordering::Greater => {
-//     //             let to_remove = self.len() - new_len;
-//     //             self.inner.drain(..to_remove);
-//     //         }
-//     //     }
-//     // }
-
-//     fn ensure_capacity(&mut self, new_capacity: usize) {
-//         self.capacity = std::cmp::max(self.capacity, new_capacity);
-//     }
-
-//     fn clear(&mut self) {
-//         self.inner.clear()
-//     }
-
-//     fn remove<R: RangeBounds<usize>>(&mut self, r: R) {
-//         self.inner.drain(r);
-//     }
-// }
-
-#[derive(Debug, Clone)]
-struct Rope<T> {
-    nodes: BTreeMap<usize, T>,
-}
-impl<T> Rope<T> {
-    fn new() -> Self {
-        Self {
-            nodes: BTreeMap::default(),
-        }
-    }
-
-    fn ordered_iter<'a>(&'a self) -> impl Iterator<Item = (usize, &'a T)> + 'a {
-        self.nodes.iter().map(|(idx, item)| (*idx, item))
-    }
-
-    fn clear(&mut self) {
-        self.nodes.clear();
-    }
-}
-
-// #[derive(Debug, Clone)]
-// enum LineText {
-//     Empty(Rc<String>),
-//     Ascii(String),
-//     Utf8(String),
-// }
-
-// impl LineText {
-//     fn as_str(&self) -> &str {
-//         match self {
-//             LineText::Empty(t) => t.as_ref(),
-//             LineText::Ascii(t) => t.as_str(),
-//             LineText::Utf8(t) => t.as_str(),
-//         }
-//     }
-
-//     fn resize_with(&mut self, new_num_cols: usize, blank_line: &Rc<String>) {
-//         // TODO: do a grpaheme count instead to account for glyphs that takes
-//         // multiple unicode code points
-//         let cur_cols = self.num_cols();
-//         match cur_cols.cmp(&new_num_cols) {
-//             std::cmp::Ordering::Equal => return,
-//             std::cmp::Ordering::Less => {
-//                 self.extend(blank_line.chars().take(new_num_cols - cur_cols));
-//             }
-//             std::cmp::Ordering::Greater => match self {
-//                 LineText::Ascii(txt) => txt.truncate(new_num_cols),
-//                 LineText::Utf8(txt) => *txt = txt.chars().take(new_num_cols).collect(),
-//                 LineText::Empty(txt) => *txt = Rc::clone(blank_line),
-//             },
-//         }
-//     }
-
-//     fn num_cols(&self) -> usize {
-//         match self {
-//             LineText::Ascii(txt) => txt.len(),
-//             LineText::Utf8(txt) => txt.chars().count(),
-//             LineText::Empty(txt) => {
-//                 debug_assert!(txt.is_ascii());
-//                 txt.len()
-//             }
-//         }
-//     }
-
-//     fn extend(&mut self, additional: impl Iterator<Item = char>) {
-//         match self {
-//             LineText::Ascii(txt) => txt.extend(additional),
-//             LineText::Utf8(txt) => txt.extend(additional),
-//             LineText::Empty(_) => {
-//                 let new_contents = additional.collect::<String>();
-//                 *self = if new_contents.is_ascii() {
-//                     LineText::Ascii(new_contents)
-//                 } else {
-//                     LineText::Utf8(new_contents)
-//                 };
-//             }
-//         }
-//     }
-// }
-
-// #[derive(Debug, Clone)]
-// pub struct Line {
-//     text: ropey::Rope,
-//     format_attributes: Rope<SgrState>,
-// }
-
-// impl Line {
-//     pub fn text_and_format<'a>(&'a self) -> (String, Vec<FormatAttribute<'a>>) {
-//         let wrapped = self.text.to_string();
-//         let attrs = self.format_attributes().collect();
-//         (wrapped, attrs)
-//     }
-
-//     fn format_attributes<'a>(&'a self) -> impl Iterator<Item = FormatAttribute<'a>> + 'a {
-//         let mut iter = self.format_attributes.ordered_iter().peekable();
-//         let mut start = iter.next();
-
-//         std::iter::from_fn(move || -> Option<FormatAttribute> {
-//             let (start_off, sgr_state) = start?;
-//             if let Some((next_start_off, _)) = iter.peek() {
-//                 let attr = FormatAttribute {
-//                     sgr_state,
-//                     byte_range: start_off..*next_start_off,
-//                 };
-//                 start = iter.next();
-//                 Some(attr)
-//             } else {
-//                 let end_off = self.text.len_bytes();
-//                 Some(FormatAttribute {
-//                     sgr_state,
-//                     byte_range: start_off..end_off,
-//                 })
-//             }
-//         })
-//     }
-
-//     fn empty(blank_line: &str) -> Self {
-//         Self {
-//             text: ropey::Rope::from_str(blank_line),
-//             format_attributes: Rope::<SgrState>::new(),
-//         }
-//     }
-
-//     fn append_str(&mut self, to_append: &str) {
-//         self.text.insert(self.text.len_chars(), to_append);
-//     }
-// }
 
 #[derive(Debug, Default, Copy, Clone)]
 struct CursorState {
@@ -787,14 +568,14 @@ mod tests {
 
     #[test]
     fn test_grid_1() {
-        let grid = Grid2::new(3, 10);
+        let grid = Grid::new(3, 10);
         assert_eq!(grid.display_lines(..).count(), 3);
         assert_is_blank(&grid, 0..3);
     }
 
     #[test]
     fn test_grid_2() {
-        let mut grid = Grid2::new(3, 10);
+        let mut grid = Grid::new(3, 10);
         grid.write_text_at_cursor("foo");
 
         assert_nth_line(&grid, 0, "foo-------");
@@ -824,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_grid_3() {
-        let mut grid = Grid2::new(3, 10);
+        let mut grid = Grid::new(3, 10);
         grid.max_scrollback_lines(100);
         grid.resize(5, 10);
         assert_eq!(grid.num_current_display_rows(), 5);
@@ -841,12 +622,12 @@ mod tests {
         // assert_nth_line(&grid, 5, "ffffffffff");
     }
 
-    fn assert_nth_line(grid: &Grid2, line_idx: usize, expected: &str) {
+    fn assert_nth_line(grid: &Grid, line_idx: usize, expected: &str) {
         let line = grid.display_lines(line_idx..).next().unwrap().padded_text;
         assert_eq!(&line, expected);
     }
 
-    fn assert_is_blank(grid: &Grid2, line_range: Range<usize>) {
+    fn assert_is_blank(grid: &Grid, line_range: Range<usize>) {
         let lines = grid.display_lines(line_range.clone());
         assert_eq!(lines.len(), line_range.len());
 
