@@ -11,8 +11,8 @@ use crate::ansi;
 pub struct Grid {
     num_screen_rows: ScreenCoord,
     num_screen_cols: ScreenCoord,
-    num_current_rows: BufferCoord, // between num_screen_rows and max_rows
-    max_rows: BufferCoord,         // always >= num_screen_rows
+    num_buffer_rows: BufferCoord, // between num_screen_rows and max_rows
+    max_rows: BufferCoord,        // always >= num_screen_rows
     blank_line: Rc<String>,
 
     text: ropey::Rope,
@@ -64,7 +64,7 @@ impl Grid {
         Self {
             num_screen_rows: ScreenCoord(num_rows),
             num_screen_cols: ScreenCoord(num_cols),
-            num_current_rows: BufferCoord(num_rows),
+            num_buffer_rows: BufferCoord(num_rows),
             max_rows: BufferCoord(num_rows),
             text,
             cursor_state,
@@ -82,10 +82,9 @@ impl Grid {
     }
 
     // in range num_rows..=max_scrollback_rows
-    pub fn num_current_display_rows(&self) -> usize {
+    pub fn total_rows(&self) -> usize {
         // TODO: will need to use len_graphemes() later
-        // -1 for the last newline
-        self.num_current_rows.0
+        self.num_buffer_rows.0
     }
 
     pub fn cursor_position(&self) -> (usize, usize) {
@@ -98,8 +97,7 @@ impl Grid {
     //  - first visible line no will be: 80 - 24 = 56
     //  - visible line range will be 56..80
     pub fn first_visible_line_no(&self) -> usize {
-        self.num_current_display_rows()
-            .saturating_sub(self.num_rows())
+        self.total_rows().saturating_sub(self.num_rows())
     }
 
     pub fn save_cursor_state(&mut self) {
@@ -128,7 +126,7 @@ impl Grid {
     pub fn clear_including_scrollback(&mut self) {
         puffin::profile_function!();
         self.text = Self::rope_with_n_blank_lines(self.num_rows(), self.blank_line.as_ref());
-        self.num_current_rows = BufferCoord(self.num_rows());
+        self.num_buffer_rows = BufferCoord(self.num_rows());
         self.cursor_state = CursorState::default();
     }
 
@@ -155,31 +153,28 @@ impl Grid {
         let num_new_rows = new_row - self.num_rows() + 1;
         let padding = self.num_rows();
         if let Some(to_remove) = self
-            .num_current_display_rows()
+            .total_rows()
             .saturating_add(num_new_rows + padding)
             .checked_sub(self.max_rows.0)
         {
-            let to_remove = to_remove.min(self.num_current_display_rows());
+            let to_remove = to_remove.min(self.total_rows());
             self.remove_screen_rows(ScreenCoord(0)..ScreenCoord(to_remove));
-            self.num_current_rows -= to_remove;
+            self.num_buffer_rows -= to_remove;
         }
 
         // double capacity, within limits, to amortize cost
         let capacity = self.text.len_lines() - 1; // -1 for last newline
-        if self.num_current_display_rows() + num_new_rows > capacity {
-            let lines_left_to_allocate = self
-                .max_rows
-                .0
-                .saturating_sub(self.num_current_display_rows());
+        if self.total_rows() + num_new_rows > capacity {
+            let lines_left_to_allocate = self.max_rows.0.saturating_sub(self.total_rows());
             let min_lines = self
                 .num_rows()
-                .saturating_sub(self.num_current_display_rows())
+                .saturating_sub(self.total_rows())
                 .max(num_new_rows);
-            let extra_lines = ((num_new_rows + self.num_current_display_rows()) * 2)
-                .clamp(min_lines, lines_left_to_allocate);
+            let extra_lines =
+                ((num_new_rows + self.total_rows()) * 2).clamp(min_lines, lines_left_to_allocate);
             Self::append_n_blank_rows(&mut self.text, self.blank_line.as_ref(), extra_lines);
         }
-        self.num_current_rows += num_new_rows;
+        self.num_buffer_rows += num_new_rows;
 
         self.cursor_state.position = (self.num_screen_rows - 1, ScreenCoord(new_col));
     }
@@ -203,45 +198,26 @@ impl Grid {
                 .take(new_num_cols)
                 .chain(std::iter::once('\n')),
         );
+        self.blank_line = Rc::new(new_blank_line);
 
         // add new blank lines at the end if we are resizing to have more rows that we have now
-        if let Some(to_add) = new_num_rows.checked_sub(self.num_rows()) {
-            Self::append_n_blank_rows(&mut self.text, &new_blank_line, to_add);
-            self.num_current_rows += to_add;
+        if let Some(to_add) = new_num_rows.checked_sub(self.total_rows()) {
+            Self::append_n_blank_rows(&mut self.text, self.blank_line.as_ref(), to_add);
         }
 
-        // need to maintain the invariant that each line is num_cols + 1 long
-
-        match new_num_cols.cmp(&self.num_cols()) {
-            std::cmp::Ordering::Equal => (),
-            std::cmp::Ordering::Less => {
-                // need to truncate all lines
-                // -1 because last line ends with a newline
-                for line_idx in 0..(self.text.len_lines() - 1) {
-                    let char_idx = self.text.line_to_char(line_idx);
-                    let remove_start = char_idx + self.num_cols();
-                    let remove_end = self.text.line_to_char(line_idx + 1) - 1;
-                    self.text.remove(remove_start..remove_end);
-                }
-            }
-            std::cmp::Ordering::Greater => {
-                // need to pad lines with blanks, while preserving newline at end
-                let n = new_num_cols - self.num_cols();
-                let pad_str = &new_blank_line[0..n];
-                for line_idx in 1..self.text.len_lines() {
-                    let char_idx = self.text.line_to_char(line_idx);
-                    self.text.insert(char_idx - 1, pad_str);
-                }
-            }
+        // need to maintain the invariant that each line is num_cols long
+        for line_idx in 0..self.text.len_lines() {
+            self.truncate_line(BufferCoord(line_idx), new_num_cols);
         }
 
         self.num_screen_rows = ScreenCoord(new_num_rows);
-        self.max_rows = BufferCoord(new_num_rows.max(self.max_rows.0));
         self.num_screen_cols = ScreenCoord(new_num_cols);
         self.cursor_state
             .clamp_position(self.num_screen_rows, self.num_screen_cols);
-        self.blank_line = Rc::new(new_blank_line);
-        debug_assert!(self.blank_line.len() == new_num_cols + 1);
+
+        let new_num_rows = BufferCoord(new_num_rows);
+        self.max_rows = self.max_rows.max(new_num_rows);
+        self.num_buffer_rows = self.num_buffer_rows.clamp(new_num_rows, self.max_rows);
 
         true
     }
@@ -294,8 +270,8 @@ impl Grid {
         &'a self,
         query_range: R,
     ) -> impl Iterator<Item = DisplayLine> + ExactSizeIterator + 'a {
-        let query_range = resolve_range(query_range, 0..self.num_current_display_rows())
-            .expect("query_range is out of bounds");
+        let query_range =
+            resolve_range(query_range, 0..self.total_rows()).expect("query_range is out of bounds");
 
         // TODO: actual SgrState
         let fake = Box::leak(Box::new(SgrState::default()));
@@ -409,6 +385,30 @@ impl Grid {
         let line_idx = self.first_visible_line_no() + row;
         let char_idx = self.text.line_to_char(line_idx);
         BufferCoord(char_idx + col)
+    }
+
+    /// ensures that line at given line_idx is `new_len` columns wide. It will either remove chars
+    /// or insert blank chars at the end.
+    fn truncate_line(&mut self, BufferCoord(line_idx): BufferCoord, new_len: usize) {
+        let Some(line) = self.text.get_line(line_idx) else {
+            return;
+        };
+        let diff: isize = line.len_chars() as isize - new_len as isize - 1;
+        match diff.cmp(&0) {
+            std::cmp::Ordering::Equal => (),
+            std::cmp::Ordering::Less => {
+                debug_assert!(self.blank_line.len() == new_len + 1);
+
+                let edit_point = self.text.line_to_char(line_idx) + line.len_chars() - 1;
+                let blanks = &self.blank_line[..diff.abs() as usize];
+                self.text.insert(edit_point, blanks);
+            }
+            std::cmp::Ordering::Greater => {
+                let remove_start = self.text.line_to_char(line_idx) + new_len;
+                let remove_end = remove_start + diff as usize;
+                self.text.remove(remove_start..remove_end);
+            }
+        }
     }
 }
 
@@ -624,7 +624,7 @@ mod tests {
         let mut grid = Grid::new(3, 10);
         grid.max_scrollback_lines(100);
         grid.resize(5, 10);
-        assert_eq!(grid.num_current_display_rows(), 5);
+        assert_eq!(grid.total_rows(), 5);
         assert_eq!(grid.text.len_lines(), 6);
 
         grid.write_text_at_cursor("aaaaaaaaaa");
@@ -633,7 +633,7 @@ mod tests {
         grid.write_text_at_cursor("dddddddddd");
         grid.write_text_at_cursor("eeeeeeeeee");
         grid.write_text_at_cursor("ffffffffff");
-        assert_eq!(grid.num_current_display_rows(), 6);
+        assert_eq!(grid.total_rows(), 6);
         assert_nth_line(&grid, 0, "aaaaaaaaaa");
         assert_nth_line(&grid, 5, "ffffffffff");
     }
@@ -644,6 +644,41 @@ mod tests {
         grid.resize(10, 30);
         // should not panic
         grid.erase_from_cursor_to_screen();
+    }
+
+    #[test]
+    fn test_write_after_resize_blank_lines() {
+        let mut grid = Grid::new(20, 100);
+        let input = r#"total 224
+drwxr-xr-x  10 rravi  staff    320 Apr 12 16:17 .
+drwxr-xr-x   6 rravi  staff    192 Apr 12 16:08 ..
+drwxr-xr-x  15 rravi  staff    480 Apr 15 14:12 .git
+-rw-r--r--   1 rravi  staff      8 Mar 18 21:01 .gitignore
+-rw-r--r--@  1 rravi  staff  99233 Apr 12 16:17 Cargo.lock
+-rw-------@  1 rravi  staff    631 Apr 12 16:17 Cargo.toml
+-rw-r--r--   1 rravi  staff   1857 Mar 26 17:17 TODO
+drwxr-xr-x   3 rravi  staff     96 Apr  9 13:38 res
+drwxr-xr-x  10 rravi  staff    320 Apr 15 14:06 src
+drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target"#;
+        for line in input.lines() {
+            grid.write_text_at_cursor(line);
+            let (row, _) = grid.cursor_position();
+            grid.move_cursor(row, 0); // \r
+            grid.move_cursor(row + 1, 0); // \n
+        }
+        assert_nth_line(
+            &grid,
+            10,
+            "drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target----------------------------------------------",
+        );
+
+        // that should work even when the window gets sized smaller than current output
+        grid.resize(input.lines().count() / 2, 80);
+        assert_nth_line(
+            &grid,
+            10,
+            "drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target--------------------------",
+        );
     }
 
     fn assert_nth_line(grid: &Grid, line_idx: usize, expected: &str) {
