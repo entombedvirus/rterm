@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.79"
+arrayvec = "0.7.4"
 bytes = "1.5.0"
 core-foundation = "0.9.4"
 core-text = "20.1.0"
