@@ -2513,6 +2513,7 @@ name = "rterm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrayvec",
  "bytes",
  "core-foundation",
  "core-text",
