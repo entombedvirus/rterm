@@ -6,6 +6,7 @@ mod config;
 mod fonts;
 mod grid;
 mod pty;
+mod sum_tree;
 mod terminal_emulator;
 mod terminal_input;
 

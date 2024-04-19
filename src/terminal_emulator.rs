@@ -191,7 +191,7 @@ impl eframe::App for TerminalEmulator {
                         .show_rows(
                             ui,
                             char_dims.y,
-                            grid.num_current_display_rows(),
+                            grid.total_rows(),
                             |ui, visible_rows| -> anyhow::Result<()> {
                                 if self.enable_debug_render {
                                     ctx.debug_painter().debug_rect(
