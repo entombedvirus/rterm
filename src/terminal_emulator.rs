@@ -1025,12 +1025,12 @@ impl AnsiGrid {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SgrState {
-    fg_color: ansi::Color,
-    bg_color: ansi::Color,
-    bold: bool,
-    italic: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SgrState {
+    pub fg_color: ansi::Color,
+    pub bg_color: ansi::Color,
+    pub bold: bool,
+    pub italic: bool,
 }
 
 impl Default for SgrState {
