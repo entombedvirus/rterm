@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 
-use arrayvec::ArrayString;
+use arrayvec::{ArrayString, ArrayVec};
 
 use crate::terminal_emulator::SgrState;
 
@@ -23,38 +23,33 @@ type Result<T> = std::result::Result<T, GridStringError>;
 /// capctured by SgrState.
 #[derive(Debug, Default, Clone)]
 pub struct GridString {
-    sgr: SgrState,
     nchars: u8,
     buf: ArrayString<MAX_BYTES>,
+    sgr: ArrayVec<SgrState, MAX_BYTES>,
 }
 
 impl GridString {
     fn new(sgr: SgrState, s: &str) -> Result<Self> {
-        let mut ret = Self::from_str(s)?;
-        ret.sgr = sgr;
-        Ok(ret)
+        let buf = ArrayString::from_str(s).map_err(GridStringError::CapacityError)?;
+        let nchars = buf.chars().count() as u8;
+        let sgr = [sgr; MAX_BYTES].into();
+        Ok(Self { nchars, buf, sgr })
     }
 
     fn with_sgr(sgr: SgrState) -> Self {
-        Self {
-            sgr,
-            ..Default::default()
-        }
+        Self::new(sgr, "").expect("valid string")
     }
 
     pub fn from_str(s: &str) -> Result<Self> {
-        let buf = ArrayString::from_str(s).map_err(GridStringError::CapacityError)?;
-        let nchars = buf.chars().count() as u8;
-        let sgr = SgrState::default();
-        Ok(Self { sgr, nchars, buf })
+        Self::new(SgrState::default(), s)
     }
 
     pub fn as_str(&self) -> &str {
         self.buf.as_str()
     }
 
-    pub fn sgr(&self) -> SgrState {
-        self.sgr
+    pub fn sgr(&self) -> &[SgrState] {
+        &self.sgr[..self.len_chars()]
     }
 
     pub fn len_bytes(&self) -> usize {
@@ -80,26 +75,32 @@ impl GridString {
 
     pub fn slice_bytes<R: RangeBounds<usize>>(&self, byte_range: R) -> Option<GridStr> {
         let byte_range = resolve_range(byte_range, 0..self.len_bytes()).ok()?;
-        let sliced_buf = self.buf.get(byte_range)?;
-        Some(GridStr::new(self.sgr, sliced_buf))
+        let char_range = self.resolve_byte_to_char_range(byte_range.clone()).ok()?;
+        Some(self.slice(char_range, byte_range))
     }
 
     pub fn slice_chars<R: RangeBounds<usize>>(&self, char_range: R) -> Option<GridStr> {
-        let (byte_range, nchars) = self.resolve_char_to_byte_range(char_range).ok()?;
-        let sliced_buf = self.buf.get(byte_range)?;
-        Some(GridStr {
-            sgr: self.sgr,
-            nchars,
-            buf: sliced_buf,
-        })
+        let char_range = resolve_range(char_range, 0..self.len_chars()).ok()?;
+        let byte_range = self.resolve_char_to_byte_range(char_range.clone()).ok()?;
+        Some(self.slice(char_range, byte_range))
+    }
+
+    fn slice(&self, char_range: Range<usize>, byte_range: Range<usize>) -> GridStr {
+        let sgr = &self.sgr[char_range.clone()];
+        GridStr {
+            sgr: &self.sgr[char_range.clone()],
+            nchars: char_range.len() as u8,
+            buf: &self.buf[byte_range],
+        }
     }
 
     pub fn remove_char_range<R: RangeBounds<usize>>(&mut self, char_range: R) -> Result<()> {
-        let (byte_range, nchars) = self.resolve_char_to_byte_range(char_range)?;
+        let char_range = resolve_range(char_range, 0..self.len_chars())?;
+        let byte_range = self.resolve_char_to_byte_range(char_range.clone())?;
         let temp = self.buf.clone();
         self.buf.truncate(byte_range.start);
         self.buf.push_str(&temp[byte_range.end..]);
-        self.nchars -= nchars;
+        self.nchars -= char_range.len() as u8;
         Ok(())
     }
 
@@ -107,13 +108,9 @@ impl GridString {
         *self = Self::default();
     }
 
-    fn resolve_char_to_byte_range<R: RangeBounds<usize>>(
-        &self,
-        char_range: R,
-    ) -> Result<(Range<usize>, u8)> {
-        let char_range = resolve_range(char_range, 0..self.len_chars())?;
+    fn resolve_char_to_byte_range(&self, char_range: Range<usize>) -> Result<Range<usize>> {
         if char_range.is_empty() && char_range.start == 0 {
-            return Ok((0..0, 0));
+            return Ok(0..0);
         }
 
         let mut iter = self.buf.char_indices();
@@ -123,12 +120,12 @@ impl GridString {
             .expect("char_range checked above");
 
         if char_range.is_empty() {
-            Ok((byte_start..byte_start, 0))
+            Ok(byte_start..byte_start)
         } else {
             let (byte_end, _) = iter
                 .nth(char_range.len() - 1)
                 .unwrap_or((self.len_bytes(), ' '));
-            Ok((byte_start..byte_end, char_range.len() as u8))
+            Ok(byte_start..byte_end)
         }
     }
 
@@ -200,6 +197,31 @@ impl GridString {
         self.buf = edited_buf;
         self.nchars = new_num_chars;
         (nwritten, rem)
+    }
+
+    fn resolve_byte_to_char_range(&self, byte_range: Range<usize>) -> Result<Range<usize>> {
+        let mut start = (byte_range.start == 0).then_some(0);
+        let mut end = (byte_range.end == self.len_bytes()).then_some(self.len_chars());
+        for (byte_idx, _) in self.buf.char_indices() {
+            if start.zip(end).is_some() {
+                break;
+            }
+            if byte_idx == byte_range.start {
+                start = Some(byte_idx);
+            }
+            if byte_idx == byte_range.end {
+                end = Some(byte_idx)
+            }
+        }
+
+        start
+            .zip(end)
+            .map(|(start, end)| start..end)
+            .ok_or_else(|| GridStringError::OutOfBounds {
+                which: "byte range is not at a valid char boundary",
+                given: byte_range.start,
+                bound: 0..self.len_bytes(),
+            })
     }
 }
 
@@ -273,26 +295,26 @@ impl AsRef<str> for GridString {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct GridStr<'a> {
-    sgr: SgrState,
     nchars: u8,
     buf: &'a str,
+    sgr: &'a [SgrState],
 }
 
 impl<'a> GridStr<'a> {
-    fn new(sgr: SgrState, buf: &'a str) -> Self {
+    fn new(sgr: &'a [SgrState], buf: &'a str) -> Self {
         let nchars = buf.chars().count() as u8;
         Self { sgr, nchars, buf }
     }
 
     fn from(s: &'a GridString) -> Self {
         Self {
-            sgr: s.sgr,
+            sgr: s.sgr(),
             nchars: s.nchars,
             buf: &s.buf,
         }
     }
 
-    pub fn sgr(&self) -> SgrState {
+    pub fn sgr(&'a self) -> &'a [SgrState] {
         self.sgr
     }
 
@@ -310,29 +332,30 @@ impl<'a> GridStr<'a> {
 }
 
 #[derive(Debug)]
-struct StripedString<'a> {
-    parts: Vec<&'a mut GridString>,
+struct StripedString<'a, I: IntoIterator<Item = &'a mut GridString>> {
+    parts: I::IntoIter,
 }
 
-impl<'a> StripedString<'a> {
-    pub fn from_iter<I: IntoIterator<Item = &'a mut GridString>>(iterable: I) -> Self {
-        let parts = iterable.into_iter().collect();
+impl<'a, I> StripedString<'a, I>
+where
+    I: IntoIterator<Item = &'a mut GridString>,
+{
+    pub fn from_iter(iter: I) -> Self {
+        let parts = iter.into_iter();
         Self { parts }
     }
 
     pub fn replace_str<'b>(
-        &mut self,
+        mut self,
         mut char_offset: usize,
         new_text: &'b str,
     ) -> Result<(usize, &'b str)> {
-        let first_part = self
-            .parts
-            .get(0)
-            .ok_or_else(|| GridStringError::OutOfBounds {
-                which: "replace_str with zero parts",
-                given: 0,
-                bound: 0..0,
-            })?;
+        let mut parts = self.parts.peekable();
+        let first_part = parts.peek().ok_or_else(|| GridStringError::OutOfBounds {
+            which: "replace_str with zero parts",
+            given: 0,
+            bound: 0..0,
+        })?;
         if (char_offset > first_part.len_chars()) {
             return Err(GridStringError::OutOfBounds {
                 which: "replace_str out of bounds write_char_idx",
@@ -343,7 +366,7 @@ impl<'a> StripedString<'a> {
 
         let mut chars_written = 0;
         let mut to_write = new_text;
-        for part in self.parts.iter_mut() {
+        for part in parts {
             if to_write.is_empty() {
                 break;
             }
@@ -355,10 +378,10 @@ impl<'a> StripedString<'a> {
         Ok((chars_written, to_write))
     }
 
-    fn push_str<'b>(&mut self, new_text: &'b str) -> (usize, &'b str) {
+    fn push_str<'b>(self, new_text: &'b str) -> (usize, &'b str) {
         let mut chars_written = 0;
         let mut to_write = new_text;
-        for part in self.parts.iter_mut() {
+        for part in self.parts {
             if to_write.is_empty() {
                 break;
             }
@@ -419,7 +442,7 @@ mod tests {
         assert_eq!(gs.as_str(), "hello");
         assert_eq!(gs.len_bytes(), 5);
         assert_eq!(gs.len_chars(), 5);
-        assert_eq!(gs.sgr(), SgrState::default());
+        assert_eq!(gs.sgr(), &[SgrState::default(); 5]);
 
         Ok(())
     }
@@ -433,7 +456,7 @@ mod tests {
         let mut gs = GridString::with_sgr(sgr);
         gs.push_str("hi hi");
         assert_eq!(gs.as_str(), "hi hi");
-        assert_eq!(gs.sgr(), sgr);
+        assert_eq!(gs.sgr(), &[sgr; 5]);
     }
 
     #[test]
@@ -468,12 +491,13 @@ mod tests {
 
         let gs = GridString::new(sgr, "hello da").expect("should fit");
         let slice = gs.slice_bytes(1..7).expect("is valid range");
-        assert_eq!(slice.sgr(), sgr);
         assert_eq!(slice.as_str(), "ello d");
         assert_eq!(slice.len_chars(), 6);
+        assert_eq!(slice.sgr().len(), 6);
+        assert_eq!(slice.sgr(), &[sgr; 6]);
 
         let slice = gs.slice_bytes(..).expect("is valid range");
-        assert_eq!(slice.sgr(), sgr);
+        assert_eq!(gs.sgr(), &[sgr; 8]);
         assert_eq!(slice.as_str(), "hello da");
 
         assert_eq!(gs.slice_bytes(1..9), None);
@@ -490,7 +514,7 @@ mod tests {
         assert_eq!(gs.len_chars(), 5);
 
         let slice = gs.slice_chars(1..2).expect("valid range");
-        assert_eq!(slice.sgr(), sgr);
+        assert_eq!(slice.sgr(), &[sgr; 1]);
         assert_eq!(slice.as_str(), "\u{c3a9}");
     }
 
