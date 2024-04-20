@@ -907,3 +907,22 @@ impl SettingsState {
         });
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SgrState {
+    pub fg_color: ansi::Color,
+    pub bg_color: ansi::Color,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+impl Default for SgrState {
+    fn default() -> Self {
+        Self {
+            fg_color: ansi::Color::DefaultFg,
+            bg_color: ansi::Color::DefaultBg,
+            bold: false,
+            italic: false,
+        }
+    }
+}

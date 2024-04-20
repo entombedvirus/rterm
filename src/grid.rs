@@ -3,7 +3,7 @@ use std::{
     rc::Rc,
 };
 
-use crate::puffin;
+use crate::{puffin, terminal_emulator::SgrState};
 
 use crate::ansi;
 
@@ -451,25 +451,6 @@ fn resolve_range<R: RangeBounds<usize>>(
         );
     }
     Ok(start..end)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SgrState {
-    pub fg_color: ansi::Color,
-    pub bg_color: ansi::Color,
-    pub bold: bool,
-    pub italic: bool,
-}
-
-impl Default for SgrState {
-    fn default() -> Self {
-        Self {
-            fg_color: ansi::Color::DefaultFg,
-            bg_color: ansi::Color::DefaultBg,
-            bold: false,
-            italic: false,
-        }
-    }
 }
 
 #[derive(Debug, Default, Copy, Clone)]
