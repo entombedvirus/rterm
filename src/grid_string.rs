@@ -68,7 +68,7 @@ impl GridString {
         *self = Self::default();
     }
 
-    fn push_str<'a>(&mut self, s: &'a str, sgr: SgrState) -> (usize, &'a str) {
+    pub fn push_str<'a>(&mut self, s: &'a str, sgr: SgrState) -> (usize, &'a str) {
         let rem = self.buf.remaining_capacity();
         let (prefix, suffix) = split_str_at_utf8_boundary(s, rem);
         let written = prefix.chars().count();
@@ -233,6 +233,12 @@ impl GridString {
     }
 }
 
+impl std::fmt::Display for GridString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
 fn split_str_at_utf8_boundary(s: &str, index: usize) -> (&str, &str) {
     if index >= s.len() {
         (s, "")
@@ -340,7 +346,7 @@ impl<'a> GridStr<'a> {
 }
 
 #[derive(Debug)]
-struct StripedString<'a, I: IntoIterator<Item = &'a mut GridString>> {
+pub struct StripedString<'a, I: IntoIterator<Item = &'a mut GridString>> {
     parts: I::IntoIter,
 }
 

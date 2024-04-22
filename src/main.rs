@@ -7,6 +7,7 @@ mod grid_string;
 mod pty;
 mod terminal_emulator;
 mod terminal_input;
+mod tree;
 
 fn main() {
     env_logger::init();
