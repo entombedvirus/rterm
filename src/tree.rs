@@ -52,8 +52,14 @@ impl Tree {
     pub fn push_str(&mut self, new_text: &str, sgr: SgrState) {
         // TODO: if new_text is larger than what will fit in a leaf node, create a tree from it and
         // merge
-        if let Some(node) = Arc::make_mut(&mut self.root).push_str(new_text, sgr) {
-            self.root = Node::new_internal(self.root.height() + 1, [self.root.clone(), node]);
+        let mut to_write = new_text;
+        while !to_write.is_empty() {
+            if let Some((node, rest)) = Arc::make_mut(&mut self.root).push_str(to_write, sgr) {
+                self.root = Node::new_internal(self.root.height() + 1, [self.root.clone(), node]);
+                to_write = rest;
+            } else {
+                break;
+            }
         }
     }
 
@@ -63,15 +69,83 @@ impl Tree {
         }
     }
 
+    pub fn insert_str(&mut self, mut char_idx: usize, mut new_text: &str, sgr: SgrState) {
+        while !new_text.is_empty() {
+            self.find_string_segment_mut(
+                DimensionCharIdx(char_idx),
+                |segment: &mut GridString, segment_char_idx: usize| -> Option<GridString> {
+                    let (overflow, chars_written, rem) =
+                        segment.insert_str(segment_char_idx, new_text, sgr);
+                    new_text = rem;
+                    char_idx += chars_written;
+                    overflow
+                },
+            );
+        }
+    }
+
     fn iter_strings(&self) -> iter::StringIter {
         iter::StringIter::new(&self.root)
+    }
+
+    fn iter_nodes(&self) -> iter::NodeIter {
+        iter::NodeIter::new(&self.root)
+    }
+
+    fn find_string_segment_mut<'a, D: Dimension>(
+        &mut self,
+        seek_target: D,
+        edit_op: impl FnMut(&mut GridString, usize) -> Option<GridString>,
+    ) {
+        if let Some(node) =
+            Arc::make_mut(&mut self.root).find_string_segment_mut(seek_target, edit_op)
+        {
+            self.root = Node::new_internal(self.root.height() + 1, [self.root.clone(), node]);
+        }
     }
 }
 
 mod iter {
+    use std::collections::VecDeque;
+
     use crate::grid_string::GridString;
 
     use super::Node;
+
+    #[derive(Debug)]
+    pub struct NodeIter<'a> {
+        root: Option<&'a Node>,
+        queue: VecDeque<&'a Node>,
+    }
+
+    impl<'a> NodeIter<'a> {
+        pub fn new(node: &'a Node) -> Self {
+            let root = Some(node);
+            let queue = VecDeque::new();
+            Self { root, queue }
+        }
+    }
+
+    impl<'a> Iterator for NodeIter<'a> {
+        type Item = &'a Node;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if let Some(root) = self.root.take() {
+                self.queue.push_back(root);
+            }
+
+            let node = self.queue.pop_front()?;
+            match node {
+                Node::Leaf { .. } => (),
+                Node::Internal { children, .. } => {
+                    self.queue
+                        .extend(children.into_iter().rev().map(|child| child.as_ref()));
+                }
+            }
+
+            Some(node)
+        }
+    }
 
     #[derive(Debug)]
     pub struct StringIter<'a> {
@@ -89,19 +163,23 @@ mod iter {
         // establish the invariant that top of the stack is always pointing to a leaf node and the
         // index is valid within that node
         fn fixup(&mut self) {
-            let is_not_valid = |(node, index): &&mut (&Node, usize)| {
-                !node.is_leaf() || *index >= node.child_summaries().len()
+            let needs_fixup = |(node, index): &&mut (&Node, usize)| {
+                *index >= node.child_summaries().len() || !node.is_leaf()
             };
-            while let Some((node, index)) = self.stack.last_mut().filter(is_not_valid) {
+            while let Some((node, index)) = self.stack.last_mut().filter(needs_fixup) {
                 match node {
                     Node::Leaf { children, .. } => {
                         debug_assert!(*index >= children.len());
                         self.stack.pop();
                     }
                     Node::Internal { children, .. } => {
-                        *index += 1;
-                        let child = children[*index - 1].as_ref();
-                        self.stack.push((child, 0));
+                        if *index >= children.len() {
+                            self.stack.pop();
+                        } else {
+                            *index += 1;
+                            let child = children[*index - 1].as_ref();
+                            self.stack.push((child, 0));
+                        }
                     }
                 }
             }
@@ -130,8 +208,8 @@ mod iter {
 
     impl<'a> std::iter::FusedIterator for StringIter<'a> {}
 }
-#[derive(Debug, Clone)]
-enum Node {
+#[derive(Clone)]
+pub enum Node {
     Leaf {
         node_summary: TextSummary,
         children: ArrayVec<GridString, MAX_CHILDREN>,
@@ -149,7 +227,7 @@ impl Node {
     fn height(&self) -> u8 {
         match *self {
             Node::Leaf { .. } => 0,
-            Node::Internal { height, .. } => height + 1,
+            Node::Internal { height, .. } => height,
         }
     }
 
@@ -176,7 +254,7 @@ impl Node {
         }
     }
 
-    fn push_str(&mut self, new_text: &str, sgr: SgrState) -> Option<Arc<Self>> {
+    fn push_str<'a>(&mut self, new_text: &'a str, sgr: SgrState) -> Option<(Arc<Self>, &'a str)> {
         match self {
             Node::Leaf { children, .. } => {
                 let split_node = push_str_leaf(children, new_text, sgr);
@@ -201,7 +279,8 @@ impl Node {
             );
         }
         if char_idx == self.len_chars() {
-            return self.push_str(new_text, sgr);
+            todo!("deal with the bubbling up thing");
+            // return self.push_str(new_text, sgr);
         }
 
         let (child_idx, DimensionCharIdx(rem_char_idx)) =
@@ -217,7 +296,8 @@ impl Node {
                     .expect("bounds checked already");
                 self.recompute_summaries();
                 if !rest.is_empty() {
-                    return self.push_str(rest, sgr);
+                    todo!("deal with the bubbling up thing");
+                    // return self.push_str(rest, sgr);
                 }
                 None
             }
@@ -344,10 +424,77 @@ impl Node {
     fn is_leaf(&self) -> bool {
         matches!(self, Node::Leaf { .. })
     }
+
+    fn find_string_segment_mut<D: Dimension>(
+        &mut self,
+        seek_target: D,
+        mut edit_op: impl FnMut(&mut GridString, usize) -> Option<GridString>,
+    ) -> Option<Arc<Node>> {
+        let (child_idx, seek_target) = self.child_position(seek_target);
+        let split = match self {
+            Node::Leaf { children, .. } => {
+                let child = &mut children[child_idx];
+                let char_idx = seek_target.to_char_idx(child.as_str());
+                edit_op(child, char_idx).and_then(|overflow| {
+                    match children.try_insert(child_idx + 1, overflow) {
+                        Ok(_) => None,
+                        Err(err) => {
+                            let overflow = err.element();
+                            let right_children = children.drain(B..);
+                            Some(Node::new_leaf(
+                                std::iter::once(overflow).chain(right_children),
+                            ))
+                        }
+                    }
+                })
+            }
+            Node::Internal {
+                height, children, ..
+            } => {
+                let child = Arc::make_mut(&mut children[child_idx]);
+                child
+                    .find_string_segment_mut(seek_target, edit_op)
+                    .and_then(
+                        |split_node| match children.try_insert(child_idx + 1, split_node) {
+                            Ok(_) => None,
+                            Err(err) => {
+                                let split_node = err.element();
+                                let right_children = children.drain(B..);
+                                Some(Node::new_internal(
+                                    *height,
+                                    std::iter::once(split_node).chain(right_children),
+                                ))
+                            }
+                        },
+                    )
+            }
+        };
+        self.recompute_summaries();
+        split
+    }
 }
 
+impl std::fmt::Debug for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[derive(Debug)]
+        struct ChildSummary(usize);
+        match self {
+            Self::Leaf { children, .. } => f
+                .debug_struct("Leaf")
+                .field("children", &ChildSummary(children.len()))
+                .finish(),
+            Self::Internal {
+                height, children, ..
+            } => f
+                .debug_struct("Internal")
+                .field("height", height)
+                .field("children", &ChildSummary(children.len()))
+                .finish(),
+        }
+    }
+}
 /// Any type that can be used to seek to a specific leaf node via searching `TextSummary`-s.
-trait Dimension:
+pub trait Dimension:
     for<'a> From<&'a TextSummary>
     + Default
     + Clone
@@ -357,11 +504,17 @@ trait Dimension:
     + std::cmp::Ord
     + std::fmt::Debug
 {
+    fn to_char_idx(&self, segment: &str) -> usize;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct DimensionCharIdx(usize);
-impl Dimension for DimensionCharIdx {}
+
+impl Dimension for DimensionCharIdx {
+    fn to_char_idx(&self, _: &str) -> usize {
+        self.0
+    }
+}
 
 impl<'a> From<&'a TextSummary> for DimensionCharIdx {
     fn from(value: &'a TextSummary) -> Self {
@@ -383,34 +536,42 @@ impl std::ops::Sub for DimensionCharIdx {
     }
 }
 
-fn push_str_internal(
+fn push_str_internal<'a>(
     height: u8,
     children: &mut ArrayVec<Arc<Node>, MAX_CHILDREN>,
-    new_text: &str,
+    new_text: &'a str,
     sgr: SgrState,
-) -> Option<Arc<Node>> {
-    let last_child = Arc::make_mut(
-        children
-            .last_mut()
-            .expect("internal nodes have non-zero children"),
-    );
-    let split_node = last_child.push_str(new_text, sgr)?;
-    match children.try_push(split_node) {
-        Ok(_) => None,
-        Err(err) => {
-            let split_node = err.element();
-            let right_children = children.drain(B..).chain(std::iter::once(split_node));
-            let new_node = Node::new_internal(height, right_children);
-            Some(new_node)
+) -> Option<(Arc<Node>, &'a str)> {
+    let mut to_write = new_text;
+    while !to_write.is_empty() {
+        let last_child = Arc::make_mut(
+            children
+                .last_mut()
+                .expect("internal nodes have non-zero children"),
+        );
+        let (split_node, rest) = last_child.push_str(to_write, sgr)?;
+        match children.try_push(split_node) {
+            Ok(_) => {
+                to_write = rest;
+                continue;
+            }
+            Err(err) => {
+                let split_node = err.element();
+                let right_children = children.drain(B..).chain(std::iter::once(split_node));
+                let new_node = Node::new_internal(height, right_children);
+                return Some((new_node, rest));
+            }
         }
     }
+
+    None
 }
 
-fn push_str_leaf(
+fn push_str_leaf<'a>(
     children: &mut ArrayVec<GridString, MAX_CHILDREN>,
-    new_text: &str,
+    new_text: &'a str,
     sgr: SgrState,
-) -> Option<Arc<Node>> {
+) -> Option<(Arc<Node>, &'a str)> {
     if new_text.is_empty() {
         return None;
     }
@@ -431,14 +592,7 @@ fn push_str_leaf(
             let mut right_children: ArrayVec<GridString, MAX_CHILDREN> =
                 children.drain(B..).collect();
             right_children.push(err.element());
-            let split_node = match push_str_leaf(&mut right_children, to_write, sgr) {
-                None => Node::new_leaf(right_children),
-                Some(inner_split) => Node::new_internal(
-                    inner_split.height() + 1,
-                    [Node::new_leaf(right_children), inner_split],
-                ),
-            };
-            return Some(split_node);
+            return Some((Node::new_leaf(right_children), rest));
         };
     }
     None
@@ -451,7 +605,7 @@ fn summarize<'a, T: IntoIterator<Item = &'a TextSummary>>(summaries: T) -> TextS
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct TextSummary {
+pub struct TextSummary {
     chars: usize,
     bytes: usize,
     lines: usize,
@@ -487,6 +641,7 @@ mod tests {
     use crate::terminal_emulator::SgrState;
 
     use super::*;
+    const LARGE_TEXT: &'static str = include_str!("tree.rs");
 
     #[test]
     fn test_tree_1() {
@@ -512,5 +667,29 @@ mod tests {
         assert_eq!(tree.len_bytes(), 14);
         assert_eq!(tree.len_chars(), 14);
         assert_eq!(tree.len_lines(), 1);
+    }
+
+    #[test]
+    fn test_large_input_1() {
+        let mut tree = Tree::new();
+        tree.push_str(LARGE_TEXT, SgrState::default());
+        assert_eq!(tree.to_string().as_str(), LARGE_TEXT);
+
+        // all levels other than the root should have at least B children
+        for (idx, node) in tree.iter_nodes().enumerate() {
+            assert!(idx == 0 || node.child_summaries().len() >= B);
+        }
+    }
+
+    #[test]
+    fn test_insert_1() {
+        let mut tree = Tree::new();
+        tree.push_str("Line 1\nLine 2\nLine 3\n", SgrState::default());
+        tree.insert_str(14, "Line 2.5\n", SgrState::default());
+        assert_eq!(
+            tree.to_string().as_str(),
+            "Line 1\nLine 2\nLine 2.5\nLine 3\n"
+        );
+        assert_eq!(tree.len_lines(), 4)
     }
 }

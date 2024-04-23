@@ -3,7 +3,7 @@
 use std::{
     collections::VecDeque,
     error::Error,
-    ops::{Deref, DerefMut, Range, RangeBounds},
+    ops::{Deref, DerefMut, Not as _, Range, RangeBounds},
     str::FromStr,
 };
 
@@ -23,7 +23,6 @@ type Result<T> = std::result::Result<T, GridStringError>;
 /// capctured by SgrState.
 #[derive(Debug, Default, Clone)]
 pub struct GridString {
-    nchars: u8,
     buf: ArrayString<MAX_BYTES>,
     sgr: ArrayVec<SgrState, MAX_BYTES>,
 }
@@ -33,7 +32,7 @@ impl GridString {
         let buf = ArrayString::from_str(s).map_err(GridStringError::CapacityError)?;
         let nchars = buf.chars().count() as u8;
         let sgr = std::iter::repeat(sgr).take(nchars as usize).collect();
-        Ok(Self { nchars, buf, sgr })
+        Ok(Self { buf, sgr })
     }
 
     fn with_sgr(sgr: SgrState) -> Self {
@@ -49,7 +48,7 @@ impl GridString {
     }
 
     pub fn sgr(&self) -> &[SgrState] {
-        &self.sgr[..self.len_chars()]
+        &self.sgr
     }
 
     pub fn len_bytes(&self) -> usize {
@@ -57,7 +56,7 @@ impl GridString {
     }
 
     pub fn len_chars(&self) -> usize {
-        self.nchars as usize
+        self.sgr.len()
     }
 
     pub const fn capacity(&self) -> usize {
@@ -74,7 +73,6 @@ impl GridString {
         let written = prefix.chars().count();
         self.buf.push_str(prefix);
         self.sgr.extend(std::iter::repeat(sgr).take(written));
-        self.nchars += written as u8;
         (written, suffix)
     }
 
@@ -151,8 +149,70 @@ impl GridString {
         }
         self.buf = edited_buf;
         self.sgr = edited_sgr;
-        self.nchars = new_num_chars;
         (nwritten, rem)
+    }
+
+    pub fn insert_str<'a>(
+        &mut self,
+        char_idx: usize,
+        new_text: &'a str,
+        new_sgr: SgrState,
+    ) -> (Option<Self>, usize, &'a str) {
+        if char_idx > self.len_chars() {
+            panic!(
+                "insert_str char_idx out of bounds: {char_idx} / {}",
+                self.len_chars()
+            );
+        }
+
+        let mut edited_buf = ArrayString::new();
+        let mut edited_sgr = ArrayVec::new();
+
+        let (old_text_prefix, old_text_suffix) = self.buf.split_at(char_idx);
+        edited_buf
+            .try_push_str(old_text_prefix)
+            .expect("part of old text should always fit");
+        edited_sgr.extend(self.sgr[..char_idx].into_iter().cloned());
+
+        let (new_text_prefix, new_text_suffix) =
+            split_str_at_utf8_boundary(new_text, edited_buf.remaining_capacity());
+        let new_text_prefix_chars = new_text_prefix.chars().count();
+
+        edited_buf
+            .try_push_str(new_text_prefix)
+            .expect("checked that prefix will fit in the remaining capacity");
+        edited_sgr.extend(std::iter::repeat(new_sgr).take(new_text_prefix_chars));
+
+        let ret = if new_text_suffix.is_empty() {
+            let mut overflow: Option<Self> = None;
+            for (i, (byte_idx, old_ch)) in old_text_suffix.char_indices().enumerate() {
+                let sgr = self.sgr[(char_idx + i)];
+                match edited_buf.try_push(old_ch) {
+                    Ok(_) => {
+                        edited_sgr.push(sgr);
+                    }
+                    Err(err) => {
+                        overflow.get_or_insert_with(Default::default).push_str(
+                            &old_text_suffix[byte_idx..byte_idx + old_ch.len_utf8()],
+                            sgr,
+                        );
+                    }
+                }
+            }
+            (overflow, new_text_prefix_chars, "")
+        } else {
+            let overflow = old_text_suffix.is_empty().not().then(|| {
+                Self::from_str(old_text_suffix)
+                    .expect("old_text_suffix was previously part of self, so it should be fine")
+            });
+
+            (overflow, new_text_prefix_chars, new_text_suffix)
+        };
+
+        self.buf = edited_buf;
+        self.sgr = edited_sgr;
+
+        ret
     }
 
     pub fn slice_bytes<R: RangeBounds<usize>>(&self, byte_range: R) -> Option<GridStr> {
@@ -171,7 +231,6 @@ impl GridString {
         let sgr = &self.sgr[char_range.clone()];
         GridStr {
             sgr: &self.sgr[char_range.clone()],
-            nchars: char_range.len() as u8,
             buf: &self.buf[byte_range],
         }
     }
@@ -182,7 +241,8 @@ impl GridString {
         let temp = self.buf.clone();
         self.buf.truncate(byte_range.start);
         self.buf.push_str(&temp[byte_range.end..]);
-        self.nchars -= char_range.len() as u8;
+        self.sgr.copy_within(char_range.end.., char_range.start);
+        self.sgr.truncate(self.sgr.len() - char_range.len());
         Ok(())
     }
 
@@ -239,14 +299,14 @@ impl std::fmt::Display for GridString {
     }
 }
 
-fn split_str_at_utf8_boundary(s: &str, index: usize) -> (&str, &str) {
-    if index >= s.len() {
+fn split_str_at_utf8_boundary(s: &str, byte_idx: usize) -> (&str, &str) {
+    if byte_idx >= s.len() {
         (s, "")
     } else {
         // utf-8 code points are max 4 bytes, so we only need to check last 4 bytes or fewer if the
         // string is smaller that 4 bytes
-        let start = index.saturating_sub(3);
-        for candidate in (start..=index).rev() {
+        let start = byte_idx.saturating_sub(3);
+        for candidate in (start..=byte_idx).rev() {
             if s.is_char_boundary(candidate) {
                 return s.split_at(candidate);
             }
@@ -309,21 +369,18 @@ impl AsRef<str> for GridString {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct GridStr<'a> {
-    nchars: u8,
     buf: &'a str,
     sgr: &'a [SgrState],
 }
 
 impl<'a> GridStr<'a> {
     fn new(sgr: &'a [SgrState], buf: &'a str) -> Self {
-        let nchars = buf.chars().count() as u8;
-        Self { sgr, nchars, buf }
+        Self { sgr, buf }
     }
 
     fn from(s: &'a GridString) -> Self {
         Self {
             sgr: s.sgr(),
-            nchars: s.nchars,
             buf: &s.buf,
         }
     }
@@ -341,7 +398,7 @@ impl<'a> GridStr<'a> {
     }
 
     pub fn len_chars(&self) -> usize {
-        self.nchars as usize
+        self.sgr.len()
     }
 }
 
@@ -640,5 +697,24 @@ mod tests {
                 default,
             ]
         )
+    }
+
+    #[test]
+    fn test_insert_1() {
+        let mut gs = GridString::from_str("abcd").unwrap();
+        let (overflow, _, rest) = gs.insert_str(2, "12345", SgrState::default());
+        assert_eq!(gs.as_str(), "ab12345c");
+        assert_eq!(rest, "");
+        assert_eq!(overflow.as_ref().map(GridString::as_str), Some("d"));
+
+        let (overflow, _, rest) = gs.insert_str(7, "6", SgrState::default());
+        assert_eq!(gs.as_str(), "ab123456");
+        assert_eq!(rest, "");
+        assert_eq!(overflow.as_ref().map(GridString::as_str), Some("c"));
+
+        let (overflow, _, rest) = gs.insert_str(8, "cd", SgrState::default());
+        assert_eq!(gs.as_str(), "ab123456");
+        assert_eq!(rest, "cd");
+        assert_eq!(overflow.as_ref().map(GridString::as_str), None);
     }
 }
