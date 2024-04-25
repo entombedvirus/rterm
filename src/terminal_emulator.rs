@@ -300,7 +300,7 @@ impl TerminalEmulator {
             .font_manager
             .get_or_init("regular", &self.config.regular_font);
 
-        let build_text_format = |format: &grid::SgrState| -> egui::text::TextFormat {
+        let build_text_format = |format: &SgrState| -> egui::text::TextFormat {
             let font_id = egui::FontId::new(
                 self.config.font_size,
                 if format.bold && format.italic {
@@ -681,7 +681,7 @@ impl TerminalEmulator {
                                                 sgr_state.bg_color = color;
                                             }
                                             SgrControl::Reset => {
-                                                *sgr_state = grid::SgrState::default();
+                                                *sgr_state = SgrState::default();
                                             }
                                             SgrControl::ResetFgColor => {
                                                 sgr_state.fg_color = ansi::Color::DefaultFg;

@@ -7,7 +7,6 @@ mod fonts;
 mod grid;
 mod grid_string;
 mod pty;
-mod sum_tree;
 mod terminal_emulator;
 mod terminal_input;
 mod tree;

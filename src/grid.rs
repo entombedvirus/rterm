@@ -5,8 +5,6 @@ use std::{
 
 use crate::{puffin, terminal_emulator::SgrState};
 
-use crate::ansi;
-
 #[derive(Debug)]
 pub struct Grid {
     num_screen_rows: ScreenCoord,
