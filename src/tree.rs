@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::{num::NonZeroUsize, ops::RangeBounds, sync::Arc};
+use std::{ops::RangeBounds, sync::Arc};
 
 use arrayvec::{ArrayString, ArrayVec};
 
@@ -366,6 +366,10 @@ impl Node {
             let last_child_summary = self
                 .child_summaries()
                 .last()
+                // .or_else(|| {
+                //     eprintln!("node: {self:?}");
+                //     None
+                // })
                 .expect("all nodes have at least one child");
             let rem_seek_target = D::from(last_child_summary);
             let child_idx = self.child_summaries().len() - 1;
@@ -438,7 +442,6 @@ impl Node {
                         .try_insert(overflow_pos, overflow)
                         .and_then(|()| Ok(None))
                         .unwrap_or_else(|err| -> Option<Arc<Node>> {
-                            let before_children = children.clone();
                             match Compactable::compact_items_with_seam(children, overflow_pos) {
                                 Some(new_overflow_pos) => {
                                     children
