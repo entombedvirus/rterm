@@ -1,10 +1,13 @@
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::{num::NonZeroUsize, ops::RangeBounds, sync::Arc};
 
-use arrayvec::ArrayVec;
+use arrayvec::{ArrayString, ArrayVec};
 
-use crate::{grid_string::GridString, terminal_emulator::SgrState};
+use crate::{
+    grid_string::{resolve_range, split_str_at_utf8_boundary, GridString},
+    terminal_emulator::SgrState,
+};
 
 const B: usize = 3;
 pub const MAX_CHILDREN: usize = B * 2;
@@ -89,6 +92,26 @@ impl Tree {
         }
     }
 
+    pub fn remove_range<R: RangeBounds<usize>>(&mut self, char_range: R) {
+        let mut char_range =
+            resolve_range(char_range, 0..self.len_chars()).expect("invalid range supplied");
+        while !char_range.is_empty() {
+            self.find_string_segment_mut(
+                DimensionCharIdx(char_range.start),
+                |segment: &mut GridString, segment_char_idx: usize| -> Option<GridString> {
+                    let end_char_idx =
+                        (segment_char_idx + char_range.len()).min(segment.len_chars());
+                    let remove_range = segment_char_idx..end_char_idx;
+                    segment
+                        .remove_char_range(remove_range.clone())
+                        .expect("bounds checked");
+                    char_range.end -= remove_range.len();
+                    None
+                },
+            );
+        }
+    }
+
     fn iter_strings(&self) -> iter::StringIter {
         iter::StringIter::new(&self.root)
     }
@@ -103,7 +126,7 @@ impl Tree {
         edit_op: impl FnMut(&mut GridString, usize) -> Option<GridString>,
     ) {
         if let Some(node) =
-            Arc::make_mut(&mut self.root).find_string_segment_mut(seek_target, edit_op)
+            Arc::make_mut(&mut self.root).seek_and_edit_segment(seek_target, edit_op)
         {
             self.root = Arc::new(Node::new_internal(
                 self.root.height() + 1,
@@ -251,6 +274,10 @@ impl Node {
         self.node_summary().lines
     }
 
+    fn is_empty(&self) -> bool {
+        self.len_chars() == 0
+    }
+
     fn node_summary(&self) -> &TextSummary {
         match *self {
             Node::Leaf {
@@ -357,14 +384,21 @@ impl Node {
         unreachable!("validated that seek_target is within range earlier")
     }
 
-    // fn child_nodes(&mut self) -> &mut ArrayVec<Arc<Node>, MAX_CHILDREN> {
-    //     match self {
-    //         Node::Leaf { .. } => panic!("child_node_mut cannot be called on leaf nodes"),
-    //         Node::Internal { children, .. } => children,
-    //     }
-    // }
+    fn child_nodes_mut(&mut self) -> &mut ArrayVec<Arc<Node>, MAX_CHILDREN> {
+        match self {
+            Node::Leaf { .. } => panic!("child_node_mut cannot be called on leaf nodes"),
+            Node::Internal { children, .. } => children,
+        }
+    }
 
     fn child_strings(&self) -> &ArrayVec<GridString, MAX_CHILDREN> {
+        match self {
+            Node::Leaf { children, .. } => children,
+            Node::Internal { .. } => panic!("cannot call child_strings on internal nodes"),
+        }
+    }
+
+    fn child_strings_mut(&mut self) -> &mut ArrayVec<GridString, MAX_CHILDREN> {
         match self {
             Node::Leaf { children, .. } => children,
             Node::Internal { .. } => panic!("cannot call child_strings on internal nodes"),
@@ -388,7 +422,7 @@ impl Node {
         matches!(self, Node::Leaf { .. })
     }
 
-    fn find_string_segment_mut<D: Dimension>(
+    fn seek_and_edit_segment<D: Dimension>(
         &mut self,
         seek_target: D,
         mut edit_op: impl FnMut(&mut GridString, usize) -> Option<GridString>,
@@ -400,50 +434,214 @@ impl Node {
                 let char_idx = seek_target.to_char_idx(child.as_str());
                 edit_op(child, char_idx).and_then(|overflow| {
                     let overflow_pos = child_idx + 1;
-                    match children.try_insert(overflow_pos, overflow) {
-                        Ok(_) => None,
-                        Err(err) => {
-                            let overflow = err.element();
-                            let mut right_children: ArrayVec<GridString, MAX_CHILDREN> =
-                                children.drain(B..).collect();
-                            if overflow_pos < B {
-                                children.insert(overflow_pos, overflow);
-                            } else {
-                                right_children.insert(overflow_pos - B, overflow);
+                    children
+                        .try_insert(overflow_pos, overflow)
+                        .and_then(|()| Ok(None))
+                        .unwrap_or_else(|err| -> Option<Arc<Node>> {
+                            let before_children = children.clone();
+                            match Compactable::compact_items_with_seam(children, overflow_pos) {
+                                Some(new_overflow_pos) => {
+                                    children
+                                        .try_insert(new_overflow_pos, err.element())
+                                        .inspect_err(|err| {
+                                            println!("{err}");
+                                        })
+                                        .expect(
+                                            "insertion should succeed after successful compaction",
+                                        );
+                                    None
+                                }
+                                None => {
+                                    let right_children =
+                                        split_children(children, overflow_pos, err.element());
+                                    Some(Arc::new(Node::new_leaf(right_children)))
+                                }
                             }
-                            Some(Arc::new(Node::new_leaf(right_children)))
-                        }
-                    }
+                        })
                 })
             }
             Node::Internal {
                 height, children, ..
             } => {
                 let child = Arc::make_mut(&mut children[child_idx]);
-                child
-                    .find_string_segment_mut(seek_target, edit_op)
-                    .and_then(|split_node| -> Option<Arc<Node>> {
+                child.seek_and_edit_segment(seek_target, edit_op).and_then(
+                    |split_node| -> Option<Arc<Node>> {
                         let split_node_pos = child_idx + 1;
-                        match children.try_insert(split_node_pos, split_node) {
-                            Ok(_) => None,
-                            Err(err) => {
-                                let split_node = err.element();
-                                let mut right_children: ArrayVec<Arc<Node>, MAX_CHILDREN> =
-                                    children.drain(B..).collect();
-                                if split_node_pos < B {
-                                    children.insert(split_node_pos, split_node);
-                                } else {
-                                    right_children.insert(split_node_pos - B, split_node);
+                        children
+                            .try_insert(split_node_pos, split_node)
+                            .and_then(|()| Ok(None))
+                            .unwrap_or_else(|err| {
+                                match Compactable::compact_items_with_seam(children, split_node_pos)
+                                {
+                                    Some(new_split_node_pos) => {
+                                        children
+                                            .try_insert(new_split_node_pos, err.element())
+                                            .expect(
+                                            "insertion should succeed after successful compaction",
+                                        );
+                                        None
+                                    }
+                                    None => {
+                                        let right_children =
+                                            split_children(children, split_node_pos, err.element());
+                                        Some(Arc::new(Node::new_internal(*height, right_children)))
+                                    }
                                 }
-                                Some(Arc::new(Node::new_internal(*height, right_children)))
-                            }
-                        }
-                    })
+                            })
+                    },
+                )
             }
         };
         self.recompute_summaries();
         split
     }
+
+    fn has_room_for_children(&self) -> bool {
+        self.child_summaries().len() < MAX_CHILDREN
+    }
+}
+
+trait Compactable
+where
+    Self: Sized,
+{
+    /// Takes two mutable references to T and compacts them together, possibly modifying them both.
+    /// Retruns true if the loop should move on from `a` as compact destination.
+    fn compact_two(a: &mut Self, b: &mut Self) -> bool;
+
+    fn is_empty(&self) -> bool;
+
+    /// compacts items to the left and right of `seam_idx` while:
+    /// - preserving order of items
+    /// - not merging across the seam boundary
+    ///
+    /// Returns where the `seam_idx` falls after merging, if any compaction was done at all.
+    fn compact_items_with_seam(
+        items: &mut ArrayVec<Self, MAX_CHILDREN>,
+        seam_idx: usize,
+    ) -> Option<usize> {
+        debug_assert!(items.len() == items.capacity());
+
+        let old_seam_idx = seam_idx;
+        let empty_idx = items.iter().position(|it| it.is_empty()).or_else(|| {
+            let (prefix, suffix) = items.split_at_mut(old_seam_idx);
+            Self::compact_slice(prefix);
+            // to ensure that we keep at least B children, we should stop compaction as soon as we free
+            // up exactly one slot. So lazily evaluate the suffix compaction.
+            let prefix_has_empty = prefix.last().map_or(false, |it| it.is_empty());
+            if !prefix_has_empty {
+                Self::compact_slice(suffix);
+            }
+            items.iter().position(|it| it.is_empty())
+        });
+
+        if let Some(empty_idx) = empty_idx {
+            items.remove(empty_idx);
+            Some(if empty_idx < old_seam_idx {
+                old_seam_idx.saturating_sub(1)
+            } else {
+                old_seam_idx
+            })
+        } else {
+            None
+        }
+    }
+
+    fn compact_slice(items: &mut [Self]) {
+        let mut i = 0;
+        'outer: while i + 1 < items.len() {
+            let (prefix, suffix) = items.split_at_mut(i + 1);
+            let a = &mut prefix[i];
+            for b in suffix {
+                if b.is_empty() {
+                    continue;
+                }
+                if a.is_empty() {
+                    std::mem::swap(a, b);
+                    continue 'outer;
+                }
+                if Self::compact_two(a, b) {
+                    i += 1;
+                    continue 'outer;
+                }
+            }
+            break;
+        }
+    }
+}
+
+impl Compactable for Arc<Node> {
+    fn is_empty(&self) -> bool {
+        Node::is_empty(self.as_ref())
+    }
+
+    fn compact_two(a: &mut Self, b: &mut Self) -> bool {
+        let (a, b) = (Arc::make_mut(a), Arc::make_mut(b));
+        if a.is_leaf() && b.is_leaf() {
+            Compactable::compact_two(a.child_strings_mut(), b.child_strings_mut());
+        } else {
+            Compactable::compact_two(a.child_nodes_mut(), b.child_nodes_mut());
+        }
+        a.recompute_summaries();
+        b.recompute_summaries();
+        !a.has_room_for_children()
+    }
+}
+
+impl Compactable for GridString {
+    fn is_empty(&self) -> bool {
+        self.len_chars() == 0
+    }
+
+    fn compact_two(a: &mut Self, b: &mut Self) -> bool {
+        Compactable::compact_two(a.buf_mut(), b.buf_mut());
+        Compactable::compact_two(a.sgr_mut(), b.sgr_mut());
+        !a.has_room()
+    }
+}
+
+impl<T, const N: usize> Compactable for ArrayVec<T, N> {
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn compact_two(a: &mut Self, b: &mut Self) -> bool {
+        let room_available = a.remaining_capacity();
+        let num_children = b.len();
+        a.extend(b.drain(0..room_available.min(num_children)));
+        a.remaining_capacity() == 0
+    }
+}
+
+impl<const N: usize> Compactable for ArrayString<N> {
+    fn is_empty(&self) -> bool {
+        ArrayString::<N>::is_empty(self)
+    }
+
+    fn compact_two(a: &mut Self, b: &mut Self) -> bool {
+        if a.remaining_capacity() > 0 && b.len() > 0 {
+            let (to_write, rem) = split_str_at_utf8_boundary(b.as_str(), a.remaining_capacity());
+            a.push_str(to_write);
+            let mut temp = Self::new();
+            temp.push_str(rem);
+            *b = temp;
+        }
+        a.remaining_capacity() == 0 || !b.is_empty()
+    }
+}
+
+fn split_children<T, const N: usize>(
+    children: &mut ArrayVec<T, N>,
+    insert_at: usize,
+    overflow: T,
+) -> ArrayVec<T, N> {
+    let mut right_children: ArrayVec<T, N> = children.drain(B..).collect();
+    if insert_at < B {
+        children.insert(insert_at, overflow);
+    } else {
+        right_children.insert(insert_at - B, overflow);
+    }
+    right_children
 }
 
 impl std::fmt::Debug for Node {
@@ -463,7 +661,12 @@ impl std::fmt::Debug for Node {
             } => {
                 writeln!(f, "Height: {height}, {} children", children.len())?;
                 for (idx, child) in children.into_iter().enumerate() {
-                    writeln!(f, "\tchild #{idx}: {child:?}")?;
+                    writeln!(
+                        f,
+                        "\t(child {idx} / {num_children}): {child:?}",
+                        idx = idx + 1,
+                        num_children = children.len()
+                    )?;
                 }
                 Ok(())
             }
@@ -593,7 +796,10 @@ mod tests {
 
         // all levels other than the root should have at least B children
         for (idx, node) in tree.iter_nodes().enumerate() {
-            assert!(idx == 0 || node.child_summaries().len() >= B);
+            assert!(
+                idx == 0 || node.is_leaf() || node.child_summaries().len() >= B,
+                "{node:?}\nTree:\n {tree:?}"
+            );
         }
     }
 
@@ -609,7 +815,10 @@ mod tests {
 
         // all levels other than the root should have at least B children
         for (idx, node) in tree.iter_nodes().enumerate() {
-            assert!(idx == 0 || node.child_summaries().len() >= B);
+            assert!(
+                idx == 0 || node.is_leaf() || node.child_summaries().len() >= B,
+                "{node:?}\nTree:\n {tree:?}"
+            );
         }
     }
 
@@ -623,5 +832,14 @@ mod tests {
             "Line 1\nLine 2\nLine 2.5\nLine 3\n"
         );
         assert_eq!(tree.len_lines(), 4)
+    }
+
+    #[test]
+    fn test_remove_range() {
+        let mut tree = Tree::new();
+        tree.push_str("Line 1\nLine 2\nLine 3\n", SgrState::default());
+        tree.remove_range(7..14);
+        assert_eq!(tree.to_string().as_str(), "Line 1\nLine 3\n");
+        assert_eq!(tree.len_lines(), 2)
     }
 }

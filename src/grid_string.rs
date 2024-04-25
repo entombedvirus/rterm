@@ -67,6 +67,10 @@ impl GridString {
         *self = Self::default();
     }
 
+    pub fn has_room(&self) -> bool {
+        self.buf.remaining_capacity() > 0 && self.sgr.remaining_capacity() > 0
+    }
+
     pub fn push_str<'a>(&mut self, s: &'a str, sgr: SgrState) -> (Option<Self>, usize, &'a str) {
         let (prefix, suffix) = split_str_at_utf8_boundary(s, self.buf.remaining_capacity());
         let written = prefix.chars().count();
@@ -309,6 +313,14 @@ impl GridString {
             .extend(std::iter::repeat(new_sgr).take(written));
         (Some(overflow), written, suffix)
     }
+
+    pub(crate) fn buf_mut(&mut self) -> &mut ArrayString<MAX_BYTES> {
+        &mut self.buf
+    }
+
+    pub(crate) fn sgr_mut(&mut self) -> &mut ArrayVec<SgrState, MAX_BYTES> {
+        &mut self.sgr
+    }
 }
 
 impl std::fmt::Display for GridString {
@@ -317,7 +329,7 @@ impl std::fmt::Display for GridString {
     }
 }
 
-fn split_str_at_utf8_boundary(s: &str, byte_idx: usize) -> (&str, &str) {
+pub(crate) fn split_str_at_utf8_boundary(s: &str, byte_idx: usize) -> (&str, &str) {
     if byte_idx >= s.len() {
         (s, "")
     } else {
@@ -333,7 +345,7 @@ fn split_str_at_utf8_boundary(s: &str, byte_idx: usize) -> (&str, &str) {
     }
 }
 
-fn resolve_range<R: RangeBounds<usize>>(r: R, valid: Range<usize>) -> Result<Range<usize>> {
+pub fn resolve_range<R: RangeBounds<usize>>(r: R, valid: Range<usize>) -> Result<Range<usize>> {
     let start = match r.start_bound() {
         std::ops::Bound::Included(&n) => n,
         std::ops::Bound::Excluded(&n) => n + 1,
@@ -668,7 +680,7 @@ mod tests {
 
         let (overflow, _, rest) = gs.insert_str(8, "cd", SgrState::default());
         assert_eq!(gs.as_str(), "ab123456");
-        assert_eq!(rest, "cd");
-        assert_eq!(overflow.as_ref().map(GridString::as_str), None);
+        assert_eq!(rest, "");
+        assert_eq!(overflow.as_ref().map(GridString::as_str), Some("cd"));
     }
 }
