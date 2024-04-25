@@ -10,6 +10,7 @@ mod pty;
 mod sum_tree;
 mod terminal_emulator;
 mod terminal_input;
+mod tree;
 
 fn main() {
     env_logger::init();

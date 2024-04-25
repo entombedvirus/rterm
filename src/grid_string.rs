@@ -3,7 +3,7 @@
 use std::{
     collections::VecDeque,
     error::Error,
-    ops::{Deref, DerefMut, Range, RangeBounds},
+    ops::{Deref, DerefMut, Not as _, Range, RangeBounds},
     str::FromStr,
 };
 
@@ -23,7 +23,6 @@ type Result<T> = std::result::Result<T, GridStringError>;
 /// capctured by SgrState.
 #[derive(Debug, Default, Clone)]
 pub struct GridString {
-    nchars: u8,
     buf: ArrayString<MAX_BYTES>,
     sgr: ArrayVec<SgrState, MAX_BYTES>,
 }
@@ -33,7 +32,7 @@ impl GridString {
         let buf = ArrayString::from_str(s).map_err(GridStringError::CapacityError)?;
         let nchars = buf.chars().count() as u8;
         let sgr = std::iter::repeat(sgr).take(nchars as usize).collect();
-        Ok(Self { nchars, buf, sgr })
+        Ok(Self { buf, sgr })
     }
 
     fn with_sgr(sgr: SgrState) -> Self {
@@ -49,7 +48,7 @@ impl GridString {
     }
 
     pub fn sgr(&self) -> &[SgrState] {
-        &self.sgr[..self.len_chars()]
+        &self.sgr
     }
 
     pub fn len_bytes(&self) -> usize {
@@ -57,7 +56,7 @@ impl GridString {
     }
 
     pub fn len_chars(&self) -> usize {
-        self.nchars as usize
+        self.sgr.len()
     }
 
     pub const fn capacity(&self) -> usize {
@@ -68,20 +67,26 @@ impl GridString {
         *self = Self::default();
     }
 
-    fn push_str<'a>(&mut self, s: &'a str, sgr: SgrState) -> (usize, &'a str) {
-        let rem = self.buf.remaining_capacity();
-        let (prefix, suffix) = split_str_at_utf8_boundary(s, rem);
+    pub fn has_room(&self) -> bool {
+        self.buf.remaining_capacity() > 0 && self.sgr.remaining_capacity() > 0
+    }
+
+    pub fn push_str<'a>(&mut self, s: &'a str, sgr: SgrState) -> (Option<Self>, usize, &'a str) {
+        let (prefix, suffix) = split_str_at_utf8_boundary(s, self.buf.remaining_capacity());
         let written = prefix.chars().count();
-        self.buf.push_str(prefix);
-        self.sgr.extend(std::iter::repeat(sgr).take(written));
-        self.nchars += written as u8;
-        (written, suffix)
+        if written == 0 {
+            Self::split(s, sgr)
+        } else {
+            self.buf.push_str(prefix);
+            self.sgr.extend(std::iter::repeat(sgr).take(written));
+            (None, written, suffix)
+        }
     }
 
     /// edits the buf in place starting at char_idx, overwriting existing chars. Returns number of
     /// chars taken from `new_text` and the remainder string. This will not change `len_chars` but
     /// ccan change `len_bytes` depending on input.
-    fn replace_str<'b>(
+    pub fn replace_str<'b>(
         &mut self,
         char_idx: usize,
         new_text: &'b str,
@@ -151,8 +156,74 @@ impl GridString {
         }
         self.buf = edited_buf;
         self.sgr = edited_sgr;
-        self.nchars = new_num_chars;
         (nwritten, rem)
+    }
+
+    pub fn insert_str<'a>(
+        &mut self,
+        char_idx: usize,
+        new_text: &'a str,
+        new_sgr: SgrState,
+    ) -> (Option<Self>, usize, &'a str) {
+        if char_idx > self.len_chars() {
+            panic!(
+                "insert_str char_idx out of bounds: {char_idx} / {}",
+                self.len_chars()
+            );
+        }
+
+        if char_idx == self.len_chars() {
+            return Self::split(new_text, new_sgr);
+        }
+
+        let mut edited_buf = ArrayString::new();
+        let mut edited_sgr = ArrayVec::new();
+
+        let (old_text_prefix, old_text_suffix) = self.buf.split_at(char_idx);
+        edited_buf
+            .try_push_str(old_text_prefix)
+            .expect("part of old text should always fit");
+        edited_sgr.extend(self.sgr[..char_idx].into_iter().cloned());
+
+        let (new_text_prefix, new_text_suffix) =
+            split_str_at_utf8_boundary(new_text, edited_buf.remaining_capacity());
+        let new_text_prefix_chars = new_text_prefix.chars().count();
+
+        edited_buf
+            .try_push_str(new_text_prefix)
+            .expect("checked that prefix will fit in the remaining capacity");
+        edited_sgr.extend(std::iter::repeat(new_sgr).take(new_text_prefix_chars));
+
+        let ret = if new_text_suffix.is_empty() {
+            let mut overflow: Option<Self> = None;
+            for (i, (byte_idx, old_ch)) in old_text_suffix.char_indices().enumerate() {
+                let sgr = self.sgr[(char_idx + i)];
+                match edited_buf.try_push(old_ch) {
+                    Ok(_) => {
+                        edited_sgr.push(sgr);
+                    }
+                    Err(err) => {
+                        overflow.get_or_insert_with(Default::default).push_str(
+                            &old_text_suffix[byte_idx..byte_idx + old_ch.len_utf8()],
+                            sgr,
+                        );
+                    }
+                }
+            }
+            (overflow, new_text_prefix_chars, "")
+        } else {
+            let overflow = old_text_suffix.is_empty().not().then(|| {
+                Self::from_str(old_text_suffix)
+                    .expect("old_text_suffix was previously part of self, so it should be fine")
+            });
+
+            (overflow, new_text_prefix_chars, new_text_suffix)
+        };
+
+        self.buf = edited_buf;
+        self.sgr = edited_sgr;
+
+        ret
     }
 
     pub fn slice_bytes<R: RangeBounds<usize>>(&self, byte_range: R) -> Option<GridStr> {
@@ -171,7 +242,6 @@ impl GridString {
         let sgr = &self.sgr[char_range.clone()];
         GridStr {
             sgr: &self.sgr[char_range.clone()],
-            nchars: char_range.len() as u8,
             buf: &self.buf[byte_range],
         }
     }
@@ -182,7 +252,8 @@ impl GridString {
         let temp = self.buf.clone();
         self.buf.truncate(byte_range.start);
         self.buf.push_str(&temp[byte_range.end..]);
-        self.nchars -= char_range.len() as u8;
+        self.sgr.copy_within(char_range.end.., char_range.start);
+        self.sgr.truncate(self.sgr.len() - char_range.len());
         Ok(())
     }
 
@@ -231,16 +302,41 @@ impl GridString {
                 bound: 0..self.len_bytes(),
             })
     }
+
+    fn split(new_text: &str, new_sgr: SgrState) -> (Option<GridString>, usize, &str) {
+        let (prefix, suffix) = split_str_at_utf8_boundary(new_text, MAX_BYTES);
+        let written = prefix.chars().count();
+        let mut overflow = Self::default();
+        overflow.buf.push_str(prefix);
+        overflow
+            .sgr
+            .extend(std::iter::repeat(new_sgr).take(written));
+        (Some(overflow), written, suffix)
+    }
+
+    pub(crate) fn buf_mut(&mut self) -> &mut ArrayString<MAX_BYTES> {
+        &mut self.buf
+    }
+
+    pub(crate) fn sgr_mut(&mut self) -> &mut ArrayVec<SgrState, MAX_BYTES> {
+        &mut self.sgr
+    }
 }
 
-fn split_str_at_utf8_boundary(s: &str, index: usize) -> (&str, &str) {
-    if index >= s.len() {
+impl std::fmt::Display for GridString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+pub(crate) fn split_str_at_utf8_boundary(s: &str, byte_idx: usize) -> (&str, &str) {
+    if byte_idx >= s.len() {
         (s, "")
     } else {
         // utf-8 code points are max 4 bytes, so we only need to check last 4 bytes or fewer if the
         // string is smaller that 4 bytes
-        let start = index.saturating_sub(3);
-        for candidate in (start..=index).rev() {
+        let start = byte_idx.saturating_sub(3);
+        for candidate in (start..=byte_idx).rev() {
             if s.is_char_boundary(candidate) {
                 return s.split_at(candidate);
             }
@@ -249,7 +345,7 @@ fn split_str_at_utf8_boundary(s: &str, index: usize) -> (&str, &str) {
     }
 }
 
-fn resolve_range<R: RangeBounds<usize>>(r: R, valid: Range<usize>) -> Result<Range<usize>> {
+pub fn resolve_range<R: RangeBounds<usize>>(r: R, valid: Range<usize>) -> Result<Range<usize>> {
     let start = match r.start_bound() {
         std::ops::Bound::Included(&n) => n,
         std::ops::Bound::Excluded(&n) => n + 1,
@@ -303,21 +399,18 @@ impl AsRef<str> for GridString {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct GridStr<'a> {
-    nchars: u8,
     buf: &'a str,
     sgr: &'a [SgrState],
 }
 
 impl<'a> GridStr<'a> {
     fn new(sgr: &'a [SgrState], buf: &'a str) -> Self {
-        let nchars = buf.chars().count() as u8;
-        Self { sgr, nchars, buf }
+        Self { sgr, buf }
     }
 
     fn from(s: &'a GridString) -> Self {
         Self {
             sgr: s.sgr(),
-            nchars: s.nchars,
             buf: &s.buf,
         }
     }
@@ -335,71 +428,7 @@ impl<'a> GridStr<'a> {
     }
 
     pub fn len_chars(&self) -> usize {
-        self.nchars as usize
-    }
-}
-
-#[derive(Debug)]
-struct StripedString<'a, I: IntoIterator<Item = &'a mut GridString>> {
-    parts: I::IntoIter,
-}
-
-impl<'a, I> StripedString<'a, I>
-where
-    I: IntoIterator<Item = &'a mut GridString>,
-{
-    pub fn from_iter(iter: I) -> Self {
-        let parts = iter.into_iter();
-        Self { parts }
-    }
-
-    pub fn replace_str<'b>(
-        mut self,
-        mut char_offset: usize,
-        new_text: &'b str,
-        new_sgr: SgrState,
-    ) -> Result<(usize, &'b str)> {
-        let mut parts = self.parts.peekable();
-        let first_part = parts.peek().ok_or_else(|| GridStringError::OutOfBounds {
-            which: "replace_str with zero parts",
-            given: 0,
-            bound: 0..0,
-        })?;
-        if (char_offset > first_part.len_chars()) {
-            return Err(GridStringError::OutOfBounds {
-                which: "replace_str out of bounds write_char_idx",
-                given: char_offset,
-                bound: 0..first_part.len_chars(),
-            });
-        }
-
-        let mut chars_written = 0;
-        let mut to_write = new_text;
-        for part in parts {
-            if to_write.is_empty() {
-                break;
-            }
-            let (nwr, rest) = part.replace_str(std::mem::take(&mut char_offset), to_write, new_sgr);
-            chars_written += nwr;
-            to_write = rest;
-        }
-
-        Ok((chars_written, to_write))
-    }
-
-    fn push_str<'b>(self, new_text: &'b str, new_sgr: SgrState) -> (usize, &'b str) {
-        let mut chars_written = 0;
-        let mut to_write = new_text;
-        for part in self.parts {
-            if to_write.is_empty() {
-                break;
-            }
-            let (nwr, rest) = part.push_str(to_write, new_sgr);
-            chars_written += nwr;
-            to_write = rest;
-        }
-
-        (chars_written, to_write)
+        self.sgr.len()
     }
 }
 
@@ -541,98 +570,117 @@ mod tests {
         assert_eq!(gs.len_chars(), 3);
     }
 
+    // #[test]
+    // fn test_vectored_write_1() {
+    //     let mut gs1 = GridString::from_str("").unwrap();
+    //     let mut gs2 = GridString::from_str("").unwrap();
+
+    //     let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
+    //     let (nwritten, rem) = striped.push_str("a longer string", SgrState::default());
+    //     assert_eq!(gs1.as_str(), "a longer");
+    //     assert_eq!(gs2.as_str(), " string");
+    //     assert_eq!(rem, "");
+    //     assert_eq!(nwritten, 15);
+
+    //     let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
+    //     let (nwritten, rem) = striped
+    //         .replace_str(0, "a longer string that won't fit", SgrState::default())
+    //         .unwrap();
+    //     assert_eq!(gs1.as_str(), "a longer");
+    //     assert_eq!(gs2.as_str(), " string");
+    //     assert_eq!(rem, " that won't fit");
+    //     assert_eq!(nwritten, 15);
+
+    //     let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
+    //     let (nwritten, rem) = striped
+    //         .replace_str(
+    //             0,
+    //             "a long\u{c3a9}er string that won't fit, with utf-8 boundary",
+    //             SgrState::default(),
+    //         )
+    //         .unwrap();
+    //     assert_eq!(gs1.as_str(), "a long");
+    //     assert_eq!(gs2.as_str(), "\u{c3a9}er st");
+    //     assert_eq!(rem, "ring that won't fit, with utf-8 boundary");
+    //     assert_eq!(nwritten, 12);
+
+    //     let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
+    //     let (nwritten, rem) = striped.replace_str(6, "er", SgrState::default()).unwrap();
+    //     assert_eq!(gs1.as_str(), "a long");
+    //     assert_eq!(gs2.as_str(), "err st");
+    //     assert_eq!(rem, "");
+    //     assert_eq!(nwritten, 2);
+
+    //     let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
+    //     assert!(striped
+    //         .replace_str(8, ", fit", SgrState::default())
+    //         .is_err());
+    //     assert_eq!(gs1.as_str(), "a long");
+    //     assert_eq!(gs2.as_str(), "err st");
+    // }
+
+    // #[test]
+    // fn test_vectored_write_2() {
+    //     let mut bold_italic = SgrState {
+    //         italic: true,
+    //         bold: true,
+    //         ..Default::default()
+    //     };
+    //     let default = SgrState::default();
+
+    //     let mut gs1 = GridString::from_str("").unwrap();
+    //     let mut gs2 = GridString::from_str("").unwrap();
+    //     let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
+
+    //     let text = "abcdefghijklmn";
+    //     striped.push_str(text, SgrState::default());
+
+    //     let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
+    //     striped.replace_str(5, "123456", bold_italic).unwrap();
+    //     assert_eq!(gs1.as_str(), "abcde123");
+    //     assert_eq!(
+    //         gs1.sgr(),
+    //         &[
+    //             default,
+    //             default,
+    //             default,
+    //             default,
+    //             default,
+    //             bold_italic,
+    //             bold_italic,
+    //             bold_italic,
+    //         ]
+    //     );
+    //     assert_eq!(gs2.as_str(), "456lmn");
+    //     assert_eq!(
+    //         gs2.sgr(),
+    //         &[
+    //             bold_italic,
+    //             bold_italic,
+    //             bold_italic,
+    //             default,
+    //             default,
+    //             default,
+    //         ]
+    //     )
+    // }
+
     #[test]
-    fn test_vectored_write_1() {
-        let mut gs1 = GridString::from_str("").unwrap();
-        let mut gs2 = GridString::from_str("").unwrap();
+    fn test_insert_1() {
+        let mut gs = GridString::from_str("abcd").unwrap();
+        let (overflow, _, rest) = gs.insert_str(2, "12345", SgrState::default());
+        assert_eq!(gs.as_str(), "ab12345c");
+        assert_eq!(rest, "");
+        assert_eq!(overflow.as_ref().map(GridString::as_str), Some("d"));
 
-        let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
-        let (nwritten, rem) = striped.push_str("a longer string", SgrState::default());
-        assert_eq!(gs1.as_str(), "a longer");
-        assert_eq!(gs2.as_str(), " string");
-        assert_eq!(rem, "");
-        assert_eq!(nwritten, 15);
+        let (overflow, _, rest) = gs.insert_str(7, "6", SgrState::default());
+        assert_eq!(gs.as_str(), "ab123456");
+        assert_eq!(rest, "");
+        assert_eq!(overflow.as_ref().map(GridString::as_str), Some("c"));
 
-        let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
-        let (nwritten, rem) = striped
-            .replace_str(0, "a longer string that won't fit", SgrState::default())
-            .unwrap();
-        assert_eq!(gs1.as_str(), "a longer");
-        assert_eq!(gs2.as_str(), " string");
-        assert_eq!(rem, " that won't fit");
-        assert_eq!(nwritten, 15);
-
-        let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
-        let (nwritten, rem) = striped
-            .replace_str(
-                0,
-                "a long\u{c3a9}er string that won't fit, with utf-8 boundary",
-                SgrState::default(),
-            )
-            .unwrap();
-        assert_eq!(gs1.as_str(), "a long");
-        assert_eq!(gs2.as_str(), "\u{c3a9}er st");
-        assert_eq!(rem, "ring that won't fit, with utf-8 boundary");
-        assert_eq!(nwritten, 12);
-
-        let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
-        let (nwritten, rem) = striped.replace_str(6, "er", SgrState::default()).unwrap();
-        assert_eq!(gs1.as_str(), "a long");
-        assert_eq!(gs2.as_str(), "err st");
-        assert_eq!(rem, "");
-        assert_eq!(nwritten, 2);
-
-        let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
-        assert!(striped
-            .replace_str(8, ", fit", SgrState::default())
-            .is_err());
-        assert_eq!(gs1.as_str(), "a long");
-        assert_eq!(gs2.as_str(), "err st");
-    }
-
-    #[test]
-    fn test_vectored_write_2() {
-        let mut bold_italic = SgrState {
-            italic: true,
-            bold: true,
-            ..Default::default()
-        };
-        let default = SgrState::default();
-
-        let mut gs1 = GridString::from_str("").unwrap();
-        let mut gs2 = GridString::from_str("").unwrap();
-        let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
-
-        let text = "abcdefghijklmn";
-        striped.push_str(text, SgrState::default());
-
-        let mut striped = StripedString::from_iter([&mut gs1, &mut gs2]);
-        striped.replace_str(5, "123456", bold_italic).unwrap();
-        assert_eq!(gs1.as_str(), "abcde123");
-        assert_eq!(
-            gs1.sgr(),
-            &[
-                default,
-                default,
-                default,
-                default,
-                default,
-                bold_italic,
-                bold_italic,
-                bold_italic,
-            ]
-        );
-        assert_eq!(gs2.as_str(), "456lmn");
-        assert_eq!(
-            gs2.sgr(),
-            &[
-                bold_italic,
-                bold_italic,
-                bold_italic,
-                default,
-                default,
-                default,
-            ]
-        )
+        let (overflow, _, rest) = gs.insert_str(8, "cd", SgrState::default());
+        assert_eq!(gs.as_str(), "ab123456");
+        assert_eq!(rest, "");
+        assert_eq!(overflow.as_ref().map(GridString::as_str), Some("cd"));
     }
 }
