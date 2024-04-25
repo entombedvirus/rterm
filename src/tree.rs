@@ -597,9 +597,17 @@ impl Compactable for GridString {
     }
 
     fn compact_two(a: &mut Self, b: &mut Self) -> bool {
-        Compactable::compact_two(a.buf_mut(), b.buf_mut());
-        Compactable::compact_two(a.sgr_mut(), b.sgr_mut());
-        !a.has_room()
+        let (to_write, rem) =
+            split_str_at_utf8_boundary(b.as_str(), a.buf_mut().remaining_capacity());
+        let chars_written = to_write.chars().count();
+
+        a.buf_mut().push_str(to_write);
+        let mut temp = ArrayString::new();
+        temp.push_str(rem);
+        *b.buf_mut() = temp;
+        a.sgr_mut().extend(b.sgr_mut().drain(0..chars_written));
+
+        a.buf_mut().remaining_capacity() == 0 || !b.is_empty()
     }
 }
 
@@ -613,23 +621,6 @@ impl<T, const N: usize> Compactable for ArrayVec<T, N> {
         let num_children = b.len();
         a.extend(b.drain(0..room_available.min(num_children)));
         a.remaining_capacity() == 0
-    }
-}
-
-impl<const N: usize> Compactable for ArrayString<N> {
-    fn is_empty(&self) -> bool {
-        ArrayString::<N>::is_empty(self)
-    }
-
-    fn compact_two(a: &mut Self, b: &mut Self) -> bool {
-        if a.remaining_capacity() > 0 && b.len() > 0 {
-            let (to_write, rem) = split_str_at_utf8_boundary(b.as_str(), a.remaining_capacity());
-            a.push_str(to_write);
-            let mut temp = Self::new();
-            temp.push_str(rem);
-            *b = temp;
-        }
-        a.remaining_capacity() == 0 || !b.is_empty()
     }
 }
 
@@ -844,5 +835,26 @@ mod tests {
         tree.remove_range(7..14);
         assert_eq!(tree.to_string().as_str(), "Line 1\nLine 3\n");
         assert_eq!(tree.len_lines(), 2)
+    }
+
+    #[test]
+    fn test_compact_grid_string_1() {
+        let bold = SgrState {
+            bold: true,
+            ..Default::default()
+        };
+        let d = SgrState::default();
+
+        let mut gs1 = GridString::from_str("abcdef").unwrap();
+        let mut gs2 = GridString::from_str("").unwrap();
+        gs2.push_str("g\u{0d30}2345", bold);
+        Compactable::compact_two(&mut gs1, &mut gs2);
+
+        assert_eq!(gs1.as_str(), "abcdefg");
+        assert_eq!(gs1.sgr().len(), 7);
+        assert_eq!(gs1.sgr(), &[d, d, d, d, d, d, bold]);
+        assert_eq!(gs2.as_str(), "\u{0d30}2345");
+        assert_eq!(gs2.sgr().len(), 5);
+        assert_eq!(gs2.sgr(), &[bold, bold, bold, bold, bold]);
     }
 }
