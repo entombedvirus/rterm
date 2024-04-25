@@ -521,197 +521,188 @@ impl TerminalEmulator {
         Ok(cursor_rect)
     }
 
-    fn read_from_pty(&mut self, ctx: &egui::Context) -> anyhow::Result<bool> {
-        puffin::profile_function!();
-        let token_stream = self
-            .child_process
-            .as_ref()
-            .map(|child| &child.token_stream)
-            .context("child process not spawned yet")?;
-        match token_stream.try_recv() {
-            Ok(tokens) => {
-                for token in tokens {
-                    match token {
-                        AnsiToken::OSC(osc_ctrl) => self.handle_osc_token(ctx, osc_ctrl),
-                        AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteEnter) => {
-                            self.enable_bracketed_paste = true
+    fn handle_ansi_token(&mut self, ctx: &egui::Context, token: AnsiToken) {
+        match token {
+            AnsiToken::OSC(osc_ctrl) => self.handle_osc_token(ctx, osc_ctrl),
+            AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteEnter) => {
+                self.enable_bracketed_paste = true
+            }
+            AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteExit) => {
+                self.enable_bracketed_paste = false
+            }
+            AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenEnter) => {
+                self.enter_alternate_screen();
+            }
+            AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenExit) => {
+                self.exit_alternate_screen();
+            }
+            AnsiToken::ModeControl(ansi::ModeControl::FocusTrackEnter) => {
+                self.enable_focus_tracking = true;
+            }
+            AnsiToken::ModeControl(ansi::ModeControl::FocusTrackExit) => {
+                self.enable_focus_tracking = false;
+            }
+            AnsiToken::ModeControl(ansi::ModeControl::ApplicationEscEnter) => {
+                self.enable_application_escape = true;
+            }
+            AnsiToken::ModeControl(ansi::ModeControl::ApplicationEscExit) => {
+                self.enable_application_escape = false;
+            }
+            AnsiToken::DA(ansi::DeviceAttributes::XtVersion) => {
+                const XT_VERSION: &str = "0.0.1";
+                let _ = write!(&mut self.buffered_input, "\x1bP>|rterm({XT_VERSION})\x1b\\");
+            }
+            AnsiToken::DA(ansi::DeviceAttributes::Primary) => {
+                // See: https://github.com/kovidgoyal/kitty/blob/5b4ea0052c3db89063a4b4af9f4b78ef90b7332c/kitty/screen.c#L2084
+                let _ = write!(&mut self.buffered_input, "\x1b[?62;c");
+            }
+            AnsiToken::DA(ansi::DeviceAttributes::Secondary) => {
+                // See: https://github.com/kovidgoyal/kitty/blob/5b4ea0052c3db89063a4b4af9f4b78ef90b7332c/kitty/screen.c#L2087
+                //  We add 4000 to the primary version because vim turns on SGR mouse mode
+                //   automatically if this version is high enough
+                const PRIMARY_VERSION: &str = "4000";
+                const SECONDARY_VERSION: &str = "0";
+                let _ = write!(
+                    &mut self.buffered_input,
+                    "\x1b[>1;{PRIMARY_VERSION};{SECONDARY_VERSION}c"
+                );
+            }
+            _ => {
+                puffin::profile_scope!("grid token handling");
+                use ansi::CursorControl;
+                use ansi::EraseControl;
+                let grid = self
+                    .alternate_grid
+                    .as_mut()
+                    .unwrap_or(&mut self.primary_grid);
+                match token {
+                    AnsiToken::ResetToInitialState => {
+                        grid.clear_including_scrollback();
+                    }
+                    AnsiToken::Text(txt) => {
+                        grid.write_text_at_cursor(&txt);
+                    }
+                    AnsiToken::AsciiControl(AsciiControl::Backspace) => {
+                        grid.move_cursor_relative(0, -1);
+                    }
+                    AnsiToken::AsciiControl(AsciiControl::Tab) => {
+                        grid.move_cursor_relative(0, 4);
+                    }
+                    AnsiToken::AsciiControl(AsciiControl::LineFeed) => {
+                        grid.move_cursor_relative(1, 0);
+                    }
+                    AnsiToken::AsciiControl(AsciiControl::CarriageReturn) => {
+                        let (current_row, _) = grid.cursor_position();
+                        grid.move_cursor(current_row, 0);
+                    }
+                    AnsiToken::CursorControl(CursorControl::MoveUp { lines }) => {
+                        grid.move_cursor_relative(lines.try_into().unwrap_or(0_isize).neg(), 0);
+                    }
+                    AnsiToken::CursorControl(CursorControl::MoveDown { lines }) => {
+                        grid.move_cursor_relative(lines.try_into().unwrap_or(0_isize), 0);
+                    }
+                    AnsiToken::CursorControl(CursorControl::MoveLeft { cols }) => {
+                        grid.move_cursor_relative(0, cols.try_into().unwrap_or(0_isize).neg());
+                    }
+                    AnsiToken::CursorControl(CursorControl::MoveRight { cols }) => {
+                        grid.move_cursor_relative(0, cols.try_into().unwrap_or(0_isize));
+                    }
+                    AnsiToken::CursorControl(CursorControl::MoveTo { line, col }) => {
+                        grid.move_cursor(line.saturating_sub(1), col.saturating_sub(1));
+                    }
+                    AnsiToken::CursorControl(CursorControl::ScrollUpFromHome) => {
+                        let (cursor_row, _) = grid.cursor_position();
+                        if cursor_row > 0 {
+                            // no need to scroll
+                            grid.move_cursor_relative(-1, 0);
+                        } else {
+                            grid.move_lines_down(0, 1);
                         }
-                        AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteExit) => {
-                            self.enable_bracketed_paste = false
-                        }
-                        AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenEnter) => {
-                            self.enter_alternate_screen();
-                        }
-                        AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenExit) => {
-                            self.exit_alternate_screen();
-                        }
-                        AnsiToken::ModeControl(ansi::ModeControl::FocusTrackEnter) => {
-                            self.enable_focus_tracking = true;
-                        }
-                        AnsiToken::ModeControl(ansi::ModeControl::FocusTrackExit) => {
-                            self.enable_focus_tracking = false;
-                        }
-                        AnsiToken::ModeControl(ansi::ModeControl::ApplicationEscEnter) => {
-                            self.enable_application_escape = true;
-                        }
-                        AnsiToken::ModeControl(ansi::ModeControl::ApplicationEscExit) => {
-                            self.enable_application_escape = false;
-                        }
-                        AnsiToken::DA(ansi::DeviceAttributes::XtVersion) => {
-                            const XT_VERSION: &str = "0.0.1";
-                            let _ = write!(
-                                &mut self.buffered_input,
-                                "\x1bP>|rterm({XT_VERSION})\x1b\\"
-                            );
-                        }
-                        AnsiToken::DA(ansi::DeviceAttributes::Primary) => {
-                            // See: https://github.com/kovidgoyal/kitty/blob/5b4ea0052c3db89063a4b4af9f4b78ef90b7332c/kitty/screen.c#L2084
-                            let _ = write!(&mut self.buffered_input, "\x1b[?62;c");
-                        }
-                        AnsiToken::DA(ansi::DeviceAttributes::Secondary) => {
-                            // See: https://github.com/kovidgoyal/kitty/blob/5b4ea0052c3db89063a4b4af9f4b78ef90b7332c/kitty/screen.c#L2087
-                            //  We add 4000 to the primary version because vim turns on SGR mouse mode
-                            //   automatically if this version is high enough
-                            const PRIMARY_VERSION: &str = "4000";
-                            const SECONDARY_VERSION: &str = "0";
-                            let _ = write!(
-                                &mut self.buffered_input,
-                                "\x1b[>1;{PRIMARY_VERSION};{SECONDARY_VERSION}c"
-                            );
-                        }
-                        _ => {
-                            puffin::profile_scope!("grid token handling");
-                            use ansi::CursorControl;
-                            use ansi::EraseControl;
-                            let grid = self
-                                .alternate_grid
-                                .as_mut()
-                                .unwrap_or(&mut self.primary_grid);
-                            match token {
-                                AnsiToken::ResetToInitialState => {
-                                    grid.clear_including_scrollback();
+                    }
+                    AnsiToken::CursorControl(CursorControl::SavePositionDEC) => {
+                        grid.save_cursor_state();
+                    }
+                    AnsiToken::CursorControl(CursorControl::RestorePositionDEC) => {
+                        grid.restore_cursor_state();
+                    }
+                    AnsiToken::EraseControl(EraseControl::Screen) => {
+                        grid.clear_screen();
+                    }
+                    AnsiToken::EraseControl(EraseControl::ScreenAndScrollback) => {
+                        grid.clear_including_scrollback();
+                    }
+                    AnsiToken::EraseControl(EraseControl::FromCursorToEndOfScreen) => {
+                        grid.erase_from_cursor_to_screen();
+                    }
+                    AnsiToken::EraseControl(EraseControl::FromCursorToEndOfLine) => {
+                        grid.erase_from_cursor_to_eol();
+                    }
+                    AnsiToken::SGR(params) => {
+                        let sgr_state = grid.cursor_format_mut();
+                        for sgr in params {
+                            match sgr {
+                                SgrControl::Bold => {
+                                    sgr_state.bold = true;
                                 }
-                                AnsiToken::Text(txt) => {
-                                    grid.write_text_at_cursor(&txt);
+                                SgrControl::EnterItalicsMode => {
+                                    sgr_state.italic = true;
                                 }
-                                AnsiToken::AsciiControl(AsciiControl::Backspace) => {
-                                    grid.move_cursor_relative(0, -1);
+                                SgrControl::ExitItalicsMode => {
+                                    sgr_state.italic = false;
                                 }
-                                AnsiToken::AsciiControl(AsciiControl::Tab) => {
-                                    grid.move_cursor_relative(0, 4);
+                                SgrControl::ForgroundColor(color) => {
+                                    sgr_state.fg_color = color;
                                 }
-                                AnsiToken::AsciiControl(AsciiControl::LineFeed) => {
-                                    grid.move_cursor_relative(1, 0);
+                                SgrControl::BackgroundColor(color) => {
+                                    sgr_state.bg_color = color;
                                 }
-                                AnsiToken::AsciiControl(AsciiControl::CarriageReturn) => {
-                                    let (current_row, _) = grid.cursor_position();
-                                    grid.move_cursor(current_row, 0);
+                                SgrControl::Reset => {
+                                    *sgr_state = SgrState::default();
                                 }
-                                AnsiToken::CursorControl(CursorControl::MoveUp { lines }) => {
-                                    grid.move_cursor_relative(
-                                        lines.try_into().unwrap_or(0_isize).neg(),
-                                        0,
-                                    );
+                                SgrControl::ResetFgColor => {
+                                    sgr_state.fg_color = ansi::Color::DefaultFg;
                                 }
-                                AnsiToken::CursorControl(CursorControl::MoveDown { lines }) => {
-                                    grid.move_cursor_relative(
-                                        lines.try_into().unwrap_or(0_isize),
-                                        0,
-                                    );
+                                SgrControl::ResetBgColor => {
+                                    sgr_state.bg_color = ansi::Color::DefaultBg;
                                 }
-                                AnsiToken::CursorControl(CursorControl::MoveLeft { cols }) => {
-                                    grid.move_cursor_relative(
-                                        0,
-                                        cols.try_into().unwrap_or(0_isize).neg(),
-                                    );
+                                SgrControl::Unimplemented(_) => {
+                                    // noop
                                 }
-                                AnsiToken::CursorControl(CursorControl::MoveRight { cols }) => {
-                                    grid.move_cursor_relative(
-                                        0,
-                                        cols.try_into().unwrap_or(0_isize),
-                                    );
-                                }
-                                AnsiToken::CursorControl(CursorControl::MoveTo { line, col }) => {
-                                    grid.move_cursor(line.saturating_sub(1), col.saturating_sub(1));
-                                }
-                                AnsiToken::CursorControl(CursorControl::ScrollUpFromHome) => {
-                                    let (cursor_row, _) = grid.cursor_position();
-                                    if cursor_row > 0 {
-                                        // no need to scroll
-                                        grid.move_cursor_relative(-1, 0);
-                                    } else {
-                                        grid.move_lines_down(0, 1);
-                                    }
-                                }
-                                AnsiToken::CursorControl(CursorControl::SavePositionDEC) => {
-                                    grid.save_cursor_state();
-                                }
-                                AnsiToken::CursorControl(CursorControl::RestorePositionDEC) => {
-                                    grid.restore_cursor_state();
-                                }
-                                AnsiToken::EraseControl(EraseControl::Screen) => {
-                                    grid.clear_screen();
-                                }
-                                AnsiToken::EraseControl(EraseControl::ScreenAndScrollback) => {
-                                    grid.clear_including_scrollback();
-                                }
-                                AnsiToken::EraseControl(EraseControl::FromCursorToEndOfScreen) => {
-                                    grid.erase_from_cursor_to_screen();
-                                }
-                                AnsiToken::EraseControl(EraseControl::FromCursorToEndOfLine) => {
-                                    grid.erase_from_cursor_to_eol();
-                                }
-                                AnsiToken::SGR(params) => {
-                                    let sgr_state = grid.cursor_format_mut();
-                                    for sgr in params {
-                                        match sgr {
-                                            SgrControl::Bold => {
-                                                sgr_state.bold = true;
-                                            }
-                                            SgrControl::EnterItalicsMode => {
-                                                sgr_state.italic = true;
-                                            }
-                                            SgrControl::ExitItalicsMode => {
-                                                sgr_state.italic = false;
-                                            }
-                                            SgrControl::ForgroundColor(color) => {
-                                                sgr_state.fg_color = color;
-                                            }
-                                            SgrControl::BackgroundColor(color) => {
-                                                sgr_state.bg_color = color;
-                                            }
-                                            SgrControl::Reset => {
-                                                *sgr_state = SgrState::default();
-                                            }
-                                            SgrControl::ResetFgColor => {
-                                                sgr_state.fg_color = ansi::Color::DefaultFg;
-                                            }
-                                            SgrControl::ResetBgColor => {
-                                                sgr_state.bg_color = ansi::Color::DefaultBg;
-                                            }
-                                            SgrControl::Unimplemented(_) => {
-                                                // noop
-                                            }
-                                        }
-                                    }
-                                }
-                                ignored => info!("ignoring ansii token: {ignored:?}"),
                             }
                         }
                     }
+                    ignored => info!("ignoring ansii token: {ignored:?}"),
                 }
-                // keep requesting painting a new frame as long as we keep getting data. Only
-                // processing a subset of data each frame keeps the UI responsive to the user
-                // sending Ctrl-C etc
-                ctx.request_repaint();
-                Ok(true)
             }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                Ok(false)
-            }
-            Err(mpsc::TryRecvError::Empty) => Ok(false),
         }
+    }
+
+    fn read_from_pty(&mut self, ctx: &egui::Context) -> anyhow::Result<bool> {
+        puffin::profile_function!();
+
+        let mut read_input = false;
+        loop {
+            let token_stream = self
+                .child_process
+                .as_ref()
+                .map(|child| &child.token_stream)
+                .context("child process not spawned yet")?;
+            match token_stream.try_recv() {
+                Ok(tokens) => {
+                    for token in tokens {
+                        self.handle_ansi_token(ctx, token);
+                    }
+                    read_input = true;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+            }
+        }
+
+        Ok(read_input)
     }
 
     fn handle_osc_token(&mut self, ctx: &egui::Context, osc_ctrl: ansi::OscControl) {
