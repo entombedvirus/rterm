@@ -224,11 +224,6 @@ impl Grid {
             }
         }
 
-        // need to maintain the invariant that each line is num_cols long
-        for line_idx in 0..self.text.len_lines() {
-            self.truncate_line(tree::DimensionLineIdx(line_idx), new_num_cols);
-        }
-
         self.num_screen_rows = ScreenCoord(new_num_rows);
         self.num_screen_cols = ScreenCoord(new_num_cols);
         self.cursor_state
@@ -325,6 +320,19 @@ impl Grid {
                         }
                     }
 
+                    // add padding so that the line is at least num_cols wide
+                    {
+                        let n = padded_text.chars().count();
+                        if let Some(to_add) = self.num_cols().checked_sub(n) {
+                            let blanks = &self.blank_line[..to_add];
+                            format_attributes.push(FormatAttribute {
+                                sgr_state: SgrState::default(),
+                                byte_range: padded_text.len()..padded_text.len() + blanks.len(),
+                            });
+                            padded_text.push_str(blanks);
+                        }
+                    }
+
                     DisplayLine {
                         padded_text,
                         format_attributes,
@@ -369,13 +377,6 @@ impl Grid {
         tree
     }
 
-    fn append_n_blank_rows(text: &mut Tree, blank_line: &str, num_rows: usize) {
-        puffin::profile_function!();
-        for _ in 0..num_rows {
-            text.push_str(blank_line, SgrState::default());
-        }
-    }
-
     fn remove_screen_rows(
         &mut self,
         Range {
@@ -401,43 +402,6 @@ impl Grid {
         for _ in 0..n {
             self.text
                 .push_str(self.blank_line.as_str(), SgrState::default());
-        }
-    }
-
-    /// ensures that line at given line_idx is `new_len` columns wide. It will either remove chars
-    /// or insert blank chars at the end.
-    fn truncate_line(&mut self, line_idx: tree::DimensionLineIdx, new_len: usize) {
-        let Some(line) = self.text.get_line(line_idx) else {
-            return;
-        };
-        let diff: isize = line.len_chars() as isize - new_len as isize - 1;
-        match diff.cmp(&0) {
-            std::cmp::Ordering::Equal => (),
-            std::cmp::Ordering::Less => {
-                debug_assert!(self.blank_line.len() == new_len + 1);
-
-                let edit_point = tree::DimensionCursorPosition {
-                    line_idx: line_idx.0,
-                    trailing_char_idx: line.len_chars(),
-                    soft_wrap: None,
-                };
-                let blanks = &self.blank_line[..diff.abs() as usize];
-                self.text
-                    .insert_str(edit_point, blanks, SgrState::default());
-            }
-            std::cmp::Ordering::Greater => {
-                let remove_start = tree::DimensionCursorPosition {
-                    line_idx: line_idx.0,
-                    trailing_char_idx: new_len,
-                    soft_wrap: None,
-                };
-                let remove_end = tree::DimensionCursorPosition {
-                    line_idx: line_idx.0,
-                    trailing_char_idx: line.len_chars(),
-                    soft_wrap: None,
-                };
-                self.text.remove_range(remove_start..remove_end);
-            }
         }
     }
 }

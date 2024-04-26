@@ -185,10 +185,6 @@ impl Tree {
         };
         Ok(start..end)
     }
-
-    pub fn get_line(&self, line_idx: DimensionLineIdx) -> Option<TreeSlice<DimensionLineIdx>> {
-        todo!()
-    }
 }
 
 #[derive(Debug)]
