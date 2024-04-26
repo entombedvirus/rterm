@@ -710,6 +710,78 @@ impl std::ops::Sub for DimensionCharIdx {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DimensionLineIdx(pub usize);
+impl Dimension for DimensionLineIdx {
+    fn to_char_idx(&self, s: &str) -> usize {
+        let Self(line_idx) = *self;
+        if line_idx == 0 {
+            return 0;
+        }
+        let mut char_idx = 0;
+        for (i, line) in s.split_inclusive('\n').enumerate() {
+            if i == line_idx {
+                return char_idx;
+            } else {
+                char_idx += line.chars().count();
+            }
+        }
+        panic!("cannot find line with idx: {line_idx} in input: {s:?}")
+    }
+}
+
+impl<'a> From<&'a TextSummary> for DimensionLineIdx {
+    fn from(value: &'a TextSummary) -> Self {
+        Self(value.lines)
+    }
+}
+impl std::ops::Add for DimensionLineIdx {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
+impl std::ops::Sub for DimensionLineIdx {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self(self.0 - rhs.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DimensionLineChar {
+    pub line_idx: usize,
+    pub char_idx: usize,
+    pub soft_wrap: Option<NonZeroUsize>,
+}
+impl Dimension for DimensionLineChar {
+    fn to_char_idx(&self, s: &str) -> usize {
+        todo!()
+    }
+}
+
+impl<'a> From<&'a TextSummary> for DimensionLineChar {
+    fn from(value: &'a TextSummary) -> Self {
+        todo!()
+    }
+}
+impl std::ops::Add for DimensionLineChar {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        todo!()
+    }
+}
+impl std::ops::Sub for DimensionLineChar {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        todo!()
+    }
+}
+
 fn summarize<'a, T: IntoIterator<Item = &'a TextSummary>>(summaries: T) -> TextSummary {
     summaries
         .into_iter()
