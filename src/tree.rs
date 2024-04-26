@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::{ops::RangeBounds, sync::Arc};
+use std::{num::NonZeroUsize, ops::RangeBounds, sync::Arc};
 
 use arrayvec::{ArrayString, ArrayVec};
 
@@ -133,6 +133,16 @@ impl Tree {
                 [self.root.clone(), node],
             ));
         }
+    }
+
+    fn from_str(input: &str) -> Self {
+        let mut tree = Self::new();
+        tree.push_str(input, SgrState::default());
+        tree
+    }
+
+    fn dimension_to_char_idx<D: Dimension>(&self, seek_target: D) -> Option<usize> {
+        self.root.dimension_to_char_idx(seek_target)
     }
 }
 
@@ -502,6 +512,36 @@ impl Node {
     fn has_room_for_children(&self) -> bool {
         self.child_summaries().len() < MAX_CHILDREN
     }
+
+    fn dimension_to_char_idx<D: Dimension>(&self, seek_target: D) -> Option<usize> {
+        let mut running_sum = D::default();
+        let mut agg_summary = TextSummary::default();
+        for (child_idx, child_summary) in self.child_summaries().into_iter().enumerate() {
+            let next_sum = running_sum + D::from(child_summary);
+            if next_sum > seek_target {
+                match self {
+                    Node::Leaf {
+                        node_summary,
+                        children,
+                        child_summaries,
+                    } => {
+                        return Some(
+                            agg_summary.chars
+                                + seek_target.to_char_idx(children[child_idx].as_str()),
+                        );
+                    }
+                    Node::Internal { children, .. } => {
+                        let child_char_idx =
+                            children[child_idx].dimension_to_char_idx(seek_target - running_sum);
+                        child_char_idx.map(|child_chars| agg_summary.chars + child_chars)
+                    }
+                };
+            }
+            running_sum = next_sum;
+            agg_summary = agg_summary + &child_summary;
+        }
+        None
+    }
 }
 
 trait Compactable
@@ -758,27 +798,43 @@ pub struct DimensionLineChar {
 }
 impl Dimension for DimensionLineChar {
     fn to_char_idx(&self, s: &str) -> usize {
-        todo!()
+        assert!(self.soft_wrap.is_none(), "soft wrapping is not implemented");
+        let line_start_idx = DimensionLineIdx(self.line_idx).to_char_idx(s);
+        line_start_idx + self.char_idx
     }
 }
 
 impl<'a> From<&'a TextSummary> for DimensionLineChar {
     fn from(value: &'a TextSummary) -> Self {
-        todo!()
+        Self {
+            line_idx: value.lines,
+            char_idx: 0,
+            soft_wrap: None,
+        }
     }
 }
 impl std::ops::Add for DimensionLineChar {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        todo!()
+        assert!(self.soft_wrap == rhs.soft_wrap);
+        Self {
+            line_idx: self.line_idx + rhs.line_idx,
+            char_idx: self.char_idx + rhs.char_idx,
+            soft_wrap: self.soft_wrap,
+        }
     }
 }
 impl std::ops::Sub for DimensionLineChar {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        todo!()
+        assert!(self.soft_wrap == rhs.soft_wrap);
+        Self {
+            line_idx: self.line_idx - rhs.line_idx,
+            char_idx: self.char_idx - rhs.char_idx,
+            soft_wrap: self.soft_wrap,
+        }
     }
 }
 
@@ -928,5 +984,11 @@ mod tests {
         assert_eq!(gs2.as_str(), "\u{0d30}2345");
         assert_eq!(gs2.sgr().len(), 5);
         assert_eq!(gs2.sgr(), &[bold, bold, bold, bold, bold]);
+    }
+
+    #[test]
+    fn test_dim_line_idx() {
+        let tree = Tree::from_str("Line 1\nLine 2\nLine 3\n");
+        assert_eq!(tree.dimension_to_char_idx(DimensionLineIdx(2)), Some(14));
     }
 }
