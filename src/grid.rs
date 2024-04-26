@@ -3,7 +3,11 @@ use std::{
     rc::Rc,
 };
 
-use crate::{puffin, terminal_emulator::SgrState};
+use crate::{
+    puffin,
+    terminal_emulator::SgrState,
+    tree::{self, Tree},
+};
 
 #[derive(Debug)]
 pub struct Grid {
@@ -13,7 +17,7 @@ pub struct Grid {
     max_rows: BufferCoord,        // always >= num_screen_rows
     blank_line: Rc<String>,
 
-    text: ropey::Rope,
+    text: tree::Tree,
 
     // TODO: ArrayVec<CursorState; 2> maybe?
     cursor_state: CursorState,
@@ -21,14 +25,14 @@ pub struct Grid {
 }
 
 #[derive(Debug)]
-pub struct DisplayLine<'a> {
+pub struct DisplayLine {
     pub padded_text: String, // always enough to fill the grid line
-    pub format_attributes: Vec<FormatAttribute<'a>>,
+    pub format_attributes: Vec<FormatAttribute>,
 }
 
 #[derive(Debug, Clone)]
-pub struct FormatAttribute<'a> {
-    pub sgr_state: &'a SgrState,
+pub struct FormatAttribute {
+    pub sgr_state: SgrState,
     pub byte_range: Range<usize>,
 }
 
@@ -86,7 +90,11 @@ impl Grid {
     }
 
     pub fn cursor_position(&self) -> (usize, usize) {
-        let (ScreenCoord(row), ScreenCoord(col)) = self.cursor_state.position;
+        let tree::DimensionLineChar {
+            line_idx: row,
+            char_idx: col,
+            ..
+        } = self.cursor_state.position;
         (row, col)
     }
 
@@ -114,11 +122,12 @@ impl Grid {
 
     pub fn clear_screen(&mut self) {
         puffin::profile_function!();
-        let line_idx = self.first_visible_line_no();
-        let char_idx = self.text.line_to_char(line_idx);
-        let num_rows = self.num_rows();
-        self.text.split_off(char_idx);
-        Self::append_n_blank_rows(&mut self.text, self.blank_line.as_ref(), num_rows);
+        let line_idx = tree::DimensionLineIdx(self.first_visible_line_no());
+        self.text.remove_range(line_idx..);
+        for _ in 0..self.num_rows() {
+            self.text
+                .push_str(self.blank_line.as_ref(), SgrState::default());
+        }
     }
 
     pub fn clear_including_scrollback(&mut self) {
@@ -129,12 +138,16 @@ impl Grid {
     }
 
     pub fn move_cursor_relative(&mut self, dr: isize, dc: isize) {
-        let (row, col) = self.cursor_state.position;
-        let mut new_row = row + dr;
-        let mut new_col = col + dc;
+        let tree::DimensionLineChar {
+            line_idx: row,
+            char_idx: col,
+            ..
+        } = self.cursor_state.position;
+        let mut new_row = (row as isize + dr) as usize;
+        let mut new_col = (col as isize + dc) as usize;
         new_row += new_col / self.num_cols();
         new_col %= self.num_cols();
-        self.move_cursor(new_row.0, new_col.0)
+        self.move_cursor(new_row, new_col)
     }
 
     pub fn move_cursor(&mut self, new_row: usize, new_col: usize) {
@@ -144,7 +157,8 @@ impl Grid {
 
         // new position is within bounds
         if new_row < self.num_rows() {
-            self.cursor_state.position = (ScreenCoord(new_row), ScreenCoord(new_col));
+            self.cursor_state.position.line_idx = new_row;
+            self.cursor_state.position.char_idx = new_col;
             return;
         }
 
@@ -170,11 +184,15 @@ impl Grid {
                 .max(num_new_rows);
             let extra_lines =
                 ((num_new_rows + self.total_rows()) * 2).clamp(min_lines, lines_left_to_allocate);
-            Self::append_n_blank_rows(&mut self.text, self.blank_line.as_ref(), extra_lines);
+            for _ in 0..extra_lines {
+                self.text
+                    .push_str(self.blank_line.as_ref(), SgrState::default());
+            }
         }
         self.num_buffer_rows += num_new_rows;
 
-        self.cursor_state.position = (self.num_screen_rows - 1, ScreenCoord(new_col));
+        self.cursor_state.position.line_idx = self.num_rows() - 1;
+        self.cursor_state.position.char_idx = new_col;
     }
 
     pub fn cursor_format_mut(&mut self) -> &mut SgrState {
@@ -200,18 +218,21 @@ impl Grid {
 
         // add new blank lines at the end if we are resizing to have more rows that we have now
         if let Some(to_add) = new_num_rows.checked_sub(self.total_rows()) {
-            Self::append_n_blank_rows(&mut self.text, self.blank_line.as_ref(), to_add);
+            for _ in 0..to_add {
+                self.text
+                    .push_str(self.blank_line.as_ref(), SgrState::default());
+            }
         }
 
         // need to maintain the invariant that each line is num_cols long
         for line_idx in 0..self.text.len_lines() {
-            self.truncate_line(BufferCoord(line_idx), new_num_cols);
+            self.truncate_line(tree::DimensionLineIdx(line_idx), new_num_cols);
         }
 
         self.num_screen_rows = ScreenCoord(new_num_rows);
         self.num_screen_cols = ScreenCoord(new_num_cols);
         self.cursor_state
-            .clamp_position(self.num_screen_rows, self.num_screen_cols);
+            .clamp_position(self.num_rows(), self.num_cols());
 
         let new_num_rows = BufferCoord(new_num_rows);
         self.max_rows = self.max_rows.max(new_num_rows);
@@ -227,9 +248,8 @@ impl Grid {
 
         // before inserting txt, check if a wrap is pending
         if self.cursor_state.pending_wrap {
-            let (ScreenCoord(row), _) = self.cursor_state.position;
             // moving will clear the pending wrap flag
-            self.move_cursor(row + 1, 0);
+            self.move_cursor(self.cursor_state.position.line_idx + 1, 0);
         }
 
         let mut to_write = txt;
@@ -246,12 +266,14 @@ impl Grid {
                     to_write
                 };
 
-            let BufferCoord(edit_point) = self.screen_pos_to_char_idx(self.cursor_state.position);
-            let edit_len = prefix_to_write.chars().count();
-            self.text.remove(edit_point..edit_point + edit_len);
-            self.text.insert(edit_point, prefix_to_write);
+            self.text.replace_str(
+                self.cursor_state.position,
+                prefix_to_write,
+                self.cursor_state.sgr_state,
+            );
             to_write = &to_write[prefix_to_write.len()..];
 
+            let edit_len = prefix_to_write.chars().count();
             if to_write.is_empty() && cur_col + edit_len == self.num_cols() {
                 self.move_cursor_relative(0, edit_len as isize - 1);
                 self.cursor_state.pending_wrap = true;
@@ -271,73 +293,87 @@ impl Grid {
         let query_range =
             resolve_range(query_range, 0..self.total_rows()).expect("query_range is out of bounds");
 
-        // TODO: actual SgrState
-        let fake = Box::leak(Box::new(SgrState::default()));
-
         self.text
-            .lines_at(query_range.start)
-            .take(query_range.len())
-            .map(|display_slice: ropey::RopeSlice<'a>| {
-                let mut padded_text = display_slice.to_string();
-                // pop off the newline
-                padded_text.pop();
+            .iter_lines(
+                tree::DimensionLineIdx(query_range.start)..tree::DimensionLineIdx(query_range.end),
+            )
+            .map(
+                |display_slice: tree::TreeSlice<'_, tree::DimensionLineIdx>| {
+                    let mut padded_text: String = display_slice.to_string();
+                    // pop off the newline
+                    padded_text.pop();
 
-                let byte_range = 0..padded_text.len();
-                DisplayLine {
-                    padded_text,
-                    format_attributes: vec![FormatAttribute {
-                        sgr_state: fake,
-                        byte_range,
-                    }],
-                }
-            })
+                    let mut format_attributes = vec![];
+                    let mut cur = None;
+                    for (sgr_state, ch) in display_slice.sgr().zip(padded_text.chars()) {
+                        let state = cur.get_or_insert_with(|| FormatAttribute {
+                            sgr_state,
+                            byte_range: 0..0,
+                        });
+                        if state.sgr_state == sgr_state {
+                            state.byte_range.end += ch.len_utf8();
+                        } else {
+                            let x = std::mem::replace(
+                                state,
+                                FormatAttribute {
+                                    sgr_state,
+                                    byte_range: state.byte_range.end
+                                        ..state.byte_range.end + ch.len_utf8(),
+                                },
+                            );
+                            format_attributes.push(x);
+                        }
+                    }
+
+                    DisplayLine {
+                        padded_text,
+                        format_attributes,
+                    }
+                },
+            )
     }
 
     pub fn erase_from_cursor_to_eol(&mut self) {
-        let (row, _) = self.cursor_state.position;
-        self.erase(self.cursor_state.position, row + 1);
+        let next_line = self.cursor_state.position.line_idx + 1;
+        self.erase(
+            self.cursor_state.position,
+            tree::DimensionLineIdx(next_line),
+        );
     }
 
     pub fn erase_from_cursor_to_screen(&mut self) {
-        self.erase(self.cursor_state.position, self.num_screen_rows);
+        self.erase(
+            self.cursor_state.position,
+            tree::DimensionLineIdx(self.num_rows()),
+        );
     }
 
     pub fn move_lines_down(&mut self, start_line_no: usize, n: usize) {
         assert!(start_line_no < self.num_rows());
-        let char_idx = self.text.line_to_char(start_line_no);
-        Self::insert_n_blank_rows(
-            &mut self.text,
-            self.blank_line.as_ref(),
-            BufferCoord(char_idx),
-            n,
-        );
+        for _ in 0..n {
+            self.text.insert_str(
+                tree::DimensionLineIdx(start_line_no),
+                self.blank_line.as_ref(),
+                SgrState::default(),
+            );
+        }
         self.remove_screen_rows((self.num_screen_rows - n as isize)..self.num_screen_rows);
     }
 
-    fn rope_with_n_blank_lines(num_rows: usize, blank_line: &str) -> ropey::Rope {
+    fn rope_with_n_blank_lines(num_rows: usize, blank_line: &str) -> Tree {
         puffin::profile_function!();
-        let mut builder = ropey::RopeBuilder::new();
+        let mut tree = tree::Tree::new();
         for _ in 0..num_rows {
-            builder.append(blank_line);
+            tree.push_str(blank_line, SgrState::default());
         }
-        builder.finish()
+        tree
     }
 
-    fn append_n_blank_rows(text: &mut ropey::Rope, blank_line: &str, num_rows: usize) {
+    fn append_n_blank_rows(text: &mut Tree, blank_line: &str, num_rows: usize) {
         puffin::profile_function!();
-        let joined = String::from_iter(std::iter::repeat(blank_line).take(num_rows));
-        text.insert(text.len_chars(), &joined);
-    }
-
-    fn insert_n_blank_rows(
-        text: &mut ropey::Rope,
-        blank_line: &str,
-        start_char_idx: BufferCoord,
-        n: usize,
-    ) {
-        let right = text.split_off(start_char_idx.0);
-        text.append(Self::rope_with_n_blank_lines(n, blank_line));
-        text.append(right);
+        for _ in 0..num_rows {
+            text.push_str(blank_line, SgrState::default());
+        }
     }
 
     fn remove_screen_rows(
@@ -348,46 +384,29 @@ impl Grid {
         }: Range<ScreenCoord>,
     ) {
         puffin::profile_function!();
-        let start_idx = self.text.line_to_char(start);
-        let end_idx = self.text.line_to_char(end);
-        self.text.remove(start_idx..end_idx)
+        self.text
+            .remove_range(tree::DimensionLineIdx(start)..tree::DimensionLineIdx(end));
     }
 
-    fn erase(&mut self, from: (ScreenCoord, ScreenCoord), to_row: ScreenCoord) {
-        let (from_row, from_col) = from;
-        assert!(to_row >= from_row);
-
+    fn erase(&mut self, edit_point: tree::DimensionLineChar, to_row: tree::DimensionLineIdx) {
         // starting partial row
-        let BufferCoord(row_start) = self.screen_pos_to_char_idx(from);
-        let BufferCoord(row_end) = self.screen_pos_to_char_idx((from_row + 1, ScreenCoord(0)));
-        let row_end = row_end - 1; // \n
-        self.text.remove(row_start..row_end);
-        self.text.insert(
-            row_start,
-            &self.blank_line[..self.num_screen_cols - from_col],
-        );
+        let n = self.num_cols() - edit_point.char_idx;
+        self.text
+            .replace_str(edit_point, &self.blank_line[..n], SgrState::default());
 
         // remaining complete rows
-        self.remove_screen_rows(from_row + 1..to_row);
-        Self::append_n_blank_rows(
-            &mut self.text,
-            self.blank_line.as_ref(),
-            to_row.0 - from_row.0 - 1,
-        );
-    }
-
-    fn screen_pos_to_char_idx(
-        &self,
-        (ScreenCoord(row), ScreenCoord(col)): (ScreenCoord, ScreenCoord),
-    ) -> BufferCoord {
-        let line_idx = self.first_visible_line_no() + row;
-        let char_idx = self.text.line_to_char(line_idx);
-        BufferCoord(char_idx + col)
+        self.text
+            .remove_range(tree::DimensionLineIdx(edit_point.line_idx + 1)..to_row);
+        let n = to_row.0 - edit_point.line_idx - 1;
+        for _ in 0..n {
+            self.text
+                .push_str(self.blank_line.as_str(), SgrState::default());
+        }
     }
 
     /// ensures that line at given line_idx is `new_len` columns wide. It will either remove chars
     /// or insert blank chars at the end.
-    fn truncate_line(&mut self, BufferCoord(line_idx): BufferCoord, new_len: usize) {
+    fn truncate_line(&mut self, line_idx: tree::DimensionLineIdx, new_len: usize) {
         let Some(line) = self.text.get_line(line_idx) else {
             return;
         };
@@ -397,14 +416,27 @@ impl Grid {
             std::cmp::Ordering::Less => {
                 debug_assert!(self.blank_line.len() == new_len + 1);
 
-                let edit_point = self.text.line_to_char(line_idx) + line.len_chars() - 1;
+                let edit_point = tree::DimensionLineChar {
+                    line_idx: line_idx.0,
+                    char_idx: line.len_chars(),
+                    soft_wrap: None,
+                };
                 let blanks = &self.blank_line[..diff.abs() as usize];
-                self.text.insert(edit_point, blanks);
+                self.text
+                    .insert_str(edit_point, blanks, SgrState::default());
             }
             std::cmp::Ordering::Greater => {
-                let remove_start = self.text.line_to_char(line_idx) + new_len;
-                let remove_end = remove_start + diff as usize;
-                self.text.remove(remove_start..remove_end);
+                let remove_start = tree::DimensionLineChar {
+                    line_idx: line_idx.0,
+                    char_idx: new_len,
+                    soft_wrap: None,
+                };
+                let remove_end = tree::DimensionLineChar {
+                    line_idx: line_idx.0,
+                    char_idx: line.len_chars(),
+                    soft_wrap: None,
+                };
+                self.text.remove_range(remove_start..remove_end);
             }
         }
     }
@@ -453,13 +485,17 @@ fn resolve_range<R: RangeBounds<usize>>(
 
 #[derive(Debug, Default, Copy, Clone)]
 struct CursorState {
-    position: (ScreenCoord, ScreenCoord), // in the range (0..num_rows, 0..num_cols)
+    position: tree::DimensionLineChar, // in the range (0..num_rows, 0..num_cols)
     sgr_state: SgrState,
     pending_wrap: bool,
 }
 impl CursorState {
-    fn clamp_position(&mut self, new_num_rows: ScreenCoord, new_num_cols: ScreenCoord) {
-        let (r, c) = &mut self.position;
+    fn clamp_position(&mut self, new_num_rows: usize, new_num_cols: usize) {
+        let tree::DimensionLineChar {
+            line_idx: r,
+            char_idx: c,
+            ..
+        } = &mut self.position;
         *r = std::cmp::min(*r, new_num_rows - 1);
         *c = std::cmp::min(*c, new_num_cols - 1);
     }
