@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use std::{num::NonZeroUsize, ops::RangeBounds, sync::Arc};
+use std::{
+    num::NonZeroUsize,
+    ops::{Range, RangeBounds},
+    sync::Arc,
+};
 
 use arrayvec::{ArrayString, ArrayVec};
 
@@ -60,7 +64,8 @@ impl Tree {
         }
     }
 
-    pub fn replace_str(&mut self, mut char_idx: usize, mut new_text: &str, sgr: SgrState) {
+    pub fn replace_str<D: Dimension>(&mut self, mut target: D, mut new_text: &str, sgr: SgrState) {
+        let mut char_idx = self.resolve_dimension(target).expect("invalid target");
         while !new_text.is_empty() {
             self.find_string_segment_mut(
                 DimensionCharIdx(char_idx),
@@ -77,7 +82,8 @@ impl Tree {
         }
     }
 
-    pub fn insert_str(&mut self, mut char_idx: usize, mut new_text: &str, sgr: SgrState) {
+    pub fn insert_str<D: Dimension>(&mut self, mut target: D, mut new_text: &str, sgr: SgrState) {
+        let mut char_idx = self.resolve_dimension(target).expect("invalid target");
         while !new_text.is_empty() {
             self.find_string_segment_mut(
                 DimensionCharIdx(char_idx),
@@ -92,15 +98,18 @@ impl Tree {
         }
     }
 
-    pub fn remove_range<R: RangeBounds<usize>>(&mut self, char_range: R) {
-        let mut char_range =
-            resolve_range(char_range, 0..self.len_chars()).expect("invalid range supplied");
+    pub fn remove_range<R: RangeBounds<D>, D: Dimension>(&mut self, target_range: R) {
+        let mut char_range = self
+            .resolve_dimensions(target_range)
+            .expect("invalid range supplied");
+        let n = char_range.len();
+        // let mut char_range =
+        //     resolve_range(char_range, 0..self.len_chars()).expect("invalid range supplied");
         while !char_range.is_empty() {
             self.find_string_segment_mut(
                 DimensionCharIdx(char_range.start),
                 |segment: &mut GridString, segment_char_idx: usize| -> Option<GridString> {
-                    let end_char_idx =
-                        (segment_char_idx + char_range.len()).min(segment.len_chars());
+                    let end_char_idx = (segment_char_idx + n).min(segment.len_chars());
                     let remove_range = segment_char_idx..end_char_idx;
                     segment
                         .remove_char_range(remove_range.clone())
@@ -118,6 +127,13 @@ impl Tree {
 
     fn iter_nodes(&self) -> iter::NodeIter {
         iter::NodeIter::new(&self.root)
+    }
+
+    pub fn iter_lines<'a, R: RangeBounds<D>, D: Dimension>(
+        &'a self,
+        target_range: R,
+    ) -> iter::LineIter<'a> {
+        todo!()
     }
 
     fn find_string_segment_mut<'a, D: Dimension>(
@@ -141,8 +157,44 @@ impl Tree {
         tree
     }
 
-    fn dimension_to_char_idx<D: Dimension>(&self, seek_target: D) -> Option<usize> {
+    fn resolve_dimension<D: Dimension>(&self, seek_target: D) -> Option<usize> {
         self.root.dimension_to_char_idx(seek_target)
+    }
+
+    /// resolves a range of Dimensions to corresponding char range.
+    fn resolve_dimensions<R: RangeBounds<D>, D: Dimension>(
+        &self,
+        target_range: R,
+    ) -> anyhow::Result<Range<usize>> {
+        todo!()
+    }
+
+    pub fn get_line(&self, line_idx: DimensionLineIdx) -> Option<TreeSlice<DimensionLineIdx>> {
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+pub struct TreeSlice<'a, D: Dimension> {
+    tree: &'a Tree,
+    summary: TextSummary,
+    target_range: Range<D>,
+}
+
+impl<'a, D: Dimension> TreeSlice<'a, D> {
+    pub fn len_chars(&self) -> usize {
+        self.summary.chars
+    }
+
+    pub fn sgr<'b>(&'b self) -> impl ExactSizeIterator<Item = SgrState> + 'b {
+        todo!();
+        std::iter::empty()
+    }
+}
+
+impl<'a, D: Dimension> std::fmt::Display for TreeSlice<'a, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
     }
 }
 
@@ -151,7 +203,26 @@ mod iter {
 
     use crate::grid_string::GridString;
 
-    use super::Node;
+    use super::{DimensionLineIdx, Node, TreeSlice};
+
+    #[derive(Debug)]
+    pub struct LineIter<'a> {
+        root: Option<&'a Node>,
+    }
+
+    impl<'a> Iterator for LineIter<'a> {
+        type Item = TreeSlice<'a, DimensionLineIdx>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            todo!()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            todo!()
+        }
+    }
+
+    impl<'a> ExactSizeIterator for LineIter<'a> {}
 
     #[derive(Debug)]
     pub struct NodeIter<'a> {
@@ -518,21 +589,17 @@ impl Node {
         let mut agg_summary = TextSummary::default();
         for (child_idx, child_summary) in self.child_summaries().into_iter().enumerate() {
             let next_sum = running_sum + D::from(child_summary);
-            if next_sum > seek_target {
-                match self {
-                    Node::Leaf {
-                        node_summary,
-                        children,
-                        child_summaries,
-                    } => {
-                        return Some(
-                            agg_summary.chars
-                                + seek_target.to_char_idx(children[child_idx].as_str()),
-                        );
+            if next_sum >= seek_target {
+                let child_seek_target = seek_target - running_sum;
+                return match self {
+                    Node::Leaf { children, .. } => {
+                        let child_str = children[child_idx].as_str();
+                        let child_char_idx = child_seek_target.to_char_idx(child_str);
+                        Some(agg_summary.chars + child_char_idx)
                     }
                     Node::Internal { children, .. } => {
                         let child_char_idx =
-                            children[child_idx].dimension_to_char_idx(seek_target - running_sum);
+                            children[child_idx].dimension_to_char_idx(child_seek_target);
                         child_char_idx.map(|child_chars| agg_summary.chars + child_chars)
                     }
                 };
@@ -722,7 +789,7 @@ pub trait Dimension:
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-struct DimensionCharIdx(usize);
+pub struct DimensionCharIdx(pub usize);
 
 impl Dimension for DimensionCharIdx {
     fn to_char_idx(&self, _: &str) -> usize {
@@ -760,10 +827,9 @@ impl Dimension for DimensionLineIdx {
         }
         let mut char_idx = 0;
         for (i, line) in s.split_inclusive('\n').enumerate() {
-            if i == line_idx {
+            char_idx += line.chars().count();
+            if i + 1 == line_idx {
                 return char_idx;
-            } else {
-                char_idx += line.chars().count();
             }
         }
         panic!("cannot find line with idx: {line_idx} in input: {s:?}")
@@ -791,48 +857,48 @@ impl std::ops::Sub for DimensionLineIdx {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DimensionLineChar {
+pub struct DimensionCursorPosition {
     pub line_idx: usize,
-    pub char_idx: usize,
+    pub trailing_char_idx: usize,
     pub soft_wrap: Option<NonZeroUsize>,
 }
-impl Dimension for DimensionLineChar {
+impl Dimension for DimensionCursorPosition {
     fn to_char_idx(&self, s: &str) -> usize {
         assert!(self.soft_wrap.is_none(), "soft wrapping is not implemented");
         let line_start_idx = DimensionLineIdx(self.line_idx).to_char_idx(s);
-        line_start_idx + self.char_idx
+        line_start_idx + self.trailing_char_idx
     }
 }
 
-impl<'a> From<&'a TextSummary> for DimensionLineChar {
+impl<'a> From<&'a TextSummary> for DimensionCursorPosition {
     fn from(value: &'a TextSummary) -> Self {
         Self {
             line_idx: value.lines,
-            char_idx: 0,
+            trailing_char_idx: value.trailing_line_chars,
             soft_wrap: None,
         }
     }
 }
-impl std::ops::Add for DimensionLineChar {
+impl std::ops::Add for DimensionCursorPosition {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
         assert!(self.soft_wrap == rhs.soft_wrap);
         Self {
             line_idx: self.line_idx + rhs.line_idx,
-            char_idx: self.char_idx + rhs.char_idx,
+            trailing_char_idx: rhs.trailing_char_idx,
             soft_wrap: self.soft_wrap,
         }
     }
 }
-impl std::ops::Sub for DimensionLineChar {
+impl std::ops::Sub for DimensionCursorPosition {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
         assert!(self.soft_wrap == rhs.soft_wrap);
         Self {
             line_idx: self.line_idx - rhs.line_idx,
-            char_idx: self.char_idx - rhs.char_idx,
+            trailing_char_idx: self.trailing_char_idx,
             soft_wrap: self.soft_wrap,
         }
     }
@@ -844,11 +910,12 @@ fn summarize<'a, T: IntoIterator<Item = &'a TextSummary>>(summaries: T) -> TextS
         .fold(TextSummary::default(), |agg, s| agg + s)
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TextSummary {
     chars: usize,
     bytes: usize,
     lines: usize,
+    trailing_line_chars: usize,
 }
 impl std::ops::Add<&TextSummary> for TextSummary {
     type Output = TextSummary;
@@ -858,6 +925,7 @@ impl std::ops::Add<&TextSummary> for TextSummary {
             chars: self.chars + rhs.chars,
             bytes: self.bytes + rhs.bytes,
             lines: self.lines + rhs.lines,
+            trailing_line_chars: rhs.trailing_line_chars,
         }
     }
 }
@@ -872,6 +940,13 @@ impl<'a> From<&'a GridString> for TextSummary {
             chars: value.len_chars(),
             bytes: value.len_bytes(),
             lines: value.as_str().matches('\n').count(),
+            trailing_line_chars: value
+                .as_str()
+                .rsplit('\n')
+                .next()
+                .map_or(value.as_str().chars().count(), |partial_line| {
+                    partial_line.chars().count()
+                }),
         }
     }
 }
@@ -882,6 +957,29 @@ mod tests {
 
     use super::*;
     const LARGE_TEXT: &'static str = include_str!("tree.rs");
+
+    #[test]
+    fn test_text_summary_1() {
+        let summary_1 = TextSummary::from(&GridString::from_str("abcd").unwrap());
+        assert_eq!(summary_1.trailing_line_chars, 4);
+
+        let summary_2 = TextSummary::from(&GridString::from_str("\nabcd").unwrap());
+        assert_eq!(summary_2.trailing_line_chars, 4);
+
+        let summary_3 = TextSummary::from(&GridString::from_str("a\nb\ncd").unwrap());
+        assert_eq!(summary_3.trailing_line_chars, 2);
+
+        let summary_4 = TextSummary::from(&GridString::from_str("abcd\n").unwrap());
+        assert_eq!(summary_4.trailing_line_chars, 0);
+
+        assert_eq!(
+            [summary_1, summary_2, summary_3, summary_4]
+                .into_iter()
+                .reduce(|a, b| a + &b)
+                .map(|sum| sum.trailing_line_chars),
+            Some(0)
+        );
+    }
 
     #[test]
     fn test_tree_1() {
@@ -902,7 +1000,7 @@ mod tests {
         assert_eq!(tree.len_chars(), 14);
         assert_eq!(tree.len_lines(), 1);
 
-        tree.replace_str(6, "back1!", bold);
+        tree.replace_str(DimensionCharIdx(6), "back1!", bold);
         assert_eq!(tree.to_string().as_str(), "hello back1!!\n");
         assert_eq!(tree.len_bytes(), 14);
         assert_eq!(tree.len_chars(), 14);
@@ -930,7 +1028,7 @@ mod tests {
         let mut tree = Tree::new();
         let input = &LARGE_TEXT[..];
         for line in input.split_inclusive('\n').rev() {
-            tree.insert_str(0, line, SgrState::default());
+            tree.insert_str(DimensionCharIdx(0), line, SgrState::default());
         }
 
         assert_eq!(tree.to_string().as_str(), input);
@@ -948,7 +1046,7 @@ mod tests {
     fn test_insert_1() {
         let mut tree = Tree::new();
         tree.push_str("Line 1\nLine 2\nLine 3\n", SgrState::default());
-        tree.insert_str(14, "Line 2.5\n", SgrState::default());
+        tree.insert_str(DimensionCharIdx(14), "Line 2.5\n", SgrState::default());
         assert_eq!(
             tree.to_string().as_str(),
             "Line 1\nLine 2\nLine 2.5\nLine 3\n"
@@ -960,7 +1058,7 @@ mod tests {
     fn test_remove_range() {
         let mut tree = Tree::new();
         tree.push_str("Line 1\nLine 2\nLine 3\n", SgrState::default());
-        tree.remove_range(7..14);
+        tree.remove_range(DimensionCharIdx(7)..DimensionCharIdx(14));
         assert_eq!(tree.to_string().as_str(), "Line 1\nLine 3\n");
         assert_eq!(tree.len_lines(), 2)
     }
@@ -988,7 +1086,32 @@ mod tests {
 
     #[test]
     fn test_dim_line_idx() {
-        let tree = Tree::from_str("Line 1\nLine 2\nLine 3\n");
-        assert_eq!(tree.dimension_to_char_idx(DimensionLineIdx(2)), Some(14));
+        let tree = Tree::from_str("Line 1\nLine 2\n\u{0d30}\u{0d4b}\nLine 3\n");
+        assert_eq!(tree.resolve_dimension(DimensionLineIdx(0)), Some(0));
+        assert_eq!(tree.resolve_dimension(DimensionLineIdx(1)), Some(7));
+        assert_eq!(tree.resolve_dimension(DimensionLineIdx(2)), Some(14));
+        assert_eq!(tree.resolve_dimension(DimensionLineIdx(3)), Some(17));
+        assert_eq!(tree.resolve_dimension(DimensionLineIdx(4)), Some(24));
+        assert_eq!(tree.resolve_dimension(DimensionLineIdx(5)), None);
+    }
+
+    #[test]
+    fn test_dim_line_char() {
+        let mut tree = Tree::new();
+        const N: usize = 100;
+        for i in 0..N {
+            tree.push_str(format!("Line {:03}\n", i).as_str(), SgrState::default());
+        }
+        let line_bytes_len = "Line 000\n".len();
+        assert_eq!(tree.len_bytes(), N * line_bytes_len);
+
+        assert_eq!(
+            tree.resolve_dimension(DimensionCursorPosition {
+                line_idx: 42,
+                trailing_char_idx: 6,
+                soft_wrap: None
+            }),
+            Some(42 * line_bytes_len + 6)
+        )
     }
 }

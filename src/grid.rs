@@ -90,9 +90,9 @@ impl Grid {
     }
 
     pub fn cursor_position(&self) -> (usize, usize) {
-        let tree::DimensionLineChar {
+        let tree::DimensionCursorPosition {
             line_idx: row,
-            char_idx: col,
+            trailing_char_idx: col,
             ..
         } = self.cursor_state.position;
         (row, col)
@@ -138,9 +138,9 @@ impl Grid {
     }
 
     pub fn move_cursor_relative(&mut self, dr: isize, dc: isize) {
-        let tree::DimensionLineChar {
+        let tree::DimensionCursorPosition {
             line_idx: row,
-            char_idx: col,
+            trailing_char_idx: col,
             ..
         } = self.cursor_state.position;
         let mut new_row = (row as isize + dr) as usize;
@@ -158,7 +158,7 @@ impl Grid {
         // new position is within bounds
         if new_row < self.num_rows() {
             self.cursor_state.position.line_idx = new_row;
-            self.cursor_state.position.char_idx = new_col;
+            self.cursor_state.position.trailing_char_idx = new_col;
             return;
         }
 
@@ -192,7 +192,7 @@ impl Grid {
         self.num_buffer_rows += num_new_rows;
 
         self.cursor_state.position.line_idx = self.num_rows() - 1;
-        self.cursor_state.position.char_idx = new_col;
+        self.cursor_state.position.trailing_char_idx = new_col;
     }
 
     pub fn cursor_format_mut(&mut self) -> &mut SgrState {
@@ -388,9 +388,9 @@ impl Grid {
             .remove_range(tree::DimensionLineIdx(start)..tree::DimensionLineIdx(end));
     }
 
-    fn erase(&mut self, edit_point: tree::DimensionLineChar, to_row: tree::DimensionLineIdx) {
+    fn erase(&mut self, edit_point: tree::DimensionCursorPosition, to_row: tree::DimensionLineIdx) {
         // starting partial row
-        let n = self.num_cols() - edit_point.char_idx;
+        let n = self.num_cols() - edit_point.trailing_char_idx;
         self.text
             .replace_str(edit_point, &self.blank_line[..n], SgrState::default());
 
@@ -416,9 +416,9 @@ impl Grid {
             std::cmp::Ordering::Less => {
                 debug_assert!(self.blank_line.len() == new_len + 1);
 
-                let edit_point = tree::DimensionLineChar {
+                let edit_point = tree::DimensionCursorPosition {
                     line_idx: line_idx.0,
-                    char_idx: line.len_chars(),
+                    trailing_char_idx: line.len_chars(),
                     soft_wrap: None,
                 };
                 let blanks = &self.blank_line[..diff.abs() as usize];
@@ -426,14 +426,14 @@ impl Grid {
                     .insert_str(edit_point, blanks, SgrState::default());
             }
             std::cmp::Ordering::Greater => {
-                let remove_start = tree::DimensionLineChar {
+                let remove_start = tree::DimensionCursorPosition {
                     line_idx: line_idx.0,
-                    char_idx: new_len,
+                    trailing_char_idx: new_len,
                     soft_wrap: None,
                 };
-                let remove_end = tree::DimensionLineChar {
+                let remove_end = tree::DimensionCursorPosition {
                     line_idx: line_idx.0,
-                    char_idx: line.len_chars(),
+                    trailing_char_idx: line.len_chars(),
                     soft_wrap: None,
                 };
                 self.text.remove_range(remove_start..remove_end);
@@ -485,15 +485,15 @@ fn resolve_range<R: RangeBounds<usize>>(
 
 #[derive(Debug, Default, Copy, Clone)]
 struct CursorState {
-    position: tree::DimensionLineChar, // in the range (0..num_rows, 0..num_cols)
+    position: tree::DimensionCursorPosition, // in the range (0..num_rows, 0..num_cols)
     sgr_state: SgrState,
     pending_wrap: bool,
 }
 impl CursorState {
     fn clamp_position(&mut self, new_num_rows: usize, new_num_cols: usize) {
-        let tree::DimensionLineChar {
+        let tree::DimensionCursorPosition {
             line_idx: r,
-            char_idx: c,
+            trailing_char_idx: c,
             ..
         } = &mut self.position;
         *r = std::cmp::min(*r, new_num_rows - 1);

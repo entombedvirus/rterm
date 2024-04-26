@@ -333,7 +333,7 @@ impl TerminalEmulator {
                 .map(|attrs| egui::text::LayoutSection {
                     leading_space: 0.0,
                     byte_range: attrs.byte_range,
-                    format: build_text_format(attrs.sgr_state),
+                    format: build_text_format(&attrs.sgr_state),
                 })
                 .collect();
 
