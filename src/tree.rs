@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::Context;
 use arrayvec::{ArrayString, ArrayVec};
 
 use crate::{
@@ -166,7 +167,23 @@ impl Tree {
         &self,
         target_range: R,
     ) -> anyhow::Result<Range<usize>> {
-        todo!()
+        let start = match target_range.start_bound().map(|d| {
+            self.resolve_dimension(d.clone())
+                .context("invalid start bound: could not resolve to char_idx")
+        }) {
+            std::ops::Bound::Included(char_idx) => char_idx?,
+            std::ops::Bound::Excluded(char_idx) => char_idx? + 1,
+            std::ops::Bound::Unbounded => 0,
+        };
+        let end = match target_range.end_bound().map(|d| {
+            self.resolve_dimension(d.clone())
+                .context("invalid end bound: could not resolve to char_idx")
+        }) {
+            std::ops::Bound::Included(char_idx) => char_idx?,
+            std::ops::Bound::Excluded(char_idx) => char_idx? + 1,
+            std::ops::Bound::Unbounded => self.len_chars(),
+        };
+        Ok(start..end)
     }
 
     pub fn get_line(&self, line_idx: DimensionLineIdx) -> Option<TreeSlice<DimensionLineIdx>> {
