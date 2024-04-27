@@ -90,7 +90,7 @@ impl Grid {
     }
 
     pub fn cursor_position(&self) -> (usize, usize) {
-        let tree::DimensionCursorPosition {
+        let tree::SeekCursorPosition {
             line_idx: row,
             trailing_char_idx: col,
             ..
@@ -122,7 +122,7 @@ impl Grid {
 
     pub fn clear_screen(&mut self) {
         puffin::profile_function!();
-        let line_idx = tree::DimensionLineIdx(self.first_visible_line_no());
+        let line_idx = tree::SeekLineIdx(self.first_visible_line_no());
         self.text.remove_range(line_idx..);
         for _ in 0..self.num_rows() {
             self.text
@@ -138,7 +138,7 @@ impl Grid {
     }
 
     pub fn move_cursor_relative(&mut self, dr: isize, dc: isize) {
-        let tree::DimensionCursorPosition {
+        let tree::SeekCursorPosition {
             line_idx: row,
             trailing_char_idx: col,
             ..
@@ -289,70 +289,63 @@ impl Grid {
             resolve_range(query_range, 0..self.total_rows()).expect("query_range is out of bounds");
 
         self.text
-            .iter_lines(
-                tree::DimensionLineIdx(query_range.start)..tree::DimensionLineIdx(query_range.end),
-            )
-            .map(
-                |display_slice: tree::TreeSlice<'_, tree::DimensionLineIdx>| {
-                    let mut padded_text: String = display_slice.to_string();
-                    // pop off the newline
-                    padded_text.pop();
+            .iter_lines(tree::SeekLineIdx(query_range.start)..tree::SeekLineIdx(query_range.end))
+            .map(|display_slice: tree::TreeSlice<'_, tree::SeekLineIdx>| {
+                let mut padded_text: String = display_slice.to_string();
+                // pop off the newline
+                padded_text.pop();
 
-                    let mut format_attributes = vec![];
-                    let mut cur = None;
-                    for (sgr_state, ch) in display_slice.sgr().zip(padded_text.chars()) {
-                        let state = cur.get_or_insert_with(|| FormatAttribute {
-                            sgr_state,
-                            byte_range: 0..0,
+                let mut format_attributes = vec![];
+                let mut cur = None;
+                for (sgr_state, ch) in display_slice.sgr().zip(padded_text.chars()) {
+                    let state = cur.get_or_insert_with(|| FormatAttribute {
+                        sgr_state,
+                        byte_range: 0..0,
+                    });
+                    if state.sgr_state == sgr_state {
+                        state.byte_range.end += ch.len_utf8();
+                    } else {
+                        let x = std::mem::replace(
+                            state,
+                            FormatAttribute {
+                                sgr_state,
+                                byte_range: state.byte_range.end
+                                    ..state.byte_range.end + ch.len_utf8(),
+                            },
+                        );
+                        format_attributes.push(x);
+                    }
+                }
+
+                // add padding so that the line is at least num_cols wide
+                {
+                    let n = padded_text.chars().count();
+                    if let Some(to_add) = self.num_cols().checked_sub(n) {
+                        let blanks = &self.blank_line[..to_add];
+                        format_attributes.push(FormatAttribute {
+                            sgr_state: SgrState::default(),
+                            byte_range: padded_text.len()..padded_text.len() + blanks.len(),
                         });
-                        if state.sgr_state == sgr_state {
-                            state.byte_range.end += ch.len_utf8();
-                        } else {
-                            let x = std::mem::replace(
-                                state,
-                                FormatAttribute {
-                                    sgr_state,
-                                    byte_range: state.byte_range.end
-                                        ..state.byte_range.end + ch.len_utf8(),
-                                },
-                            );
-                            format_attributes.push(x);
-                        }
+                        padded_text.push_str(blanks);
                     }
+                }
 
-                    // add padding so that the line is at least num_cols wide
-                    {
-                        let n = padded_text.chars().count();
-                        if let Some(to_add) = self.num_cols().checked_sub(n) {
-                            let blanks = &self.blank_line[..to_add];
-                            format_attributes.push(FormatAttribute {
-                                sgr_state: SgrState::default(),
-                                byte_range: padded_text.len()..padded_text.len() + blanks.len(),
-                            });
-                            padded_text.push_str(blanks);
-                        }
-                    }
-
-                    DisplayLine {
-                        padded_text,
-                        format_attributes,
-                    }
-                },
-            )
+                DisplayLine {
+                    padded_text,
+                    format_attributes,
+                }
+            })
     }
 
     pub fn erase_from_cursor_to_eol(&mut self) {
         let next_line = self.cursor_state.position.line_idx + 1;
-        self.erase(
-            self.cursor_state.position,
-            tree::DimensionLineIdx(next_line),
-        );
+        self.erase(self.cursor_state.position, tree::SeekLineIdx(next_line));
     }
 
     pub fn erase_from_cursor_to_screen(&mut self) {
         self.erase(
             self.cursor_state.position,
-            tree::DimensionLineIdx(self.num_rows()),
+            tree::SeekLineIdx(self.num_rows()),
         );
     }
 
@@ -360,7 +353,7 @@ impl Grid {
         assert!(start_line_no < self.num_rows());
         for _ in 0..n {
             self.text.insert_str(
-                tree::DimensionLineIdx(start_line_no),
+                tree::SeekLineIdx(start_line_no),
                 self.blank_line.as_ref(),
                 SgrState::default(),
             );
@@ -386,10 +379,10 @@ impl Grid {
     ) {
         puffin::profile_function!();
         self.text
-            .remove_range(tree::DimensionLineIdx(start)..tree::DimensionLineIdx(end));
+            .remove_range(tree::SeekLineIdx(start)..tree::SeekLineIdx(end));
     }
 
-    fn erase(&mut self, edit_point: tree::DimensionCursorPosition, to_row: tree::DimensionLineIdx) {
+    fn erase(&mut self, edit_point: tree::SeekCursorPosition, to_row: tree::SeekLineIdx) {
         // starting partial row
         let n = self.num_cols() - edit_point.trailing_char_idx;
         self.text
@@ -397,7 +390,7 @@ impl Grid {
 
         // remaining complete rows
         self.text
-            .remove_range(tree::DimensionLineIdx(edit_point.line_idx + 1)..to_row);
+            .remove_range(tree::SeekLineIdx(edit_point.line_idx + 1)..to_row);
         let n = to_row.0 - edit_point.line_idx - 1;
         for _ in 0..n {
             self.text
@@ -449,13 +442,13 @@ fn resolve_range<R: RangeBounds<usize>>(
 
 #[derive(Debug, Default, Copy, Clone)]
 struct CursorState {
-    position: tree::DimensionCursorPosition, // in the range (0..num_rows, 0..num_cols)
+    position: tree::SeekCursorPosition, // in the range (0..num_rows, 0..num_cols)
     sgr_state: SgrState,
     pending_wrap: bool,
 }
 impl CursorState {
     fn clamp_position(&mut self, new_num_rows: usize, new_num_cols: usize) {
-        let tree::DimensionCursorPosition {
+        let tree::SeekCursorPosition {
             line_idx: r,
             trailing_char_idx: c,
             ..

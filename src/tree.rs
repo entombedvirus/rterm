@@ -1,16 +1,13 @@
 #![allow(dead_code)]
 
-use std::{
-    num::NonZeroUsize,
-    ops::{Range, RangeBounds},
-    sync::Arc,
-};
+use std::ops::{Not as _, Range, RangeBounds};
+use std::sync::Arc;
 
 use anyhow::Context;
 use arrayvec::{ArrayString, ArrayVec};
 
 use crate::{
-    grid_string::{resolve_range, split_str_at_utf8_boundary, GridString},
+    grid_string::{split_str_at_utf8_boundary, GridString},
     terminal_emulator::SgrState,
 };
 
@@ -55,7 +52,7 @@ impl Tree {
         // merge
         while !new_text.is_empty() {
             self.find_string_segment_mut(
-                DimensionCharIdx(self.len_chars()),
+                SeekCharIdx(self.len_chars()),
                 |segment: &mut GridString, _segment_char_idx: usize| -> Option<GridString> {
                     let (overflow, _, rem) = segment.push_str(new_text, sgr);
                     new_text = rem;
@@ -65,11 +62,11 @@ impl Tree {
         }
     }
 
-    pub fn replace_str<D: Dimension>(&mut self, mut target: D, mut new_text: &str, sgr: SgrState) {
+    pub fn replace_str<D: SeekTarget>(&mut self, target: D, mut new_text: &str, sgr: SgrState) {
         let mut char_idx = self.resolve_dimension(target).expect("invalid target");
         while !new_text.is_empty() {
             self.find_string_segment_mut(
-                DimensionCharIdx(char_idx),
+                SeekCharIdx(char_idx),
                 |segment: &mut GridString, segment_char_idx: usize| -> Option<GridString> {
                     let (chars_written, rem) = segment.replace_str(segment_char_idx, new_text, sgr);
                     if chars_written == 0 {
@@ -83,11 +80,11 @@ impl Tree {
         }
     }
 
-    pub fn insert_str<D: Dimension>(&mut self, mut target: D, mut new_text: &str, sgr: SgrState) {
+    pub fn insert_str<D: SeekTarget>(&mut self, target: D, mut new_text: &str, sgr: SgrState) {
         let mut char_idx = self.resolve_dimension(target).expect("invalid target");
         while !new_text.is_empty() {
             self.find_string_segment_mut(
-                DimensionCharIdx(char_idx),
+                SeekCharIdx(char_idx),
                 |segment: &mut GridString, segment_char_idx: usize| -> Option<GridString> {
                     let (overflow, chars_written, rem) =
                         segment.insert_str(segment_char_idx, new_text, sgr);
@@ -99,7 +96,7 @@ impl Tree {
         }
     }
 
-    pub fn remove_range<R: RangeBounds<D>, D: Dimension>(&mut self, target_range: R) {
+    pub fn remove_range<R: RangeBounds<D>, D: SeekTarget>(&mut self, target_range: R) {
         let mut char_range = self
             .resolve_dimensions(target_range)
             .expect("invalid range supplied");
@@ -108,7 +105,7 @@ impl Tree {
         //     resolve_range(char_range, 0..self.len_chars()).expect("invalid range supplied");
         while !char_range.is_empty() {
             self.find_string_segment_mut(
-                DimensionCharIdx(char_range.start),
+                SeekCharIdx(char_range.start),
                 |segment: &mut GridString, segment_char_idx: usize| -> Option<GridString> {
                     let end_char_idx = (segment_char_idx + n).min(segment.len_chars());
                     let remove_range = segment_char_idx..end_char_idx;
@@ -130,14 +127,14 @@ impl Tree {
         iter::NodeIter::new(&self.root)
     }
 
-    pub fn iter_lines<'a, R: RangeBounds<D>, D: Dimension>(
+    pub fn iter_lines<'a, R: RangeBounds<D>, D: SeekTarget>(
         &'a self,
-        target_range: R,
+        _target_range: R,
     ) -> iter::LineIter<'a> {
         todo!()
     }
 
-    fn find_string_segment_mut<'a, D: Dimension>(
+    fn find_string_segment_mut<'a, D: SeekTarget>(
         &mut self,
         seek_target: D,
         edit_op: impl FnMut(&mut GridString, usize) -> Option<GridString>,
@@ -158,12 +155,12 @@ impl Tree {
         tree
     }
 
-    fn resolve_dimension<D: Dimension>(&self, seek_target: D) -> Option<usize> {
+    fn resolve_dimension<D: SeekTarget>(&self, seek_target: D) -> Option<usize> {
         self.root.dimension_to_char_idx(seek_target)
     }
 
     /// resolves a range of Dimensions to corresponding char range.
-    fn resolve_dimensions<R: RangeBounds<D>, D: Dimension>(
+    fn resolve_dimensions<R: RangeBounds<D>, D: SeekTarget>(
         &self,
         target_range: R,
     ) -> anyhow::Result<Range<usize>> {
@@ -188,13 +185,13 @@ impl Tree {
 }
 
 #[derive(Debug)]
-pub struct TreeSlice<'a, D: Dimension> {
+pub struct TreeSlice<'a, D: SeekTarget> {
     tree: &'a Tree,
     summary: TextSummary,
     target_range: Range<D>,
 }
 
-impl<'a, D: Dimension> TreeSlice<'a, D> {
+impl<'a, D: SeekTarget> TreeSlice<'a, D> {
     pub fn len_chars(&self) -> usize {
         self.summary.chars
     }
@@ -205,8 +202,8 @@ impl<'a, D: Dimension> TreeSlice<'a, D> {
     }
 }
 
-impl<'a, D: Dimension> std::fmt::Display for TreeSlice<'a, D> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<'a, D: SeekTarget> std::fmt::Display for TreeSlice<'a, D> {
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         todo!()
     }
 }
@@ -216,7 +213,7 @@ mod iter {
 
     use crate::grid_string::GridString;
 
-    use super::{DimensionLineIdx, Node, TreeSlice};
+    use super::{Node, SeekLineIdx, TreeSlice};
 
     #[derive(Debug)]
     pub struct LineIter<'a> {
@@ -224,7 +221,7 @@ mod iter {
     }
 
     impl<'a> Iterator for LineIter<'a> {
-        type Item = TreeSlice<'a, DimensionLineIdx>;
+        type Item = TreeSlice<'a, SeekLineIdx>;
 
         fn next(&mut self) -> Option<Self::Item> {
             todo!()
@@ -448,14 +445,13 @@ impl Node {
     /// scans this node's children from left to right while the running sum of dimension is less
     /// than the passed in `seek_target`. Returns the index of the child that will cause the
     /// running sum to exceed the target and the remaining seek_target.
-    fn child_position<D: Dimension>(&self, seek_target: D) -> (usize, D) {
-        debug_assert!(
-            seek_target <= D::from(self.node_summary()),
-            "seek_target is outside bounds: {seek_target:?} / {:?}",
-            D::from(self.node_summary())
-        );
+    fn child_position<D: SeekTarget>(&self, seek_target: D) -> Option<(usize, D)> {
+        let end = seek_target.zero() + self.node_summary();
+        if seek_target > end {
+            return None;
+        }
 
-        if seek_target == D::from(self.node_summary()) {
+        if seek_target == end {
             // seeking to the end
             let last_child_summary = self
                 .child_summaries()
@@ -465,16 +461,16 @@ impl Node {
                 //     None
                 // })
                 .expect("all nodes have at least one child");
-            let rem_seek_target = D::from(last_child_summary);
+            let rem_seek_target = seek_target.zero() + last_child_summary;
             let child_idx = self.child_summaries().len() - 1;
-            return (child_idx, rem_seek_target);
+            return Some((child_idx, rem_seek_target));
         }
 
-        let mut running_sum = D::default();
+        let mut running_sum = seek_target.zero();
         for (child_idx, child_summary) in self.child_summaries().into_iter().enumerate() {
-            let next_sum = running_sum + D::from(child_summary);
+            let next_sum = running_sum + child_summary;
             if next_sum > seek_target {
-                return (child_idx, seek_target - running_sum);
+                return Some((child_idx, seek_target - running_sum));
             }
             running_sum = next_sum;
         }
@@ -520,16 +516,16 @@ impl Node {
         matches!(self, Node::Leaf { .. })
     }
 
-    fn seek_and_edit_segment<D: Dimension>(
+    fn seek_and_edit_segment<D: SeekTarget>(
         &mut self,
         seek_target: D,
         mut edit_op: impl FnMut(&mut GridString, usize) -> Option<GridString>,
     ) -> Option<Arc<Node>> {
-        let (child_idx, seek_target) = self.child_position(seek_target);
+        let (child_idx, seek_target) = self.child_position(seek_target)?;
         let split = match self {
             Node::Leaf { children, .. } => {
                 let child = &mut children[child_idx];
-                let char_idx = seek_target.to_char_idx(child.as_str());
+                let char_idx = seek_target.to_char_idx(child.as_str())?;
                 edit_op(child, char_idx).and_then(|overflow| {
                     let overflow_pos = child_idx + 1;
                     children
@@ -597,17 +593,37 @@ impl Node {
         self.child_summaries().len() < MAX_CHILDREN
     }
 
-    fn dimension_to_char_idx<D: Dimension>(&self, seek_target: D) -> Option<usize> {
-        let mut running_sum = D::default();
+    fn dimension_to_char_idx<D: SeekTarget>(&self, seek_target: D) -> Option<usize> {
+        let mut running_sum = seek_target.zero();
         let mut agg_summary = TextSummary::default();
         for (child_idx, child_summary) in self.child_summaries().into_iter().enumerate() {
-            let next_sum = running_sum + D::from(child_summary);
+            {
+                match self {
+                    Node::Leaf { children, .. } => {
+                        let foo = children[child_idx].as_str();
+                        let x = 1;
+                    }
+                    Node::Internal {
+                        children,
+                        child_summaries,
+                        node_summary,
+                        ..
+                    } => {
+                        let sub_tree = Tree {
+                            root: children[child_idx].clone(),
+                        };
+                        let sub_tree_str = sub_tree.to_string();
+                        let x = 1;
+                    }
+                }
+            }
+            let next_sum = running_sum + child_summary;
             if next_sum >= seek_target {
                 let child_seek_target = seek_target - running_sum;
                 return match self {
                     Node::Leaf { children, .. } => {
                         let child_str = children[child_idx].as_str();
-                        let child_char_idx = child_seek_target.to_char_idx(child_str);
+                        let child_char_idx = child_seek_target.to_char_idx(child_str)?;
                         Some(agg_summary.chars + child_char_idx)
                     }
                     Node::Internal { children, .. } => {
@@ -788,41 +804,45 @@ impl std::fmt::Debug for Node {
     }
 }
 /// Any type that can be used to seek to a specific leaf node via searching `TextSummary`-s.
-pub trait Dimension:
-    for<'a> From<&'a TextSummary>
-    + Default
+pub trait SeekTarget:
+    Default
     + Clone
     + Copy
-    + std::ops::Add<Output = Self>
-    + std::ops::Sub<Output = Self>
+    + for<'a> std::ops::Add<&'a TextSummary, Output = Self>
+    + std::ops::Sub<Self, Output = Self>
     + std::cmp::Ord
     + std::fmt::Debug
 {
-    fn to_char_idx(&self, segment: &str) -> usize;
+    fn to_char_idx(&self, segment: &str) -> Option<usize>;
+
+    fn zero(&self) -> Self {
+        Self::default()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DimensionCharIdx(pub usize);
+pub struct SeekCharIdx(pub usize);
 
-impl Dimension for DimensionCharIdx {
-    fn to_char_idx(&self, _: &str) -> usize {
-        self.0
+impl SeekTarget for SeekCharIdx {
+    fn to_char_idx(&self, s: &str) -> Option<usize> {
+        Some(self.0)
     }
 }
+impl<'a> std::ops::Add<&'a TextSummary> for SeekCharIdx {
+    type Output = Self;
 
-impl<'a> From<&'a TextSummary> for DimensionCharIdx {
-    fn from(value: &'a TextSummary) -> Self {
-        Self(value.chars)
+    fn add(self, rhs: &'a TextSummary) -> Self::Output {
+        Self(self.0 + rhs.chars)
     }
 }
-impl std::ops::Add for DimensionCharIdx {
+impl std::ops::Add for SeekCharIdx {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
         Self(self.0 + rhs.0)
     }
 }
-impl std::ops::Sub for DimensionCharIdx {
+impl std::ops::Sub for SeekCharIdx {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
@@ -831,37 +851,39 @@ impl std::ops::Sub for DimensionCharIdx {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DimensionLineIdx(pub usize);
-impl Dimension for DimensionLineIdx {
-    fn to_char_idx(&self, s: &str) -> usize {
+pub struct SeekLineIdx(pub usize);
+impl SeekTarget for SeekLineIdx {
+    fn to_char_idx(&self, s: &str) -> Option<usize> {
         let Self(line_idx) = *self;
         if line_idx == 0 {
-            return 0;
+            return Some(0);
         }
         let mut char_idx = 0;
         for (i, line) in s.split_inclusive('\n').enumerate() {
             char_idx += line.chars().count();
             if i + 1 == line_idx {
-                return char_idx;
+                return Some(char_idx);
             }
         }
         panic!("cannot find line with idx: {line_idx} in input: {s:?}")
     }
 }
 
-impl<'a> From<&'a TextSummary> for DimensionLineIdx {
-    fn from(value: &'a TextSummary) -> Self {
-        Self(value.lines)
+impl<'a> std::ops::Add<&'a TextSummary> for SeekLineIdx {
+    type Output = Self;
+
+    fn add(self, rhs: &'a TextSummary) -> Self {
+        Self(self.0 + rhs.lines)
     }
 }
-impl std::ops::Add for DimensionLineIdx {
+impl std::ops::Add for SeekLineIdx {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
         Self(self.0 + rhs.0)
     }
 }
-impl std::ops::Sub for DimensionLineIdx {
+impl std::ops::Sub for SeekLineIdx {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
@@ -870,49 +892,131 @@ impl std::ops::Sub for DimensionLineIdx {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DimensionCursorPosition {
+pub struct SeekCursorPosition {
     pub line_idx: usize,
     pub trailing_char_idx: usize,
-    pub soft_wrap: Option<NonZeroUsize>,
 }
-impl Dimension for DimensionCursorPosition {
-    fn to_char_idx(&self, s: &str) -> usize {
-        assert!(self.soft_wrap.is_none(), "soft wrapping is not implemented");
-        let line_start_idx = DimensionLineIdx(self.line_idx).to_char_idx(s);
-        line_start_idx + self.trailing_char_idx
-    }
-}
-
-impl<'a> From<&'a TextSummary> for DimensionCursorPosition {
-    fn from(value: &'a TextSummary) -> Self {
-        Self {
-            line_idx: value.lines,
-            trailing_char_idx: value.trailing_line_chars,
-            soft_wrap: None,
+impl SeekTarget for SeekCursorPosition {
+    fn to_char_idx(&self, s: &str) -> Option<usize> {
+        let line_start_idx = SeekLineIdx(self.line_idx).to_char_idx(s)?;
+        let n = line_start_idx + self.trailing_char_idx;
+        if s.chars().nth(n).is_some() {
+            Some(n)
+        } else {
+            None
         }
     }
 }
-impl std::ops::Add for DimensionCursorPosition {
+
+impl<'a> std::ops::Add<&'a TextSummary> for SeekCursorPosition {
+    type Output = Self;
+
+    fn add(self, rhs: &'a TextSummary) -> Self::Output {
+        Self {
+            line_idx: self.line_idx + rhs.lines,
+            trailing_char_idx: rhs.trailing_line_chars,
+        }
+    }
+}
+impl std::ops::Add for SeekCursorPosition {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        assert!(self.soft_wrap == rhs.soft_wrap);
         Self {
             line_idx: self.line_idx + rhs.line_idx,
             trailing_char_idx: rhs.trailing_char_idx,
-            soft_wrap: self.soft_wrap,
         }
     }
 }
-impl std::ops::Sub for DimensionCursorPosition {
+impl std::ops::Sub for SeekCursorPosition {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        assert!(self.soft_wrap == rhs.soft_wrap);
         Self {
             line_idx: self.line_idx - rhs.line_idx,
             trailing_char_idx: self.trailing_char_idx,
-            soft_wrap: self.soft_wrap,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SeekSoftWrapPosition {
+    pub wrap_width: usize,
+    pub line_idx: usize,
+    pub trailing_line_chars: usize,
+}
+impl SeekTarget for SeekSoftWrapPosition {
+    fn zero(&self) -> Self {
+        Self {
+            wrap_width: self.wrap_width,
+            ..Default::default()
+        }
+    }
+
+    fn to_char_idx(&self, s: &str) -> Option<usize> {
+        s.split('\n').next().and_then(|line| {
+            let n = self.wrap_width * self.line_idx + self.trailing_line_chars;
+            if line.chars().nth(n).is_some() {
+                Some(n)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+impl<'a> std::ops::Add<&'a TextSummary> for SeekSoftWrapPosition {
+    type Output = Self;
+
+    fn add(self, rhs: &'a TextSummary) -> Self {
+        let partials = self.trailing_line_chars + rhs.leading_line_chars;
+        let new_lines;
+        let trailing_line_chars;
+        if rhs.lines == 0 {
+            new_lines = partials / self.wrap_width;
+            trailing_line_chars = partials % self.wrap_width;
+        } else {
+            new_lines =
+                // any lines from the leading joined partial line
+                (partials / self.wrap_width)
+                // any lines from the middle hard-wrapped lines
+                + std::cmp::max(
+                    // all hard wrap lines also count as soft wrap ones
+                    rhs.lines,
+                    (rhs.chars - rhs.leading_line_chars - rhs.trailing_line_chars) / self.wrap_width,
+                )
+                // any lines from the trailing partial line
+                + (rhs.trailing_line_chars / self.wrap_width);
+            trailing_line_chars = rhs.trailing_line_chars % self.wrap_width;
+        }
+        Self {
+            wrap_width: self.wrap_width,
+            line_idx: self.line_idx + new_lines,
+            trailing_line_chars,
+        }
+    }
+}
+impl std::ops::Add for SeekSoftWrapPosition {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        unimplemented!()
+    }
+}
+impl std::ops::Sub for SeekSoftWrapPosition {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        let line_idx = self.line_idx - rhs.line_idx;
+        let trailing_line_chars = if line_idx == 0 {
+            self.trailing_line_chars - rhs.trailing_line_chars
+        } else {
+            self.trailing_line_chars
+        };
+        Self {
+            wrap_width: self.wrap_width,
+            line_idx,
+            trailing_line_chars,
         }
     }
 }
@@ -928,17 +1032,29 @@ pub struct TextSummary {
     chars: usize,
     bytes: usize,
     lines: usize,
+    leading_line_chars: usize,
     trailing_line_chars: usize,
 }
 impl std::ops::Add<&TextSummary> for TextSummary {
     type Output = TextSummary;
 
     fn add(self, rhs: &TextSummary) -> Self::Output {
+        let leading_line_chars = if self.lines == 0 {
+            self.leading_line_chars + rhs.leading_line_chars
+        } else {
+            self.leading_line_chars
+        };
+        let trailing_line_chars = if rhs.lines == 0 {
+            self.trailing_line_chars + rhs.trailing_line_chars
+        } else {
+            rhs.trailing_line_chars
+        };
         TextSummary {
             chars: self.chars + rhs.chars,
             bytes: self.bytes + rhs.bytes,
             lines: self.lines + rhs.lines,
-            trailing_line_chars: rhs.trailing_line_chars,
+            leading_line_chars,
+            trailing_line_chars,
         }
     }
 }
@@ -953,13 +1069,18 @@ impl<'a> From<&'a GridString> for TextSummary {
             chars: value.len_chars(),
             bytes: value.len_bytes(),
             lines: value.as_str().matches('\n').count(),
+            leading_line_chars: value
+                .as_str()
+                .split('\n')
+                .next()
+                .map(|partial_line| partial_line.chars().count())
+                .unwrap_or(value.len_chars()),
             trailing_line_chars: value
                 .as_str()
                 .rsplit('\n')
                 .next()
-                .map_or(value.as_str().chars().count(), |partial_line| {
-                    partial_line.chars().count()
-                }),
+                .map(|partial_line| partial_line.chars().count())
+                .unwrap_or(value.len_chars()),
         }
     }
 }
@@ -1013,7 +1134,7 @@ mod tests {
         assert_eq!(tree.len_chars(), 14);
         assert_eq!(tree.len_lines(), 1);
 
-        tree.replace_str(DimensionCharIdx(6), "back1!", bold);
+        tree.replace_str(SeekCharIdx(6), "back1!", bold);
         assert_eq!(tree.to_string().as_str(), "hello back1!!\n");
         assert_eq!(tree.len_bytes(), 14);
         assert_eq!(tree.len_chars(), 14);
@@ -1041,7 +1162,7 @@ mod tests {
         let mut tree = Tree::new();
         let input = &LARGE_TEXT[..];
         for line in input.split_inclusive('\n').rev() {
-            tree.insert_str(DimensionCharIdx(0), line, SgrState::default());
+            tree.insert_str(SeekCharIdx(0), line, SgrState::default());
         }
 
         assert_eq!(tree.to_string().as_str(), input);
@@ -1059,7 +1180,7 @@ mod tests {
     fn test_insert_1() {
         let mut tree = Tree::new();
         tree.push_str("Line 1\nLine 2\nLine 3\n", SgrState::default());
-        tree.insert_str(DimensionCharIdx(14), "Line 2.5\n", SgrState::default());
+        tree.insert_str(SeekCharIdx(14), "Line 2.5\n", SgrState::default());
         assert_eq!(
             tree.to_string().as_str(),
             "Line 1\nLine 2\nLine 2.5\nLine 3\n"
@@ -1071,7 +1192,7 @@ mod tests {
     fn test_remove_range() {
         let mut tree = Tree::new();
         tree.push_str("Line 1\nLine 2\nLine 3\n", SgrState::default());
-        tree.remove_range(DimensionCharIdx(7)..DimensionCharIdx(14));
+        tree.remove_range(SeekCharIdx(7)..SeekCharIdx(14));
         assert_eq!(tree.to_string().as_str(), "Line 1\nLine 3\n");
         assert_eq!(tree.len_lines(), 2)
     }
@@ -1100,12 +1221,12 @@ mod tests {
     #[test]
     fn test_dim_line_idx() {
         let tree = Tree::from_str("Line 1\nLine 2\n\u{0d30}\u{0d4b}\nLine 3\n");
-        assert_eq!(tree.resolve_dimension(DimensionLineIdx(0)), Some(0));
-        assert_eq!(tree.resolve_dimension(DimensionLineIdx(1)), Some(7));
-        assert_eq!(tree.resolve_dimension(DimensionLineIdx(2)), Some(14));
-        assert_eq!(tree.resolve_dimension(DimensionLineIdx(3)), Some(17));
-        assert_eq!(tree.resolve_dimension(DimensionLineIdx(4)), Some(24));
-        assert_eq!(tree.resolve_dimension(DimensionLineIdx(5)), None);
+        assert_eq!(tree.resolve_dimension(SeekLineIdx(0)), Some(0));
+        assert_eq!(tree.resolve_dimension(SeekLineIdx(1)), Some(7));
+        assert_eq!(tree.resolve_dimension(SeekLineIdx(2)), Some(14));
+        assert_eq!(tree.resolve_dimension(SeekLineIdx(3)), Some(17));
+        assert_eq!(tree.resolve_dimension(SeekLineIdx(4)), Some(24));
+        assert_eq!(tree.resolve_dimension(SeekLineIdx(5)), None);
     }
 
     #[test]
@@ -1119,12 +1240,73 @@ mod tests {
         assert_eq!(tree.len_bytes(), N * line_bytes_len);
 
         assert_eq!(
-            tree.resolve_dimension(DimensionCursorPosition {
+            tree.resolve_dimension(SeekCursorPosition {
                 line_idx: 42,
                 trailing_char_idx: 6,
-                soft_wrap: None
             }),
             Some(42 * line_bytes_len + 6)
         )
+    }
+
+    #[test]
+    fn test_dim_soft_wrap_1() {
+        let mut tree = Tree::new();
+        const N: usize = 10;
+        for i in 0..N {
+            let line = if i % 2 == 0 {
+                // even lines are longer and without a trailing newline
+                format!("Long Line {:03}.", i)
+            } else {
+                // odd lines are shorter with a newLine
+                format!("<{:02}>\n", i)
+            };
+            tree.push_str(line.as_str(), SgrState::default());
+        }
+
+        // with hard wraps, lines looks like:
+        //
+        // 00: |Long Line 000. <01>|
+        // 01: |Long Line 002. <03>|
+        // 02: |Long Line 004. <05>|
+        // 03: |Long Line 006. <07>|
+        // 04: |Long Line 008. <09>|
+        //
+        // with soft wrap at 8, lines look like:
+        //
+        // 00: |Long Lin|    <-- soft wrap
+        // 01: |e 000. <|    <-- soft wrap
+        // 02: |01>     |    <-- hard wrap
+        // 03: |Long Lin|
+        // 04: |e 002. <|
+        // 05: |03>     |
+        // 06: |Long Lin|
+        // 07: |e 004. <|
+        // 08: |05>     |
+        // 09: |Long Lin|
+        // 10: |e 006. <|
+        // 11: |07>     |
+        // 12: |Long Lin|
+        // 13: |e 008. <|
+        // 14: |09>     |
+
+        // valid position
+        assert_eq!(
+            tree.resolve_dimension(SeekSoftWrapPosition {
+                wrap_width: 8,
+                line_idx: 2,
+                trailing_line_chars: 1,
+            }),
+            Some(17)
+        );
+
+        // invalid position
+        assert_eq!(
+            tree.resolve_dimension(SeekSoftWrapPosition {
+                wrap_width: 8,
+                line_idx: 2,
+                trailing_line_chars: 3,
+            }),
+            None,
+        );
     }
 }
