@@ -100,13 +100,14 @@ impl Tree {
         let mut char_range = self
             .resolve_dimensions(target_range)
             .expect("invalid range supplied");
-        let n = char_range.len();
         // let mut char_range =
         //     resolve_range(char_range, 0..self.len_chars()).expect("invalid range supplied");
         while !char_range.is_empty() {
+            let n = char_range.len();
             self.find_string_segment_mut(
                 SeekCharIdx(char_range.start),
                 |segment: &mut GridString, segment_char_idx: usize| -> Option<GridString> {
+                    let foo = segment.as_str();
                     let end_char_idx = (segment_char_idx + n).min(segment.len_chars());
                     let remove_range = segment_char_idx..end_char_idx;
                     segment
@@ -177,8 +178,8 @@ impl Tree {
             self.resolve_dimension(d.clone())
                 .context("invalid end bound: could not resolve to char_idx")
         }) {
-            std::ops::Bound::Included(char_idx) => char_idx?,
-            std::ops::Bound::Excluded(char_idx) => char_idx? + 1,
+            std::ops::Bound::Included(char_idx) => char_idx? + 1,
+            std::ops::Bound::Excluded(char_idx) => char_idx?,
             std::ops::Bound::Unbounded => self.len_chars(),
         };
         Ok(start..end)
