@@ -288,16 +288,27 @@ impl Grid {
         let query_range =
             resolve_range(query_range, 0..self.total_rows()).expect("query_range is out of bounds");
 
+        let seek_start = tree::SeekSoftWrapPosition {
+            wrap_width: self.num_cols(),
+            line_idx: query_range.start,
+            trailing_line_chars: 0,
+        };
+        let seek_end = tree::SeekSoftWrapPosition {
+            wrap_width: self.num_cols(),
+            line_idx: query_range.end,
+            trailing_line_chars: 0,
+        };
         self.text
-            .iter_lines(tree::SeekLineIdx(query_range.start)..tree::SeekLineIdx(query_range.end))
-            .map(|display_slice: tree::TreeSlice<'_, tree::SeekLineIdx>| {
-                let mut padded_text: String = display_slice.to_string();
+            .iter_lines(seek_start..seek_end)
+            .expect("query_range to be valid")
+            .map(|display_slice: tree::TreeSlice| {
+                let mut padded_text: String = display_slice.text;
                 // pop off the newline
                 padded_text.pop();
 
                 let mut format_attributes = vec![];
                 let mut cur = None;
-                for (sgr_state, ch) in display_slice.sgr().zip(padded_text.chars()) {
+                for (sgr_state, ch) in display_slice.sgr.into_iter().zip(padded_text.chars()) {
                     let state = cur.get_or_insert_with(|| FormatAttribute {
                         sgr_state,
                         byte_range: 0..0,
