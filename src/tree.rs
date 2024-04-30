@@ -133,7 +133,7 @@ impl Tree {
         target_range: R,
     ) -> anyhow::Result<iter::LineIter> {
         let target_char_range = self.resolve_dimensions(target_range)?;
-        Ok(iter::LineIter::new(self.clone(), target_char_range))
+        Ok(iter::LineIter::new(self, target_char_range))
     }
 
     fn find_string_segment_mut<'a, D: SeekTarget>(
@@ -201,16 +201,16 @@ mod iter {
 
     use crate::{grid_string::GridString, terminal_emulator::SgrState};
 
-    use super::{Node, Tree, TreeSlice};
+    use super::{Node, SeekCharIdx, SeekTarget, Tree, TreeSlice};
 
     #[derive(Debug)]
-    pub struct LineIter {
-        tree: Tree,
+    pub struct LineIter<'a> {
+        tree: &'a Tree,
         target_char_range: Range<usize>,
-        cursor: Option<Cursor>,
+        cursor: Option<Cursor<'a>>,
     }
-    impl LineIter {
-        pub(crate) fn new(tree: super::Tree, target_char_range: Range<usize>) -> LineIter {
+    impl<'a> LineIter<'a> {
+        pub(crate) fn new(tree: &'a super::Tree, target_char_range: Range<usize>) -> LineIter {
             Self {
                 tree,
                 target_char_range,
@@ -219,7 +219,7 @@ mod iter {
         }
     }
 
-    impl Iterator for LineIter {
+    impl Iterator for LineIter<'_> {
         type Item = TreeSlice;
 
         fn next(&mut self) -> Option<Self::Item> {
@@ -229,20 +229,21 @@ mod iter {
 
             let cursor = self.cursor.get_or_insert_with(|| {
                 let mut c = Cursor::new(&self.tree);
-                c.seek_to_char(self.target_char_range.start);
+                // TODO
+                // c.seek_to_char(self.target_char_range.start);
                 c
             });
 
             let mut text = String::new();
             let mut sgr = Vec::new();
             let mut text_char_count = 0;
-            while let Some(prefix) = cursor.chunk_str()?.split_inclusive('\n').next() {
+            while let Some(prefix) = cursor.segment_str()?.split_inclusive('\n').next() {
                 text.push_str(prefix);
                 let prefix_chars = prefix.chars().count();
                 text_char_count += prefix_chars;
                 sgr.extend_from_slice(
                     cursor
-                        .sgr()
+                        .segment_sgr()
                         .map(|sgr_slice| &sgr_slice[..prefix_chars])
                         .unwrap_or(&[]),
                 );
@@ -264,36 +265,50 @@ mod iter {
         }
     }
 
-    impl ExactSizeIterator for LineIter {}
+    impl ExactSizeIterator for LineIter<'_> {}
 
     #[derive(Debug)]
-    struct StackEntry {
-        node: Arc<Node>,
+    struct StackEntry<'a> {
         running_sum: usize,
+        node: &'a Node,
         child_idx: usize,
     }
-
-    #[derive(Debug)]
-    struct Cursor {
-        stack: Vec<StackEntry>,
-        char_offset: Option<usize>,
+    impl StackEntry<'_> {
+        fn next_child(&mut self) {
+            self.running_sum += self
+                .node
+                .child_summaries()
+                .get(self.child_idx)
+                .map(|summary| summary.chars)
+                .expect("child_idx is not valid");
+            self.child_idx += 1;
+        }
     }
 
-    impl Cursor {
-        fn new(tree: &Tree) -> Self {
+    #[derive(Debug)]
+    /// Points to a specific char in the string stored in the tree. Can be used to seek to specific
+    /// char_idx and do operations.
+    pub struct Cursor<'a> {
+        tree: &'a Tree,
+        /// the char_idx in the range [0..tree.len_chars())
+        char_position: usize,
+        stack: Vec<StackEntry<'a>>,
+    }
+
+    impl<'a> Cursor<'a> {
+        pub fn new(tree: &'a Tree) -> Self {
             Self {
-                stack: vec![StackEntry {
-                    node: tree.root.clone(),
-                    running_sum: 0,
-                    child_idx: 0,
-                }],
-                char_offset: None,
+                tree,
+                stack: vec![],
+                char_position: 0,
             }
         }
 
-        fn seek_to_char(&mut self, target_char_idx: usize) {
-            self.stack.clear();
-            self.char_offset = None;
+        pub fn seek_to_char<T: SeekTarget>(&mut self, seek_target: T) {
+            let Some(target_char_idx) = self.tree.resolve_dimension(seek_target) else {
+                return;
+            };
+            self.prune_stack(target_char_idx);
 
             while let Some(StackEntry {
                 node: parent,
@@ -303,6 +318,9 @@ mod iter {
             {
                 let Some(child_summary) = parent.child_summaries().get(*child_idx) else {
                     self.stack.pop();
+                    if let Some(parent_entry) = self.stack.last_mut() {
+                        parent_entry.next_child();
+                    }
                     continue;
                 };
 
@@ -315,14 +333,12 @@ mod iter {
 
                 match **parent {
                     Node::Leaf { .. } => {
-                        self.char_offset = Some(target_char_idx - *running_sum);
+                        self.char_position = target_char_idx;
                         return;
                     }
                     Node::Internal { ref children, .. } => {
-                        let child = children[*child_idx].clone();
+                        let child = children[*child_idx].as_ref();
                         let running_sum_for_child = *running_sum;
-                        *child_idx += 1;
-                        *running_sum = next_sum;
                         self.stack.push(StackEntry {
                             node: child,
                             running_sum: running_sum_for_child,
@@ -334,75 +350,109 @@ mod iter {
             debug_assert!(self.stack.is_empty() || self.stack[0].node.is_leaf());
         }
 
-        fn current_chunk(&self) -> Option<&GridString> {
+        fn prune_stack(&mut self, target_char_idx: usize) {
+            self.stack
+                .retain(|entry| entry.running_sum <= target_char_idx);
+
+            if self.stack.is_empty() {
+                self.stack.push(StackEntry {
+                    node: self.tree.root.as_ref(),
+                    running_sum: 0,
+                    child_idx: 0,
+                });
+            }
+        }
+
+        pub fn segment(&self) -> Option<&GridString> {
             let StackEntry {
                 node, child_idx, ..
             } = self.stack.last()?;
 
-            node.child_strings().get(*child_idx)
+            node.child_segments().get(*child_idx)
         }
 
-        fn advance_char_offset(&mut self, delta: usize) {
-            let chunk_chars = self.current_chunk().map(|c| c.len_chars()).unwrap_or(0);
-            if let Some(char_offset) = self.char_offset.as_mut() {
-                *char_offset += delta;
-                if *char_offset >= chunk_chars {
-                    self.seek_to_next_chunk();
-                }
-            }
+        pub fn advance_char_offset(&mut self, delta: usize) {
+            self.seek_to_char(SeekCharIdx(self.char_position + delta));
         }
 
-        fn chunk_str(&self) -> Option<&str> {
-            self.current_chunk()
-                .zip(self.char_offset)
-                .map(|(chunk, off)| &chunk.as_str()[off..])
-        }
-
-        fn sgr(&self) -> Option<&[SgrState]> {
-            self.current_chunk()
-                .zip(self.char_offset)
-                .and_then(|(chunk, off)| chunk.sgr().get(off..))
-        }
-
-        fn seek_to_next_chunk(&mut self) {
-            self.stack.last_mut().map(|entry| {
-                entry.running_sum += entry.node.child_summaries()[entry.child_idx].chars;
-                entry.child_idx += 1;
-            });
-            self.char_offset = None;
-
-            while let Some(StackEntry {
+        pub fn segment_str(&self) -> Option<&str> {
+            let StackEntry {
                 node,
-                running_sum,
                 child_idx,
-            }) = self.stack.last_mut()
-            {
-                if *child_idx >= node.child_summaries().len() {
-                    self.stack.pop();
-                    continue;
-                }
+                running_sum,
+                ..
+            } = self.stack.last()?;
 
-                match **node {
-                    Node::Leaf { .. } => return,
-                    Node::Internal {
-                        ref children,
-                        ref child_summaries,
-                        ..
-                    } => {
-                        let child = children[*child_idx].clone();
-                        let running_sum_for_child = *running_sum;
-                        *running_sum += child_summaries[*child_idx].chars;
-                        *child_idx += 1;
-                        self.stack.push(StackEntry {
-                            node: child,
-                            running_sum: running_sum_for_child,
-                            child_idx: 0,
-                        });
-                        continue;
-                    }
+            node.child_segments().get(*child_idx).and_then(|segment| {
+                let offset = self.char_position - *running_sum;
+                segment.as_str().get(offset..)
+            })
+        }
+
+        fn segment_sgr(&self) -> Option<&[SgrState]> {
+            let StackEntry {
+                node,
+                child_idx,
+                running_sum,
+                ..
+            } = self.stack.last()?;
+
+            node.child_segments().get(*child_idx).and_then(|segment| {
+                let offset = self.char_position - *running_sum;
+                segment.sgr().get(offset..)
+            })
+        }
+
+        pub fn iter_until<T: SeekTarget>(
+            &'a mut self,
+            seek_target: T,
+        ) -> impl Iterator<Item = (&str, &[SgrState])> + 'a {
+            let target_char_idx = self.tree.resolve_dimension(seek_target);
+            std::iter::from_fn(move || {
+                let target_char_idx = target_char_idx?;
+                if self.char_position >= target_char_idx {
+                    return None;
                 }
-            }
-            debug_assert!(self.stack.is_empty() || self.stack[0].node.is_leaf());
+                let StackEntry {
+                    node,
+                    child_idx,
+                    running_sum,
+                    ..
+                } = self.stack.pop()?;
+                let segment = node.child_segments().get(child_idx)?;
+                let segment_offset = self.char_position - running_sum;
+                let segment_chars_remaining = segment.len_chars() - segment_offset;
+                let num_chars = std::cmp::min(
+                    target_char_idx - self.char_position,
+                    segment_chars_remaining,
+                );
+
+                let mut char_iter = segment.as_str().char_indices();
+                let start_byte_idx = if segment_offset == 0 {
+                    0
+                } else {
+                    char_iter
+                        .nth(segment_offset)
+                        .map(|(byte_offset, _)| byte_offset)?
+                };
+                let end_byte_idx = if num_chars < segment_chars_remaining {
+                    let (byte_offset, _) = char_iter.nth(num_chars)?;
+                    byte_offset
+                } else {
+                    segment.len_bytes()
+                };
+
+                self.stack.push(StackEntry {
+                    node,
+                    child_idx,
+                    running_sum,
+                });
+                self.advance_char_offset(num_chars);
+                let segment_str = &segment.as_str()[start_byte_idx..end_byte_idx];
+                let segment_sgr = &segment.sgr()[segment_offset..segment_offset + num_chars];
+
+                Some((segment_str, segment_sgr))
+            })
         }
     }
 
@@ -492,7 +542,7 @@ mod iter {
 
             let (node, child_idx) = self.stack.last_mut()?;
             let ret = node
-                .child_strings()
+                .child_segments()
                 .get(*child_idx)
                 .expect("top of stack should always be valid");
             *child_idx += 1;
@@ -657,7 +707,7 @@ impl Node {
         }
     }
 
-    fn child_strings(&self) -> &ArrayVec<GridString, MAX_CHILDREN> {
+    fn child_segments(&self) -> &ArrayVec<GridString, MAX_CHILDREN> {
         match self {
             Node::Leaf { children, .. } => children,
             Node::Internal { .. } => panic!("cannot call child_strings on internal nodes"),
@@ -1261,6 +1311,8 @@ impl<'a> From<&'a GridString> for TextSummary {
 mod tests {
     use crate::terminal_emulator::SgrState;
 
+    use self::iter::Cursor;
+
     use super::*;
     const LARGE_TEXT: &'static str = include_str!("tree.rs");
 
@@ -1479,6 +1531,35 @@ mod tests {
                 trailing_line_chars: 3,
             }),
             None,
+        );
+    }
+
+    #[test]
+    fn test_cursor_1() {
+        let tree = Tree::from_str("Line 1\nLine 2\nLine 3");
+        let mut cursor = Cursor::new(&tree);
+        cursor.seek_to_char(SeekCharIdx(19));
+        assert_eq!(cursor.segment_str(), Some("3"));
+        cursor.seek_to_char(SeekCharIdx(16));
+        assert_eq!(cursor.segment_str(), Some("ne 3"));
+        cursor.seek_to_char(SeekCharIdx(0));
+        assert_eq!(cursor.segment_str(), Some("Line 1\nL"));
+    }
+
+    #[test]
+    fn test_cursor_2() {
+        let input = &LARGE_TEXT;
+        let tree = Tree::from_str(input);
+        let mut cursor = Cursor::new(&tree);
+        let target_line = line!() as usize - 1; // 1 based
+        cursor.seek_to_char(SeekLineIdx(target_line));
+        let mut output = String::new();
+        for (text, _sgr) in cursor.iter_until(SeekLineIdx(target_line + 1)) {
+            output.push_str(text);
+        }
+        assert_eq!(
+            output.as_str(),
+            "        let target_line = line!() as usize - 1; // 1 based\n"
         );
     }
 }
