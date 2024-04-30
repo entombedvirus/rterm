@@ -1,4 +1,5 @@
 use std::{
+    num::NonZeroUsize,
     ops::{Range, RangeBounds},
     rc::Rc,
 };
@@ -285,25 +286,16 @@ impl Grid {
         &'a self,
         query_range: R,
     ) -> impl Iterator<Item = DisplayLine> + ExactSizeIterator + 'a {
-        let query_range =
-            resolve_range(query_range, 0..self.total_rows()).expect("query_range is out of bounds");
-
-        let seek_start = tree::SeekSoftWrapPosition {
-            wrap_width: self.num_cols(),
-            line_idx: query_range.start,
-            trailing_line_chars: 0,
-        };
-        let seek_end = tree::SeekSoftWrapPosition {
-            wrap_width: self.num_cols(),
-            line_idx: query_range.end,
-            trailing_line_chars: 0,
-        };
         self.text
-            .iter_lines(seek_start..seek_end)
+            .iter_soft_wrapped_lines(
+                NonZeroUsize::new(self.num_cols()).expect("columns must be non-zero"),
+                query_range,
+            )
             .expect("query_range to be valid")
             .map(|display_slice: tree::TreeSlice| {
                 let mut padded_text: String = display_slice.text;
                 // pop off the newline
+                todo!("soft wrapped lines do not always end in newline");
                 padded_text.pop();
 
                 let mut format_attributes = vec![];

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
-use std::ops::{Not as _, Range, RangeBounds};
+use std::num::NonZeroUsize;
+use std::ops::{Bound, Not as _, Range, RangeBounds};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -128,12 +129,29 @@ impl Tree {
         iter::NodeIter::new(&self.root)
     }
 
-    pub fn iter_lines<R: RangeBounds<D>, D: SeekTarget>(
+    pub fn iter_soft_wrapped_lines<R: RangeBounds<usize>>(
         &self,
+        wrap_width: NonZeroUsize,
         target_range: R,
-    ) -> anyhow::Result<iter::LineIter> {
-        let target_char_range = self.resolve_dimensions(target_range)?;
-        Ok(iter::LineIter::new(self, target_char_range))
+    ) -> anyhow::Result<iter::SoftWrappedLineIter> {
+        let start_line_idx = match target_range.start_bound() {
+            Bound::Included(n) => *n,
+            Bound::Excluded(n) => *n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end_line_idx = match target_range.end_bound() {
+            Bound::Included(n) => *n + 1,
+            Bound::Excluded(n) => *n,
+            Bound::Unbounded => {
+                SeekSoftWrapPosition::compute_max_line(wrap_width, self.root.node_summary())
+            }
+        };
+
+        Ok(iter::SoftWrappedLineIter::new(
+            self,
+            wrap_width,
+            start_line_idx..end_line_idx,
+        ))
     }
 
     fn find_string_segment_mut<'a, D: SeekTarget>(
@@ -197,67 +215,64 @@ pub struct TreeSlice {
 }
 
 mod iter {
-    use std::{collections::VecDeque, ops::Range, sync::Arc};
+    use std::{collections::VecDeque, num::NonZeroUsize, ops::Range, sync::Arc};
 
     use crate::{grid_string::GridString, terminal_emulator::SgrState};
 
-    use super::{Node, SeekCharIdx, SeekTarget, Tree, TreeSlice};
+    use super::{Node, SeekCharIdx, SeekSoftWrapPosition, SeekTarget, Tree, TreeSlice};
 
     #[derive(Debug)]
-    pub struct LineIter<'a> {
+    pub struct SoftWrappedLineIter<'a> {
         tree: &'a Tree,
-        target_char_range: Range<usize>,
+        wrap_width: NonZeroUsize,
+        target_line_range: Range<usize>,
         cursor: Option<Cursor<'a>>,
     }
-    impl<'a> LineIter<'a> {
-        pub(crate) fn new(tree: &'a super::Tree, target_char_range: Range<usize>) -> LineIter {
+
+    impl<'a> SoftWrappedLineIter<'a> {
+        pub(crate) fn new(
+            tree: &'a super::Tree,
+            wrap_width: NonZeroUsize,
+            target_line_range: Range<usize>,
+        ) -> SoftWrappedLineIter {
             Self {
                 tree,
-                target_char_range,
+                wrap_width,
+                target_line_range,
                 cursor: None,
             }
         }
     }
 
-    impl Iterator for LineIter<'_> {
+    impl<'a> Iterator for SoftWrappedLineIter<'a> {
         type Item = TreeSlice;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if self.target_char_range.is_empty() || self.tree.is_empty() {
+            if self.target_line_range.is_empty() || self.tree.is_empty() {
                 return None;
             }
 
-            let cursor = self.cursor.get_or_insert_with(|| {
-                let mut c = Cursor::new(&self.tree);
-                // TODO
-                // c.seek_to_char(self.target_char_range.start);
-                c
-            });
+            if self.cursor.is_none() {
+                let mut cursor = Cursor::new(&self.tree);
+                cursor.seek_to_char(SeekSoftWrapPosition::new(
+                    self.wrap_width,
+                    self.target_line_range.start,
+                ));
+                self.cursor = Some(cursor);
+            }
+            let mut cursor = self.cursor.take().expect("cursor initialized above");
 
             let mut text = String::new();
             let mut sgr = Vec::new();
-            let mut text_char_count = 0;
-            while let Some(prefix) = cursor.segment_str()?.split_inclusive('\n').next() {
-                text.push_str(prefix);
-                let prefix_chars = prefix.chars().count();
-                text_char_count += prefix_chars;
-                sgr.extend_from_slice(
-                    cursor
-                        .segment_sgr()
-                        .map(|sgr_slice| &sgr_slice[..prefix_chars])
-                        .unwrap_or(&[]),
-                );
-                if text.ends_with('\n') {
-                    break;
-                }
-                cursor.advance_char_offset(prefix_chars);
+            let step = SeekSoftWrapPosition::new(self.wrap_width, self.target_line_range.start + 1);
+            for (text_chunk, sgr_chunk) in cursor.iter_until(step) {
+                text.push_str(text_chunk);
+                sgr.extend_from_slice(sgr_chunk);
             }
-            if text.is_empty() {
-                None
-            } else {
-                self.target_char_range.start += text_char_count;
-                Some(TreeSlice { text, sgr })
-            }
+
+            self.target_line_range.start += 1;
+            self.cursor = Some(cursor);
+            Some(TreeSlice { text, sgr })
         }
 
         fn size_hint(&self) -> (usize, Option<usize>) {
@@ -265,7 +280,7 @@ mod iter {
         }
     }
 
-    impl ExactSizeIterator for LineIter<'_> {}
+    impl ExactSizeIterator for SoftWrappedLineIter<'_> {}
 
     #[derive(Debug)]
     struct StackEntry<'a> {
@@ -403,13 +418,15 @@ mod iter {
             })
         }
 
-        pub fn iter_until<T: SeekTarget>(
-            &'a mut self,
+        pub fn iter_until<'b, T: SeekTarget + 'b>(
+            &'b mut self,
             seek_target: T,
-        ) -> impl Iterator<Item = (&str, &[SgrState])> + 'a {
-            let target_char_idx = self.tree.resolve_dimension(seek_target);
+        ) -> impl Iterator<Item = (&'a str, &'a [SgrState])> + 'b {
             std::iter::from_fn(move || {
-                let target_char_idx = target_char_idx?;
+                let target_char_idx = self
+                    .tree
+                    .resolve_dimension(seek_target)
+                    .unwrap_or(self.tree.len_chars());
                 if self.char_position >= target_char_idx {
                     return None;
                 }
@@ -427,16 +444,17 @@ mod iter {
                     segment_chars_remaining,
                 );
 
-                let mut char_iter = segment.as_str().char_indices();
                 let start_byte_idx = if segment_offset == 0 {
                     0
                 } else {
+                    let mut char_iter = segment.as_str().char_indices();
                     char_iter
                         .nth(segment_offset)
                         .map(|(byte_offset, _)| byte_offset)?
                 };
                 let end_byte_idx = if num_chars < segment_chars_remaining {
-                    let (byte_offset, _) = char_iter.nth(num_chars)?;
+                    let mut char_iter = segment.as_str().char_indices();
+                    let (byte_offset, _) = char_iter.nth(segment_offset + num_chars)?;
                     byte_offset
                 } else {
                     segment.len_bytes()
@@ -844,8 +862,11 @@ impl Node {
                 let child_seek_target = seek_target - running_sum;
                 return match self {
                     Node::Leaf { children, .. } => {
-                        let child_str = children[child_idx].as_str();
-                        let child_char_idx = child_seek_target.to_char_idx(child_str)?;
+                        let segment = &children[child_idx];
+                        let child_str = segment.as_str();
+                        let child_char_idx = child_seek_target
+                            .to_char_idx(child_str)
+                            .unwrap_or(segment.len_chars());
                         Some(agg_summary.chars + child_char_idx)
                     }
                     Node::Internal { children, .. } => {
@@ -1161,11 +1182,40 @@ impl std::ops::Sub for SeekCursorPosition {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SeekSoftWrapPosition {
-    pub wrap_width: usize,
+    pub wrap_width: NonZeroUsize,
     pub line_idx: usize,
     pub trailing_line_chars: usize,
+}
+
+impl Default for SeekSoftWrapPosition {
+    fn default() -> Self {
+        Self {
+            wrap_width: NonZeroUsize::new(1).expect("1 is non-zero"),
+            line_idx: Default::default(),
+            trailing_line_chars: Default::default(),
+        }
+    }
+}
+
+impl SeekSoftWrapPosition {
+    fn new(wrap_width: NonZeroUsize, line_idx: usize) -> Self {
+        Self {
+            wrap_width,
+            line_idx,
+            trailing_line_chars: 0,
+        }
+    }
+
+    fn compute_max_line(wrap_width: NonZeroUsize, summary: &TextSummary) -> usize {
+        let ret = Self::new(wrap_width, 0) + summary;
+        if ret.trailing_line_chars > 0 {
+            ret.line_idx + 1
+        } else {
+            ret.line_idx
+        }
+    }
 }
 impl SeekTarget for SeekSoftWrapPosition {
     fn zero(&self) -> Self {
@@ -1176,14 +1226,28 @@ impl SeekTarget for SeekSoftWrapPosition {
     }
 
     fn to_char_idx(&self, s: &str) -> Option<usize> {
-        s.split('\n').next().and_then(|line| {
-            let n = self.wrap_width * self.line_idx + self.trailing_line_chars;
-            if line.chars().nth(n).is_some() {
-                Some(n)
-            } else {
-                None
+        let mut lines_to_skip = self.line_idx;
+        let mut chars_to_skip = if self.line_idx == 0 {
+            self.trailing_line_chars
+        } else {
+            self.wrap_width.get()
+        };
+        for (i, ch) in s.chars().enumerate() {
+            if lines_to_skip == 0 && chars_to_skip == 0 {
+                return Some(i);
             }
-        })
+            if lines_to_skip > 0 && (ch == '\n' || chars_to_skip == 0) {
+                lines_to_skip -= 1;
+                chars_to_skip = if lines_to_skip == 0 {
+                    self.trailing_line_chars
+                } else {
+                    self.wrap_width.get()
+                };
+                continue;
+            }
+            chars_to_skip -= 1;
+        }
+        None
     }
 }
 
@@ -1473,6 +1537,35 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_1() {
+        let tree = Tree::from_str("Line 1\nLine 2\nLine 3");
+        let mut cursor = Cursor::new(&tree);
+        cursor.seek_to_char(SeekCharIdx(19));
+        assert_eq!(cursor.segment_str(), Some("3"));
+        cursor.seek_to_char(SeekCharIdx(16));
+        assert_eq!(cursor.segment_str(), Some("ne 3"));
+        cursor.seek_to_char(SeekCharIdx(0));
+        assert_eq!(cursor.segment_str(), Some("Line 1\nL"));
+    }
+
+    #[test]
+    fn test_cursor_2() {
+        let input = &LARGE_TEXT;
+        let tree = Tree::from_str(input);
+        let mut cursor = Cursor::new(&tree);
+        let target_line = line!() as usize - 1; // 1 based
+        cursor.seek_to_char(SeekLineIdx(target_line));
+        let mut output = String::new();
+        for (text, _sgr) in cursor.iter_until(SeekLineIdx(target_line + 1)) {
+            output.push_str(text);
+        }
+        assert_eq!(
+            output.as_str(),
+            "        let target_line = line!() as usize - 1; // 1 based\n"
+        );
+    }
+
+    #[test]
     fn test_dim_soft_wrap_1() {
         let mut tree = Tree::new();
         const N: usize = 10;
@@ -1516,7 +1609,7 @@ mod tests {
         // valid position
         assert_eq!(
             tree.resolve_dimension(SeekSoftWrapPosition {
-                wrap_width: 8,
+                wrap_width: 8.try_into().unwrap(),
                 line_idx: 2,
                 trailing_line_chars: 1,
             }),
@@ -1526,7 +1619,7 @@ mod tests {
         // invalid position
         assert_eq!(
             tree.resolve_dimension(SeekSoftWrapPosition {
-                wrap_width: 8,
+                wrap_width: 8.try_into().unwrap(),
                 line_idx: 2,
                 trailing_line_chars: 3,
             }),
@@ -1535,31 +1628,29 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_1() {
-        let tree = Tree::from_str("Line 1\nLine 2\nLine 3");
-        let mut cursor = Cursor::new(&tree);
-        cursor.seek_to_char(SeekCharIdx(19));
-        assert_eq!(cursor.segment_str(), Some("3"));
-        cursor.seek_to_char(SeekCharIdx(16));
-        assert_eq!(cursor.segment_str(), Some("ne 3"));
-        cursor.seek_to_char(SeekCharIdx(0));
-        assert_eq!(cursor.segment_str(), Some("Line 1\nL"));
+    fn test_soft_wrap_iter_1() {
+        let tree = Tree::from_str("abcdef");
+        let mut iter = tree
+            .iter_soft_wrapped_lines(2.try_into().unwrap(), ..)
+            .unwrap();
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("ab"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("cd"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("ef"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), None);
     }
 
     #[test]
-    fn test_cursor_2() {
-        let input = &LARGE_TEXT;
-        let tree = Tree::from_str(input);
-        let mut cursor = Cursor::new(&tree);
-        let target_line = line!() as usize - 1; // 1 based
-        cursor.seek_to_char(SeekLineIdx(target_line));
-        let mut output = String::new();
-        for (text, _sgr) in cursor.iter_until(SeekLineIdx(target_line + 1)) {
-            output.push_str(text);
-        }
-        assert_eq!(
-            output.as_str(),
-            "        let target_line = line!() as usize - 1; // 1 based\n"
-        );
+    fn test_soft_wrap_iter_2() {
+        let tree = Tree::from_str("a\nb\nc\nd\ne\nf");
+        let mut iter = tree
+            .iter_soft_wrapped_lines(2.try_into().unwrap(), ..)
+            .unwrap();
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("a\n"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("b\n"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("c\n"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("d\n"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("e\n"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("f"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), None);
     }
 }
