@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::num::NonZeroUsize;
-use std::ops::{Bound, Not as _, Range, RangeBounds};
+use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -82,7 +82,9 @@ impl Tree {
     }
 
     pub fn insert_str<D: SeekTarget>(&mut self, target: D, mut new_text: &str, sgr: SgrState) {
-        let mut char_idx = self.resolve_dimension(target).expect("invalid target");
+        let mut char_idx = self
+            .resolve_dimension(target)
+            .expect("invalid insert target position");
         while !new_text.is_empty() {
             self.find_string_segment_mut(
                 SeekCharIdx(char_idx),
@@ -176,7 +178,13 @@ impl Tree {
     }
 
     fn resolve_dimension<D: SeekTarget>(&self, seek_target: D) -> Option<usize> {
-        self.root.dimension_to_char_idx(seek_target)
+        if seek_target == seek_target.zero() {
+            Some(0)
+        } else if seek_target == seek_target.zero() + self.root.node_summary() {
+            Some(self.len_chars())
+        } else {
+            self.root.dimension_to_char_idx(seek_target)
+        }
     }
 
     /// resolves a range of Dimensions to corresponding char range.
@@ -215,7 +223,7 @@ pub struct TreeSlice {
 }
 
 mod iter {
-    use std::{collections::VecDeque, num::NonZeroUsize, ops::Range, sync::Arc};
+    use std::{collections::VecDeque, num::NonZeroUsize, ops::Range};
 
     use anyhow::Context;
 
@@ -256,10 +264,12 @@ mod iter {
 
             if self.cursor.is_none() {
                 let mut cursor = Cursor::new(&self.tree);
-                cursor.seek_to_char(SeekSoftWrapPosition::new(
-                    self.wrap_width,
-                    self.target_line_range.start,
-                ));
+                cursor
+                    .seek_to_char(SeekSoftWrapPosition::new(
+                        self.wrap_width,
+                        self.target_line_range.start,
+                    ))
+                    .ok()?;
                 self.cursor = Some(cursor);
             }
             let mut cursor = self.cursor.take().expect("cursor initialized above");
@@ -331,7 +341,13 @@ mod iter {
                 .tree
                 .resolve_dimension(seek_target)
                 .context("invalid seek_target")?;
+
             self.prune_stack(target_char_idx);
+
+            if target_char_idx == self.tree.len_chars() {
+                self.char_position = target_char_idx;
+                return Ok(());
+            }
 
             while let Some(StackEntry {
                 node: parent,
@@ -475,7 +491,8 @@ mod iter {
                     child_idx,
                     running_sum,
                 });
-                self.advance_char_offset(num_chars);
+                self.advance_char_offset(num_chars)
+                    .expect("should be able to advance as much as the data we are returning");
                 let segment_str = &segment.as_str()[start_byte_idx..end_byte_idx];
                 let segment_sgr = &segment.sgr()[segment_offset..segment_offset + num_chars];
 
@@ -1101,101 +1118,6 @@ impl std::ops::Sub for SeekCharIdx {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SeekLineIdx(pub usize);
-impl SeekTarget for SeekLineIdx {
-    fn to_char_idx(&self, s: &str) -> Option<usize> {
-        let Self(line_idx) = *self;
-        if line_idx == 0 {
-            return Some(0);
-        }
-        let mut char_idx = 0;
-        for (i, line) in s.split_inclusive('\n').enumerate() {
-            char_idx += line.chars().count();
-            if i + 1 == line_idx {
-                return Some(char_idx);
-            }
-        }
-        panic!("cannot find line with idx: {line_idx} in input: {s:?}")
-    }
-}
-
-impl<'a> std::ops::Add<&'a TextSummary> for SeekLineIdx {
-    type Output = Self;
-
-    fn add(self, rhs: &'a TextSummary) -> Self {
-        Self(self.0 + rhs.lines)
-    }
-}
-impl std::ops::Add for SeekLineIdx {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        Self(self.0 + rhs.0)
-    }
-}
-impl std::ops::Sub for SeekLineIdx {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        Self(self.0 - rhs.0)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SeekCursorPosition {
-    pub line_idx: usize,
-    pub trailing_char_idx: usize,
-}
-impl SeekTarget for SeekCursorPosition {
-    fn to_char_idx(&self, s: &str) -> Option<usize> {
-        let line_start_idx = SeekLineIdx(self.line_idx).to_char_idx(s)?;
-        let n = line_start_idx + self.trailing_char_idx;
-        if s.chars().nth(n).is_some() {
-            Some(n)
-        } else {
-            None
-        }
-    }
-}
-
-impl<'a> std::ops::Add<&'a TextSummary> for SeekCursorPosition {
-    type Output = Self;
-
-    fn add(self, rhs: &'a TextSummary) -> Self::Output {
-        Self {
-            line_idx: self.line_idx + rhs.lines,
-            trailing_char_idx: rhs.trailing_line_chars,
-        }
-    }
-}
-impl std::ops::Add for SeekCursorPosition {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        Self {
-            line_idx: self.line_idx + rhs.line_idx,
-            trailing_char_idx: rhs.trailing_char_idx,
-        }
-    }
-}
-impl std::ops::Sub for SeekCursorPosition {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        let line_idx = self.line_idx - rhs.line_idx;
-        let trailing_char_idx = if line_idx == 0 {
-            self.trailing_char_idx - rhs.trailing_char_idx
-        } else {
-            self.trailing_char_idx
-        };
-        Self {
-            line_idx,
-            trailing_char_idx,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SeekSoftWrapPosition {
     pub wrap_width: NonZeroUsize,
@@ -1214,7 +1136,7 @@ impl Default for SeekSoftWrapPosition {
 }
 
 impl SeekSoftWrapPosition {
-    fn new(wrap_width: NonZeroUsize, line_idx: usize) -> Self {
+    pub fn new(wrap_width: NonZeroUsize, line_idx: usize) -> Self {
         Self {
             wrap_width,
             line_idx,
@@ -1303,13 +1225,6 @@ impl<'a> std::ops::Add<&'a TextSummary> for SeekSoftWrapPosition {
             line_idx: self.line_idx + new_lines,
             trailing_line_chars,
         }
-    }
-}
-impl std::ops::Add for SeekSoftWrapPosition {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        unimplemented!()
     }
 }
 impl std::ops::Sub for SeekSoftWrapPosition {
@@ -1530,17 +1445,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dim_line_idx() {
-        let tree = Tree::from_str("Line 1\nLine 2\n\u{0d30}\u{0d4b}\nLine 3\n");
-        assert_eq!(tree.resolve_dimension(SeekLineIdx(0)), Some(0));
-        assert_eq!(tree.resolve_dimension(SeekLineIdx(1)), Some(7));
-        assert_eq!(tree.resolve_dimension(SeekLineIdx(2)), Some(14));
-        assert_eq!(tree.resolve_dimension(SeekLineIdx(3)), Some(17));
-        assert_eq!(tree.resolve_dimension(SeekLineIdx(4)), Some(24));
-        assert_eq!(tree.resolve_dimension(SeekLineIdx(5)), None);
-    }
-
-    #[test]
     fn test_dim_line_char() {
         let mut tree = Tree::new();
         const N: usize = 100;
@@ -1553,11 +1457,11 @@ mod tests {
         assert_eq!(tree.len_bytes(), N * line_bytes_len);
 
         assert_eq!(
-            tree.resolve_dimension(SeekCursorPosition {
-                line_idx: 42,
-                trailing_char_idx: 6,
-            }),
-            Some(42 * line_bytes_len + 6)
+            tree.resolve_dimension(SeekSoftWrapPosition::new(
+                usize::MAX.try_into().unwrap(),
+                42
+            )),
+            Some(42 * line_bytes_len)
         )
     }
 
@@ -1580,9 +1484,15 @@ mod tests {
         let tree = Tree::from_str(input);
         let mut cursor = Cursor::new(&tree);
         let target_line = line!() as usize - 1; // 1 based
-        cursor.seek_to_char(SeekLineIdx(target_line))?;
+        cursor.seek_to_char(SeekSoftWrapPosition::new(
+            usize::MAX.try_into().unwrap(),
+            target_line,
+        ))?;
         let mut output = String::new();
-        for (text, _sgr) in cursor.iter_until(SeekLineIdx(target_line + 1)) {
+        for (text, _sgr) in cursor.iter_until(SeekSoftWrapPosition::new(
+            usize::MAX.try_into().unwrap(),
+            target_line + 1,
+        )) {
             output.push_str(text);
         }
         assert_eq!(

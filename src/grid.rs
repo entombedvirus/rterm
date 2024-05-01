@@ -91,9 +91,9 @@ impl Grid {
     }
 
     pub fn cursor_position(&self) -> (usize, usize) {
-        let tree::SeekCursorPosition {
+        let tree::SeekSoftWrapPosition {
             line_idx: row,
-            trailing_char_idx: col,
+            trailing_line_chars: col,
             ..
         } = self.cursor_state.position;
         (row, col)
@@ -123,7 +123,12 @@ impl Grid {
 
     pub fn clear_screen(&mut self) {
         puffin::profile_function!();
-        let line_idx = tree::SeekLineIdx(self.first_visible_line_no());
+        let line_idx = tree::SeekSoftWrapPosition::new(
+            self.num_cols()
+                .try_into()
+                .expect("num_cols must be non-zero"),
+            self.first_visible_line_no(),
+        );
         self.text.remove_range(line_idx..);
         for _ in 0..self.num_rows() {
             self.text
@@ -139,9 +144,9 @@ impl Grid {
     }
 
     pub fn move_cursor_relative(&mut self, dr: isize, dc: isize) {
-        let tree::SeekCursorPosition {
+        let tree::SeekSoftWrapPosition {
             line_idx: row,
-            trailing_char_idx: col,
+            trailing_line_chars: col,
             ..
         } = self.cursor_state.position;
         let mut new_row = (row as isize + dr) as usize;
@@ -159,7 +164,7 @@ impl Grid {
         // new position is within bounds
         if new_row < self.num_rows() {
             self.cursor_state.position.line_idx = new_row;
-            self.cursor_state.position.trailing_char_idx = new_col;
+            self.cursor_state.position.trailing_line_chars = new_col;
             return;
         }
 
@@ -193,7 +198,7 @@ impl Grid {
         self.num_buffer_rows += num_new_rows;
 
         self.cursor_state.position.line_idx = self.num_rows() - 1;
-        self.cursor_state.position.trailing_char_idx = new_col;
+        self.cursor_state.position.trailing_line_chars = new_col;
     }
 
     pub fn cursor_format_mut(&mut self) -> &mut SgrState {
@@ -341,27 +346,16 @@ impl Grid {
     }
 
     pub fn erase_from_cursor_to_eol(&mut self) {
-        let next_line = self.cursor_state.position.line_idx + 1;
-        self.erase(self.cursor_state.position, tree::SeekLineIdx(next_line));
+        todo!()
     }
 
     pub fn erase_from_cursor_to_screen(&mut self) {
-        self.erase(
-            self.cursor_state.position,
-            tree::SeekLineIdx(self.num_rows()),
-        );
+        todo!()
     }
 
     pub fn move_lines_down(&mut self, start_line_no: usize, n: usize) {
         assert!(start_line_no < self.num_rows());
-        for _ in 0..n {
-            self.text.insert_str(
-                tree::SeekLineIdx(start_line_no),
-                self.blank_line.as_ref(),
-                SgrState::default(),
-            );
-        }
-        self.remove_screen_rows((self.num_screen_rows - n as isize)..self.num_screen_rows);
+        todo!()
     }
 
     fn rope_with_n_blank_lines(num_rows: usize, blank_line: &str) -> Tree {
@@ -381,24 +375,7 @@ impl Grid {
         }: Range<ScreenCoord>,
     ) {
         puffin::profile_function!();
-        self.text
-            .remove_range(tree::SeekLineIdx(start)..tree::SeekLineIdx(end));
-    }
-
-    fn erase(&mut self, edit_point: tree::SeekCursorPosition, to_row: tree::SeekLineIdx) {
-        // starting partial row
-        let n = self.num_cols() - edit_point.trailing_char_idx;
-        self.text
-            .replace_str(edit_point, &self.blank_line[..n], SgrState::default());
-
-        // remaining complete rows
-        self.text
-            .remove_range(tree::SeekLineIdx(edit_point.line_idx + 1)..to_row);
-        let n = to_row.0 - edit_point.line_idx - 1;
-        for _ in 0..n {
-            self.text
-                .push_str(self.blank_line.as_str(), SgrState::default());
-        }
+        todo!()
     }
 }
 
@@ -445,19 +422,13 @@ fn resolve_range<R: RangeBounds<usize>>(
 
 #[derive(Debug, Default, Copy, Clone)]
 struct CursorState {
-    position: tree::SeekCursorPosition, // in the range (0..num_rows, 0..num_cols)
+    position: tree::SeekSoftWrapPosition, // in the range (0..num_rows, 0..num_cols)
     sgr_state: SgrState,
     pending_wrap: bool,
 }
 impl CursorState {
     fn clamp_position(&mut self, new_num_rows: usize, new_num_cols: usize) {
-        let tree::SeekCursorPosition {
-            line_idx: r,
-            trailing_char_idx: c,
-            ..
-        } = &mut self.position;
-        *r = std::cmp::min(*r, new_num_rows - 1);
-        *c = std::cmp::min(*c, new_num_cols - 1);
+        todo!()
     }
 }
 
