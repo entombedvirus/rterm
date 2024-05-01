@@ -217,6 +217,8 @@ pub struct TreeSlice {
 mod iter {
     use std::{collections::VecDeque, num::NonZeroUsize, ops::Range, sync::Arc};
 
+    use anyhow::Context;
+
     use crate::{grid_string::GridString, terminal_emulator::SgrState};
 
     use super::{Node, SeekCharIdx, SeekSoftWrapPosition, SeekTarget, Tree, TreeSlice};
@@ -289,13 +291,18 @@ mod iter {
         child_idx: usize,
     }
     impl StackEntry<'_> {
+        fn next_sum(&self) -> usize {
+            self.running_sum
+                + self
+                    .node
+                    .child_summaries()
+                    .get(self.child_idx)
+                    .map(|summary| summary.chars)
+                    .expect("child_idx is not valid")
+        }
+
         fn next_child(&mut self) {
-            self.running_sum += self
-                .node
-                .child_summaries()
-                .get(self.child_idx)
-                .map(|summary| summary.chars)
-                .expect("child_idx is not valid");
+            self.running_sum = self.next_sum();
             self.child_idx += 1;
         }
     }
@@ -319,10 +326,11 @@ mod iter {
             }
         }
 
-        pub fn seek_to_char<T: SeekTarget>(&mut self, seek_target: T) {
-            let Some(target_char_idx) = self.tree.resolve_dimension(seek_target) else {
-                return;
-            };
+        pub fn seek_to_char<T: SeekTarget>(&mut self, seek_target: T) -> anyhow::Result<()> {
+            let target_char_idx = self
+                .tree
+                .resolve_dimension(seek_target)
+                .context("invalid seek_target")?;
             self.prune_stack(target_char_idx);
 
             while let Some(StackEntry {
@@ -349,7 +357,7 @@ mod iter {
                 match **parent {
                     Node::Leaf { .. } => {
                         self.char_position = target_char_idx;
-                        return;
+                        return Ok(());
                     }
                     Node::Internal { ref children, .. } => {
                         let child = children[*child_idx].as_ref();
@@ -363,11 +371,13 @@ mod iter {
                 }
             }
             debug_assert!(self.stack.is_empty() || self.stack[0].node.is_leaf());
+            Err(anyhow::format_err!("out of bounds: ran out of nodes"))
         }
 
         fn prune_stack(&mut self, target_char_idx: usize) {
-            self.stack
-                .retain(|entry| entry.running_sum <= target_char_idx);
+            self.stack.retain(|entry| {
+                entry.running_sum <= target_char_idx && entry.next_sum() > target_char_idx
+            });
 
             if self.stack.is_empty() {
                 self.stack.push(StackEntry {
@@ -386,8 +396,8 @@ mod iter {
             node.child_segments().get(*child_idx)
         }
 
-        pub fn advance_char_offset(&mut self, delta: usize) {
-            self.seek_to_char(SeekCharIdx(self.char_position + delta));
+        pub fn advance_char_offset(&mut self, delta: usize) -> anyhow::Result<()> {
+            self.seek_to_char(SeekCharIdx(self.char_position + delta))
         }
 
         pub fn segment_str(&self) -> Option<&str> {
@@ -841,7 +851,7 @@ impl Node {
                 match self {
                     Node::Leaf { children, .. } => {
                         let foo = children[child_idx].as_str();
-                        let x = 1;
+                        let _ = foo.len();
                     }
                     Node::Internal {
                         children,
@@ -853,20 +863,18 @@ impl Node {
                             root: children[child_idx].clone(),
                         };
                         let sub_tree_str = sub_tree.to_string();
-                        let x = 1;
+                        let _ = sub_tree_str.len();
                     }
                 }
             }
             let next_sum = running_sum + child_summary;
-            if next_sum >= seek_target {
+            if next_sum > seek_target {
                 let child_seek_target = seek_target - running_sum;
                 return match self {
                     Node::Leaf { children, .. } => {
                         let segment = &children[child_idx];
                         let child_str = segment.as_str();
-                        let child_char_idx = child_seek_target
-                            .to_char_idx(child_str)
-                            .unwrap_or(segment.len_chars());
+                        let child_char_idx = child_seek_target.to_char_idx(child_str)?;
                         Some(agg_summary.chars + child_char_idx)
                     }
                     Node::Internal { children, .. } => {
@@ -1175,9 +1183,15 @@ impl std::ops::Sub for SeekCursorPosition {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
+        let line_idx = self.line_idx - rhs.line_idx;
+        let trailing_char_idx = if line_idx == 0 {
+            self.trailing_char_idx - rhs.trailing_char_idx
+        } else {
+            self.trailing_char_idx
+        };
         Self {
-            line_idx: self.line_idx - rhs.line_idx,
-            trailing_char_idx: self.trailing_char_idx,
+            line_idx,
+            trailing_char_idx,
         }
     }
 }
@@ -1226,6 +1240,10 @@ impl SeekTarget for SeekSoftWrapPosition {
     }
 
     fn to_char_idx(&self, s: &str) -> Option<usize> {
+        assert!(
+            self.trailing_line_chars < self.wrap_width.get(),
+            "trailing chars must be less than the line wrap width"
+        );
         let mut lines_to_skip = self.line_idx;
         let mut chars_to_skip = if self.line_idx == 0 {
             self.trailing_line_chars
@@ -1236,16 +1254,21 @@ impl SeekTarget for SeekSoftWrapPosition {
             if lines_to_skip == 0 && chars_to_skip == 0 {
                 return Some(i);
             }
-            if lines_to_skip > 0 && (ch == '\n' || chars_to_skip == 0) {
+            if ch == '\n' || (lines_to_skip > 0 && chars_to_skip == 1) {
+                if lines_to_skip == 0 {
+                    // encountered new line when we don't have any more lines
+                    // to skip. This is an invalid position
+                    return None;
+                }
                 lines_to_skip -= 1;
                 chars_to_skip = if lines_to_skip == 0 {
                     self.trailing_line_chars
                 } else {
                     self.wrap_width.get()
                 };
-                continue;
+            } else {
+                chars_to_skip -= 1;
             }
-            chars_to_skip -= 1;
         }
         None
     }
@@ -1524,6 +1547,8 @@ mod tests {
         for i in 0..N {
             tree.push_str(format!("Line {:03}\n", i).as_str(), SgrState::default());
         }
+        assert_eq!(tree.len_lines(), N);
+
         let line_bytes_len = "Line 000\n".len();
         assert_eq!(tree.len_bytes(), N * line_bytes_len);
 
@@ -1537,24 +1562,25 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_1() {
+    fn test_cursor_1() -> anyhow::Result<()> {
         let tree = Tree::from_str("Line 1\nLine 2\nLine 3");
         let mut cursor = Cursor::new(&tree);
-        cursor.seek_to_char(SeekCharIdx(19));
+        cursor.seek_to_char(SeekCharIdx(19))?;
         assert_eq!(cursor.segment_str(), Some("3"));
-        cursor.seek_to_char(SeekCharIdx(16));
+        cursor.seek_to_char(SeekCharIdx(16))?;
         assert_eq!(cursor.segment_str(), Some("ne 3"));
-        cursor.seek_to_char(SeekCharIdx(0));
+        cursor.seek_to_char(SeekCharIdx(0))?;
         assert_eq!(cursor.segment_str(), Some("Line 1\nL"));
+        Ok(())
     }
 
     #[test]
-    fn test_cursor_2() {
+    fn test_cursor_2() -> anyhow::Result<()> {
         let input = &LARGE_TEXT;
         let tree = Tree::from_str(input);
         let mut cursor = Cursor::new(&tree);
         let target_line = line!() as usize - 1; // 1 based
-        cursor.seek_to_char(SeekLineIdx(target_line));
+        cursor.seek_to_char(SeekLineIdx(target_line))?;
         let mut output = String::new();
         for (text, _sgr) in cursor.iter_until(SeekLineIdx(target_line + 1)) {
             output.push_str(text);
@@ -1563,6 +1589,7 @@ mod tests {
             output.as_str(),
             "        let target_line = line!() as usize - 1; // 1 based\n"
         );
+        Ok(())
     }
 
     #[test]
