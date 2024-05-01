@@ -69,10 +69,13 @@ impl Tree {
             self.find_string_segment_mut(
                 SeekCharIdx(char_idx),
                 |segment: &mut GridString, segment_char_idx: usize| -> Option<GridString> {
-                    let (chars_written, rem) = segment.replace_str(segment_char_idx, new_text, sgr);
-                    if chars_written == 0 {
-                        todo!()
+                    if segment_char_idx == segment.len_chars() {
+                        let (overflow, chars_written, rem) = segment.push_str(new_text, sgr);
+                        new_text = rem;
+                        char_idx += chars_written;
+                        return overflow;
                     }
+                    let (chars_written, rem) = segment.replace_str(segment_char_idx, new_text, sgr);
                     new_text = rem;
                     char_idx += chars_written;
                     None
@@ -286,13 +289,7 @@ mod iter {
             self.cursor = Some(cursor);
             Some(TreeSlice { text, sgr })
         }
-
-        fn size_hint(&self) -> (usize, Option<usize>) {
-            todo!()
-        }
     }
-
-    impl ExactSizeIterator for SoftWrappedLineIter<'_> {}
 
     #[derive(Debug)]
     struct StackEntry<'a> {

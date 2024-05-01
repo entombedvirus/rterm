@@ -290,7 +290,7 @@ impl Grid {
     pub fn display_lines<'a, R: RangeBounds<usize>>(
         &'a self,
         query_range: R,
-    ) -> impl Iterator<Item = DisplayLine> + ExactSizeIterator + 'a {
+    ) -> impl Iterator<Item = DisplayLine> + 'a {
         self.text
             .iter_soft_wrapped_lines(
                 NonZeroUsize::new(self.num_cols()).expect("columns must be non-zero"),
@@ -634,7 +634,6 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target"#;
 
     fn assert_is_blank(grid: &Grid, line_range: Range<usize>) {
         let lines = grid.display_lines(line_range.clone());
-        assert_eq!(lines.len(), line_range.len());
 
         let mut blank_line = grid.blank_line.to_string();
         // tailing newline won't be in the output
