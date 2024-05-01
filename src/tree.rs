@@ -48,6 +48,10 @@ impl Tree {
         self.root.node_summary().lines
     }
 
+    pub fn max_bound<T: SeekTarget>(&self, target: T) -> T {
+        target.zero() + self.root.node_summary()
+    }
+
     pub fn push_str(&mut self, mut new_text: &str, sgr: SgrState) {
         // TODO: if new_text is larger than what will fit in a leaf node, create a tree from it and
         // merge
@@ -216,6 +220,10 @@ impl Tree {
 
     fn is_empty(&self) -> bool {
         self.len_chars() == 0
+    }
+
+    pub fn truncate(&self, screen_to_buffer_pos: SeekSoftWrapPosition) {
+        todo!()
     }
 }
 
@@ -1140,13 +1148,17 @@ impl SeekSoftWrapPosition {
         }
     }
 
+    pub fn total_rows(&self) -> usize {
+        if self.trailing_line_chars > 0 {
+            self.line_idx + 1
+        } else {
+            self.line_idx
+        }
+    }
+
     fn compute_max_line(wrap_width: NonZeroUsize, summary: &TextSummary) -> usize {
         let ret = Self::new(wrap_width, 0) + summary;
-        if ret.trailing_line_chars > 0 {
-            ret.line_idx + 1
-        } else {
-            ret.line_idx
-        }
+        ret.total_rows()
     }
 }
 impl SeekTarget for SeekSoftWrapPosition {
