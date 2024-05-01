@@ -928,15 +928,13 @@ where
 
         let old_seam_idx = seam_idx;
         let empty_idx = items.iter().position(|it| it.is_empty()).or_else(|| {
+            // to ensure that we preserve the seam and not compact items at old_seam_idx and the
+            // next one, we do the compaction on two separate partitions.
             let (prefix, suffix) = items.split_at_mut(old_seam_idx);
-            Self::compact_slice(prefix);
             // to ensure that we keep at least B children, we should stop compaction as soon as we free
             // up exactly one slot. So lazily evaluate the suffix compaction.
-            let prefix_has_empty = prefix.last().map_or(false, |it| it.is_empty());
-            if !prefix_has_empty {
-                Self::compact_slice(suffix);
-            }
-            items.iter().position(|it| it.is_empty())
+            Self::compact_slice(prefix)
+                .or_else(|| Self::compact_slice(suffix).map(|i| prefix.len() + i))
         });
 
         if let Some(empty_idx) = empty_idx {
@@ -951,26 +949,22 @@ where
         }
     }
 
-    fn compact_slice(items: &mut [Self]) {
+    /// returns the index of the slot we freed up, if any
+    fn compact_slice(items: &mut [Self]) -> Option<usize> {
         let mut i = 0;
-        'outer: while i + 1 < items.len() {
+        while i + 1 < items.len() {
             let (prefix, suffix) = items.split_at_mut(i + 1);
             let a = &mut prefix[i];
-            for b in suffix {
-                if b.is_empty() {
-                    continue;
-                }
-                if a.is_empty() {
-                    std::mem::swap(a, b);
-                    continue 'outer;
-                }
-                if Self::compact_two(a, b) {
-                    i += 1;
-                    continue 'outer;
-                }
+            let b = &mut suffix[0];
+            Self::compact_two(a, b);
+            if b.is_empty() {
+                // must only free up one slot to maintain tree semantics
+                return Some(i + 1);
+            } else {
+                i += 1;
             }
-            break;
         }
+        None
     }
 }
 
@@ -1045,7 +1039,7 @@ impl std::fmt::Debug for Node {
         struct ChildSummary(usize);
         match self {
             Self::Leaf { children, .. } => {
-                write!(f, "Leaf({}, <", children.len())?;
+                write!(f, "Leaf({}, {} chars, <", children.len(), self.len_chars())?;
                 for child in children {
                     write!(f, "{:?}|", child.as_str())?;
                 }
@@ -1054,7 +1048,12 @@ impl std::fmt::Debug for Node {
             Self::Internal {
                 height, children, ..
             } => {
-                writeln!(f, "Height: {height}, {} children", children.len())?;
+                writeln!(
+                    f,
+                    "Height: {height}, {} children, {} chars",
+                    children.len(),
+                    self.len_chars()
+                )?;
                 for (idx, child) in children.into_iter().enumerate() {
                     writeln!(
                         f,
@@ -1367,7 +1366,7 @@ mod tests {
     #[test]
     fn test_large_input_1() {
         let mut tree = Tree::new();
-        let input = &LARGE_TEXT[..];
+        let input = &LARGE_TEXT[..LARGE_TEXT.len()];
         tree.push_str(input, SgrState::default());
         assert_eq!(tree.to_string().as_str(), input);
 
@@ -1375,7 +1374,7 @@ mod tests {
         for (idx, node) in tree.iter_nodes().enumerate() {
             assert!(
                 idx == 0 || node.is_leaf() || node.child_summaries().len() >= B,
-                "{node:?}\nTree:\n {tree:?}"
+                "{node:?}\n{tree:?}"
             );
         }
     }
