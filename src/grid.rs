@@ -61,7 +61,7 @@ impl Grid {
                 .take(num_cols)
                 .chain(std::iter::once('\n')),
         ));
-        let text = Self::rope_with_n_blank_lines(num_rows, blank_line.as_ref());
+        let text = Tree::new();
 
         Self {
             num_screen_rows: ScreenCoord(num_rows),
@@ -85,14 +85,7 @@ impl Grid {
     // in range num_rows..=max_scrollback_rows
     pub fn total_rows(&self) -> usize {
         // TODO: will need to use len_graphemes() later
-        self.text
-            .max_bound(tree::SeekSoftWrapPosition::new(
-                self.num_cols()
-                    .try_into()
-                    .expect("num_cols must be non-zero"),
-                0,
-            ))
-            .total_rows()
+        self.max_cursor_position().total_rows()
     }
 
     pub fn cursor_position(&self) -> (usize, usize) {
@@ -157,12 +150,12 @@ impl Grid {
         assert!(new_col < self.num_cols());
         self.cursor_state.pending_wrap = false;
 
-        if let Some(n) = new_row.checked_sub(self.num_rows()) {
-            let rows_to_add = n + 1;
-            for _ in 0..rows_to_add {
-                self.text.push_str(&self.blank_line, SgrState::default());
-            }
-        }
+        // if let Some(n) = new_row.checked_sub(self.num_rows()) {
+        //     let rows_to_add = n + 1;
+        //     for _ in 0..rows_to_add {
+        //         self.text.push_str(&self.blank_line, SgrState::default());
+        //     }
+        // }
         self.cursor_state.position = (ScreenCoord(new_row), ScreenCoord(new_col));
         self.cursor_state
             .clamp_position(self.num_rows(), self.num_cols());
@@ -188,14 +181,6 @@ impl Grid {
                 .chain(std::iter::once('\n')),
         );
         self.blank_line = Rc::new(new_blank_line);
-
-        // add new blank lines at the end if we are resizing to have more rows that we have now
-        if let Some(to_add) = new_num_rows.checked_sub(self.total_rows()) {
-            for _ in 0..to_add {
-                self.text
-                    .push_str(self.blank_line.as_ref(), SgrState::default());
-            }
-        }
 
         self.num_screen_rows = ScreenCoord(new_num_rows);
         self.num_screen_cols = ScreenCoord(new_num_cols);
@@ -233,9 +218,6 @@ impl Grid {
         } else {
             self.move_cursor_relative(0, edit_len as isize);
         }
-
-        let foo = self.text.to_string();
-        eprintln!("{}", foo);
     }
 
     // scan the rope counting the number of display lines (with soft-wrapping) until
@@ -245,6 +227,7 @@ impl Grid {
         &'a self,
         query_range: R,
     ) -> impl Iterator<Item = DisplayLine> + 'a {
+        puffin::profile_function!();
         self.text
             .iter_soft_wrapped_lines(
                 NonZeroUsize::new(self.num_cols()).expect("columns must be non-zero"),
@@ -279,16 +262,26 @@ impl Grid {
                         format_attributes.push(x);
                     }
                 }
+                if let Some(state) = cur.take() {
+                    format_attributes.push(state);
+                }
 
                 // add padding so that the line is at least num_cols wide
                 {
                     let n = padded_text.chars().count();
                     if let Some(to_add) = self.num_cols().checked_sub(n) {
                         let blanks = &self.blank_line[..to_add];
-                        format_attributes.push(FormatAttribute {
-                            sgr_state: SgrState::default(),
-                            byte_range: padded_text.len()..padded_text.len() + blanks.len(),
-                        });
+                        if let Some(FormatAttribute { byte_range, .. }) = format_attributes
+                            .last_mut()
+                            .filter(|format| format.sgr_state == SgrState::default())
+                        {
+                            byte_range.end += blanks.len();
+                        } else {
+                            format_attributes.push(FormatAttribute {
+                                sgr_state: SgrState::default(),
+                                byte_range: padded_text.len()..padded_text.len() + blanks.len(),
+                            });
+                        }
                         padded_text.push_str(blanks);
                     }
                 }
@@ -301,12 +294,10 @@ impl Grid {
     }
 
     pub fn erase_from_cursor_to_eol(&mut self) {
-        let (_, col) = self.cursor_position();
-        let n = self.num_cols() - col;
-        let blanks = &self.blank_line[..n];
         let cursor_pos = self.screen_to_buffer_pos();
-        self.text
-            .replace_str(cursor_pos, blanks, SgrState::default());
+        let mut next_line = cursor_pos.clone();
+        next_line.line_idx = cursor_pos.line_idx + 1;
+        next_line.trailing_line_chars = 0;
     }
 
     pub fn erase_from_cursor_to_screen(&mut self) {
@@ -319,18 +310,24 @@ impl Grid {
     }
 
     fn screen_to_buffer_pos(&self) -> tree::SeekSoftWrapPosition {
-        let num_cols = self
+        let wrap_width = self
             .num_cols()
             .try_into()
             .expect("num_cols must be non-zero");
         let end_pos = self
             .text
-            .max_bound(tree::SeekSoftWrapPosition::new(num_cols, 0));
-        let mut delta = tree::SeekSoftWrapPosition::new(num_cols, 0);
+            .max_bound(tree::SeekSoftWrapPosition::new(wrap_width, 0));
         let (row, col) = self.cursor_position();
-        delta.line_idx = self.num_rows() - row - 1;
-        delta.trailing_line_chars = self.num_cols() - col - 1;
-        end_pos - delta
+        if end_pos.total_rows() >= self.num_rows() {
+            let mut delta = tree::SeekSoftWrapPosition::new(wrap_width, 0);
+            delta.line_idx = self.num_rows() - row - 1;
+            delta.trailing_line_chars = self.num_cols() - col - 1;
+            end_pos - delta
+        } else {
+            let mut ret = tree::SeekSoftWrapPosition::new(wrap_width, row);
+            ret.trailing_line_chars = col;
+            ret
+        }
     }
 
     fn rope_with_n_blank_lines(num_rows: usize, blank_line: &str) -> Tree {
@@ -340,6 +337,23 @@ impl Grid {
             tree.push_str(blank_line, SgrState::default());
         }
         tree
+    }
+
+    /// Inserts a hard line-wrap `\n` if the cursor is on the last row of the buffer. Otherwise,
+    /// does nothing.
+    pub fn insert_linebreak_if_needed(&mut self) {
+        if self.screen_to_buffer_pos().line_idx == self.max_cursor_position().line_idx {
+            self.text.push_str("\n", SgrState::default());
+        }
+    }
+
+    fn max_cursor_position(&self) -> tree::SeekSoftWrapPosition {
+        self.text.max_bound(tree::SeekSoftWrapPosition::new(
+            self.num_cols()
+                .try_into()
+                .expect("num_cols must be non-zero"),
+            0,
+        ))
     }
 }
 

@@ -190,6 +190,7 @@ impl Tree {
         } else if seek_target == seek_target.zero() + self.root.node_summary() {
             Some(self.len_chars())
         } else {
+            let foo = self.to_string();
             self.root.dimension_to_char_idx(seek_target)
         }
     }
@@ -222,8 +223,8 @@ impl Tree {
         self.len_chars() == 0
     }
 
-    pub fn truncate(&self, screen_to_buffer_pos: SeekSoftWrapPosition) {
-        todo!()
+    pub fn truncate<T: SeekTarget>(&mut self, target: T) {
+        self.remove_range(target..);
     }
 }
 

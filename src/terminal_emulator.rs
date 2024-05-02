@@ -589,6 +589,7 @@ impl TerminalEmulator {
                         grid.move_cursor_relative(0, 4);
                     }
                     AnsiToken::AsciiControl(AsciiControl::LineFeed) => {
+                        grid.insert_linebreak_if_needed();
                         grid.move_cursor_relative(1, 0);
                     }
                     AnsiToken::AsciiControl(AsciiControl::CarriageReturn) => {
