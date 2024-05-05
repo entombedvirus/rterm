@@ -149,16 +149,7 @@ impl Grid {
         puffin::profile_function!();
         assert!(new_col < self.num_cols());
         self.cursor_state.pending_wrap = false;
-
-        // if let Some(n) = new_row.checked_sub(self.num_rows()) {
-        //     let rows_to_add = n + 1;
-        //     for _ in 0..rows_to_add {
-        //         self.text.push_str(&self.blank_line, SgrState::default());
-        //     }
-        // }
         self.cursor_state.position = (ScreenCoord(new_row), ScreenCoord(new_col));
-        self.cursor_state
-            .clamp_position(self.num_rows(), self.num_cols());
     }
 
     pub fn cursor_format_mut(&mut self) -> &mut SgrState {
@@ -226,6 +217,15 @@ impl Grid {
             self.cursor_state.pending_wrap = true;
         } else {
             self.move_cursor_relative(0, edit_len as isize);
+        }
+
+        if let Some(lines_to_remove) = self
+            .total_rows()
+            .checked_sub(self.max_rows.0)
+            .and_then(NonZeroUsize::new)
+        {
+            self.text
+                .remove_range(..self.new_buf_pos(lines_to_remove.get(), 0));
         }
     }
 
@@ -390,15 +390,9 @@ impl Grid {
     }
 
     fn screen_to_buffer_pos(&self) -> tree::SeekSoftWrapPosition {
-        let end_pos = self.max_buf_position();
         let (row, col) = self.cursor_position();
-
-        if end_pos.total_rows() >= self.num_rows() {
-            let delta = self.new_buf_pos(self.num_rows() - row - 1, self.num_cols() - col - 1);
-            end_pos - delta
-        } else {
-            self.new_buf_pos(row, col)
-        }
+        let scrollback_rows = self.total_rows().saturating_sub(self.num_rows());
+        self.new_buf_pos(scrollback_rows + row, col)
     }
 
     fn rope_with_n_blank_lines(num_rows: usize, blank_line: &str) -> Tree {
@@ -588,8 +582,11 @@ mod tests {
     #[test]
     fn test_grid_1() {
         let grid = Grid::new(3, 10);
-        assert_eq!(grid.display_lines(..).count(), 3);
-        assert_is_blank(&grid, 0..3);
+        assert_eq!(
+            grid.display_lines(..).count(),
+            0,
+            "blank grid is not expected to produce any lines"
+        );
     }
 
     #[test]
@@ -598,7 +595,7 @@ mod tests {
         grid.write_text_at_cursor("foo");
 
         assert_nth_line(&grid, 0, "foo-------");
-        assert_is_blank(&grid, 1..3);
+        assert_eq!(grid.display_lines(..).count(), 1);
         assert_eq!(grid.cursor_position(), (0, 3));
 
         // cause wrapping
@@ -617,9 +614,10 @@ mod tests {
         grid.write_text_at_cursor("ccccccccc");
         assert_nth_line(&grid, 2, "bccccccccc");
         grid.write_text_at_cursor("d");
-        // assert_nth_line(&grid, 0, "zaaaaaaaaa");
-        // assert_nth_line(&grid, 1, "bccccccccc");
-        // assert_nth_line(&grid, 2, "d---------");
+
+        assert_nth_line(&grid, 0, "zaaaaaaaaa");
+        assert_nth_line(&grid, 1, "bccccccccc");
+        assert_nth_line(&grid, 2, "d---------");
     }
 
     #[test]
@@ -627,8 +625,8 @@ mod tests {
         let mut grid = Grid::new(3, 10);
         grid.max_scrollback_lines(100);
         grid.resize(5, 10);
-        assert_eq!(grid.total_rows(), 5);
-        assert_eq!(grid.text.len_lines(), 6);
+        assert_eq!(grid.total_rows(), 0);
+        assert_eq!(grid.text.len_lines(), 0);
 
         grid.write_text_at_cursor("aaaaaaaaaa");
         grid.write_text_at_cursor("bbbbbbbbbb");
