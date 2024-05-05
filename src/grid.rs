@@ -85,7 +85,7 @@ impl Grid {
     // in range num_rows..=max_scrollback_rows
     pub fn total_rows(&self) -> usize {
         // TODO: will need to use len_graphemes() later
-        self.max_cursor_position().total_rows()
+        self.max_buf_position().total_rows()
     }
 
     pub fn cursor_position(&self) -> (usize, usize) {
@@ -184,12 +184,18 @@ impl Grid {
 
         self.num_screen_rows = ScreenCoord(new_num_rows);
         self.num_screen_cols = ScreenCoord(new_num_cols);
-        self.cursor_state
-            .clamp_position(self.num_rows(), self.num_cols());
 
         let new_num_rows = BufferCoord(new_num_rows);
         self.max_rows = self.max_rows.max(new_num_rows);
 
+        if let Err(err) = self.text.resolve_dimension(self.screen_to_buffer_pos()) {
+            self.move_cursor(
+                err.last_valid_position.line_idx,
+                err.last_valid_position.trailing_line_chars,
+            );
+        }
+        self.cursor_state
+            .clamp_position(self.num_rows(), self.num_cols());
         true
     }
 
@@ -205,11 +211,14 @@ impl Grid {
             self.move_cursor(row + 1, 0);
         }
 
+        self.sync_buffer_to_cursor_position();
         self.text.replace_str(
             self.screen_to_buffer_pos(),
             txt,
             self.cursor_state.sgr_state,
         );
+
+        // move cursor along
         let edit_len = txt.chars().count();
         let (_, cur_col) = self.cursor_position();
         if cur_col + (edit_len % self.num_cols()) == self.num_cols() {
@@ -217,6 +226,48 @@ impl Grid {
             self.cursor_state.pending_wrap = true;
         } else {
             self.move_cursor_relative(0, edit_len as isize);
+        }
+    }
+
+    // the screen pos can go out of sync with valid positions inside the text buffer. This can
+    // happen due to the fact that lines in the buffer are not always `self.num_cols()` wide
+    // (holding that invariant makes resizing prohibitively expensive; scanning every line in
+    // the scrollback). Additionally, when the buffer has fewer rows than number of lines one
+    // the screen, the cursor might attempt to jump to a position way past the end.
+    //
+    // To combat this, we check if the position we are about to modify actually exists within
+    // the buffer and if it is not, adding blanks spaces or new lines as appropriate in order
+    // to make the position valid.
+    fn sync_buffer_to_cursor_position(&mut self) {
+        let desired_pos = self.screen_to_buffer_pos();
+        if let Err(tree::OutOfBounds {
+            mut last_valid_position,
+            ..
+        }) = self.text.resolve_dimension(desired_pos)
+        {
+            let before = self.text.to_string();
+            dbg!(&last_valid_position);
+            if let Some(lines_to_add) = desired_pos
+                .line_idx
+                .checked_sub(last_valid_position.line_idx)
+                .and_then(NonZeroUsize::new)
+            {
+                self.text.push_str(
+                    "\n".repeat(lines_to_add.get()).as_str(),
+                    SgrState::default(),
+                );
+                last_valid_position.line_idx = desired_pos.line_idx;
+                last_valid_position.trailing_line_chars = 0;
+            }
+            let after = self.text.to_string();
+
+            let n = desired_pos.trailing_line_chars - last_valid_position.trailing_line_chars;
+            self.text.insert_str(
+                last_valid_position,
+                &self.blank_line[..n],
+                SgrState::default(),
+            );
+            debug_assert!(self.text.resolve_dimension(desired_pos).is_ok());
         }
     }
 
@@ -295,13 +346,42 @@ impl Grid {
 
     pub fn erase_from_cursor_to_eol(&mut self) {
         let cursor_pos = self.screen_to_buffer_pos();
-        let mut next_line = cursor_pos.clone();
-        next_line.line_idx = cursor_pos.line_idx + 1;
-        next_line.trailing_line_chars = 0;
+        if let Err(_) = self.text.resolve_dimension(cursor_pos) {
+            // cursor is already outside anywhere we have text anyway.
+            // Nothing to erase in this case.
+            return;
+        }
+
+        let end_of_buf = self.text.max_bound(cursor_pos);
+        if cursor_pos >= end_of_buf {
+            // nothing to erase
+            return;
+        }
+
+        let mut next_line = self.new_buf_pos(cursor_pos.line_idx + 1, 0);
+        if next_line < end_of_buf {
+            if let Err(err) = self.text.resolve_dimension(next_line) {
+                next_line = err.last_valid_position;
+            }
+        } else {
+            next_line = end_of_buf;
+        }
+        self.text.remove_range(cursor_pos..next_line);
     }
 
     pub fn erase_from_cursor_to_screen(&mut self) {
-        self.text.truncate(self.screen_to_buffer_pos());
+        let mut cursor_pos = self.screen_to_buffer_pos();
+        let end_of_buf = self.text.max_bound(cursor_pos);
+        if cursor_pos >= end_of_buf {
+            return;
+        }
+
+        if let Err(err) = self.text.resolve_dimension(cursor_pos) {
+            // hmm? won't this cause text before the cursor to get erased?
+            cursor_pos = err.last_valid_position;
+            return;
+        }
+        self.text.truncate(cursor_pos);
     }
 
     pub fn move_lines_down(&mut self, start_line_no: usize, n: usize) {
@@ -310,23 +390,14 @@ impl Grid {
     }
 
     fn screen_to_buffer_pos(&self) -> tree::SeekSoftWrapPosition {
-        let wrap_width = self
-            .num_cols()
-            .try_into()
-            .expect("num_cols must be non-zero");
-        let end_pos = self
-            .text
-            .max_bound(tree::SeekSoftWrapPosition::new(wrap_width, 0));
+        let end_pos = self.max_buf_position();
         let (row, col) = self.cursor_position();
+
         if end_pos.total_rows() >= self.num_rows() {
-            let mut delta = tree::SeekSoftWrapPosition::new(wrap_width, 0);
-            delta.line_idx = self.num_rows() - row - 1;
-            delta.trailing_line_chars = self.num_cols() - col - 1;
+            let delta = self.new_buf_pos(self.num_rows() - row - 1, self.num_cols() - col - 1);
             end_pos - delta
         } else {
-            let mut ret = tree::SeekSoftWrapPosition::new(wrap_width, row);
-            ret.trailing_line_chars = col;
-            ret
+            self.new_buf_pos(row, col)
         }
     }
 
@@ -342,18 +413,24 @@ impl Grid {
     /// Inserts a hard line-wrap `\n` if the cursor is on the last row of the buffer. Otherwise,
     /// does nothing.
     pub fn insert_linebreak_if_needed(&mut self) {
-        if self.screen_to_buffer_pos().line_idx == self.max_cursor_position().line_idx {
+        if self.screen_to_buffer_pos().line_idx == self.max_buf_position().line_idx {
             self.text.push_str("\n", SgrState::default());
         }
     }
 
-    fn max_cursor_position(&self) -> tree::SeekSoftWrapPosition {
-        self.text.max_bound(tree::SeekSoftWrapPosition::new(
+    fn max_buf_position(&self) -> tree::SeekSoftWrapPosition {
+        self.text.max_bound(self.new_buf_pos(0, 0))
+    }
+
+    fn new_buf_pos(&self, line_idx: usize, col_idx: usize) -> tree::SeekSoftWrapPosition {
+        let mut pos = tree::SeekSoftWrapPosition::new(
             self.num_cols()
                 .try_into()
                 .expect("num_cols must be non-zero"),
-            0,
-        ))
+            line_idx,
+        );
+        pos.trailing_line_chars = col_idx;
+        pos
     }
 }
 

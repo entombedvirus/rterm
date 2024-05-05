@@ -4,7 +4,6 @@ use std::num::NonZeroUsize;
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 
-use anyhow::Context;
 use arrayvec::{ArrayString, ArrayVec};
 
 use crate::{
@@ -15,6 +14,26 @@ use crate::{
 const B: usize = 3;
 pub const MAX_CHILDREN: usize = B * 2;
 pub const MIN_CHILDREN: usize = B;
+
+#[derive(Debug)]
+pub struct OutOfBounds<T> {
+    pub attempted_position: T,
+    pub last_valid_position: T,
+}
+
+impl<T> std::fmt::Display for OutOfBounds<T>
+where
+    T: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "OutOfBounds: last_valid_position: {:?}",
+            self.last_valid_position
+        )
+    }
+}
+impl<T> std::error::Error for OutOfBounds<T> where T: std::fmt::Debug {}
 
 #[derive(Debug, Clone)]
 pub struct Tree {
@@ -168,9 +187,11 @@ impl Tree {
         seek_target: D,
         edit_op: impl FnMut(&mut GridString, usize) -> Option<GridString>,
     ) {
-        if let Some(node) =
-            Arc::make_mut(&mut self.root).seek_and_edit_segment(seek_target, edit_op)
-        {
+        if let Some(node) = Arc::make_mut(&mut self.root).seek_and_edit_segment(
+            seek_target.zero(),
+            seek_target,
+            edit_op,
+        ) {
             self.root = Arc::new(Node::new_internal(
                 self.root.height() + 1,
                 [self.root.clone(), node],
@@ -184,14 +205,20 @@ impl Tree {
         tree
     }
 
-    fn resolve_dimension<D: SeekTarget>(&self, seek_target: D) -> Option<usize> {
+    pub fn resolve_dimension<D: SeekTarget>(
+        &self,
+        seek_target: D,
+    ) -> Result<usize, OutOfBounds<D>> {
         if seek_target == seek_target.zero() {
-            Some(0)
+            Ok(0)
         } else if seek_target == seek_target.zero() + self.root.node_summary() {
-            Some(self.len_chars())
+            Ok(self.len_chars())
         } else {
             let foo = self.to_string();
-            self.root.dimension_to_char_idx(seek_target)
+            let agg_summary = TextSummary::default();
+            let running_sum = seek_target.zero();
+            self.root
+                .dimension_to_char_idx(agg_summary, running_sum, seek_target)
         }
     }
 
@@ -199,19 +226,19 @@ impl Tree {
     fn resolve_dimensions<R: RangeBounds<D>, D: SeekTarget>(
         &self,
         target_range: R,
-    ) -> anyhow::Result<Range<usize>> {
-        let start = match target_range.start_bound().map(|d| {
-            self.resolve_dimension(d.clone())
-                .context("invalid start bound: could not resolve to char_idx")
-        }) {
+    ) -> Result<Range<usize>, OutOfBounds<D>> {
+        let start = match target_range
+            .start_bound()
+            .map(|d| self.resolve_dimension(d.clone()))
+        {
             std::ops::Bound::Included(char_idx) => char_idx?,
             std::ops::Bound::Excluded(char_idx) => char_idx? + 1,
             std::ops::Bound::Unbounded => 0,
         };
-        let end = match target_range.end_bound().map(|d| {
-            self.resolve_dimension(d.clone())
-                .context("invalid end bound: could not resolve to char_idx")
-        }) {
+        let end = match target_range
+            .end_bound()
+            .map(|d| self.resolve_dimension(d.clone()))
+        {
             std::ops::Bound::Included(char_idx) => char_idx? + 1,
             std::ops::Bound::Excluded(char_idx) => char_idx?,
             std::ops::Bound::Unbounded => self.len_chars(),
@@ -237,11 +264,11 @@ pub struct TreeSlice {
 mod iter {
     use std::{collections::VecDeque, num::NonZeroUsize, ops::Range};
 
-    use anyhow::Context;
-
     use crate::{grid_string::GridString, terminal_emulator::SgrState};
 
-    use super::{Node, SeekCharIdx, SeekSoftWrapPosition, SeekTarget, Tree, TreeSlice};
+    use super::{
+        Node, OutOfBounds, SeekCharIdx, SeekSoftWrapPosition, SeekTarget, Tree, TreeSlice,
+    };
 
     #[derive(Debug)]
     pub struct SoftWrappedLineIter<'a> {
@@ -342,12 +369,11 @@ mod iter {
             }
         }
 
-        pub fn seek_to_char<T: SeekTarget>(&mut self, seek_target: T) -> anyhow::Result<()> {
-            let target_char_idx = self
-                .tree
-                .resolve_dimension(seek_target)
-                .context("invalid seek_target")?;
-
+        pub fn seek_to_char<T: SeekTarget>(
+            &mut self,
+            seek_target: T,
+        ) -> Result<(), OutOfBounds<T>> {
+            let target_char_idx = self.tree.resolve_dimension(seek_target)?;
             self.prune_stack(target_char_idx);
 
             if target_char_idx == self.tree.len_chars() {
@@ -392,8 +418,10 @@ mod iter {
                     }
                 }
             }
-            debug_assert!(self.stack.is_empty() || self.stack[0].node.is_leaf());
-            Err(anyhow::format_err!("out of bounds: ran out of nodes"))
+            Err(OutOfBounds {
+                attempted_position: seek_target,
+                last_valid_position: self.tree.max_bound(seek_target),
+            })
         }
 
         fn prune_stack(&mut self, target_char_idx: usize) {
@@ -418,7 +446,10 @@ mod iter {
             node.child_segments().get(*child_idx)
         }
 
-        pub fn advance_char_offset(&mut self, delta: usize) -> anyhow::Result<()> {
+        pub fn advance_char_offset(
+            &mut self,
+            delta: usize,
+        ) -> Result<(), OutOfBounds<SeekCharIdx>> {
             self.seek_to_char(SeekCharIdx(self.char_position + delta))
         }
 
@@ -718,32 +749,34 @@ impl Node {
     /// scans this node's children from left to right while the running sum of dimension is less
     /// than the passed in `seek_target`. Returns the index of the child that will cause the
     /// running sum to exceed the target and the remaining seek_target.
-    fn child_position<D: SeekTarget>(&self, seek_target: D) -> Option<(usize, D)> {
-        let end = seek_target.zero() + self.node_summary();
+    fn child_position<D: SeekTarget>(
+        &self,
+        mut running_sum: D,
+        seek_target: D,
+    ) -> Option<(usize, D)> {
+        let end = running_sum + self.node_summary();
         if seek_target > end {
             return None;
         }
 
+        // TODO: maybe remove the need for this?
         if seek_target == end {
             // seeking to the end
-            let last_child_summary = self
+            let (_, prefix) = self
                 .child_summaries()
-                .last()
-                // .or_else(|| {
-                //     eprintln!("node: {self:?}");
-                //     None
-                // })
+                .split_last()
                 .expect("all nodes have at least one child");
-            let rem_seek_target = seek_target.zero() + last_child_summary;
+            for child_summary in prefix {
+                running_sum = running_sum + child_summary;
+            }
             let child_idx = self.child_summaries().len() - 1;
-            return Some((child_idx, rem_seek_target));
+            return Some((child_idx, running_sum));
         }
 
-        let mut running_sum = seek_target.zero();
         for (child_idx, child_summary) in self.child_summaries().into_iter().enumerate() {
             let next_sum = running_sum + child_summary;
             if next_sum > seek_target {
-                return Some((child_idx, seek_target - running_sum));
+                return Some((child_idx, running_sum));
             }
             running_sum = next_sum;
         }
@@ -791,14 +824,17 @@ impl Node {
 
     fn seek_and_edit_segment<D: SeekTarget>(
         &mut self,
+        running_sum: D,
         seek_target: D,
         mut edit_op: impl FnMut(&mut GridString, usize) -> Option<GridString>,
     ) -> Option<Arc<Node>> {
-        let (child_idx, seek_target) = self.child_position(seek_target)?;
+        let (child_idx, running_sum) = self
+            .child_position(running_sum, seek_target)
+            .expect("unable to determine child position");
         let split = match self {
             Node::Leaf { children, .. } => {
                 let child = &mut children[child_idx];
-                let char_idx = seek_target.to_char_idx(child.as_str())?;
+                let char_idx = seek_target.to_char_idx(running_sum, child.as_str()).ok()?;
                 edit_op(child, char_idx).and_then(|overflow| {
                     let overflow_pos = child_idx + 1;
                     children
@@ -830,8 +866,9 @@ impl Node {
                 height, children, ..
             } => {
                 let child = Arc::make_mut(&mut children[child_idx]);
-                child.seek_and_edit_segment(seek_target, edit_op).and_then(
-                    |split_node| -> Option<Arc<Node>> {
+                child
+                    .seek_and_edit_segment(running_sum, seek_target, edit_op)
+                    .and_then(|split_node| -> Option<Arc<Node>> {
                         let split_node_pos = child_idx + 1;
                         children
                             .try_insert(split_node_pos, split_node)
@@ -854,8 +891,7 @@ impl Node {
                                     }
                                 }
                             })
-                    },
-                )
+                    })
             }
         };
         self.recompute_summaries();
@@ -866,9 +902,12 @@ impl Node {
         self.child_summaries().len() < MAX_CHILDREN
     }
 
-    fn dimension_to_char_idx<D: SeekTarget>(&self, seek_target: D) -> Option<usize> {
-        let mut running_sum = seek_target.zero();
-        let mut agg_summary = TextSummary::default();
+    fn dimension_to_char_idx<D: SeekTarget>(
+        &self,
+        mut agg_summary: TextSummary,
+        mut running_sum: D,
+        seek_target: D,
+    ) -> Result<usize, OutOfBounds<D>> {
         for (child_idx, child_summary) in self.child_summaries().into_iter().enumerate() {
             {
                 match self {
@@ -892,25 +931,27 @@ impl Node {
             }
             let next_sum = running_sum + child_summary;
             if next_sum > seek_target {
-                let child_seek_target = seek_target - running_sum;
                 return match self {
                     Node::Leaf { children, .. } => {
                         let segment = &children[child_idx];
                         let child_str = segment.as_str();
-                        let child_char_idx = child_seek_target.to_char_idx(child_str)?;
-                        Some(agg_summary.chars + child_char_idx)
+                        let child_char_idx = seek_target.to_char_idx(running_sum, child_str)?;
+                        Ok(agg_summary.chars + child_char_idx)
                     }
-                    Node::Internal { children, .. } => {
-                        let child_char_idx =
-                            children[child_idx].dimension_to_char_idx(child_seek_target);
-                        child_char_idx.map(|child_chars| agg_summary.chars + child_chars)
-                    }
+                    Node::Internal { children, .. } => children[child_idx].dimension_to_char_idx(
+                        agg_summary,
+                        running_sum,
+                        seek_target,
+                    ),
                 };
             }
             running_sum = next_sum;
-            agg_summary = agg_summary + &child_summary;
+            agg_summary = agg_summary + child_summary;
         }
-        None
+        Err(OutOfBounds {
+            attempted_position: seek_target,
+            last_valid_position: running_sum,
+        })
     }
 }
 
@@ -1082,11 +1123,12 @@ pub trait SeekTarget:
     + Clone
     + Copy
     + for<'a> std::ops::Add<&'a TextSummary, Output = Self>
+    + std::ops::Add<Self, Output = Self>
     + std::ops::Sub<Self, Output = Self>
     + std::cmp::Ord
     + std::fmt::Debug
 {
-    fn to_char_idx(&self, segment: &str) -> Option<usize>;
+    fn to_char_idx(&self, running_sum: Self, segment: &str) -> Result<usize, OutOfBounds<Self>>;
 
     fn zero(&self) -> Self {
         Self::default()
@@ -1097,8 +1139,12 @@ pub trait SeekTarget:
 pub struct SeekCharIdx(pub usize);
 
 impl SeekTarget for SeekCharIdx {
-    fn to_char_idx(&self, s: &str) -> Option<usize> {
-        Some(self.0)
+    fn to_char_idx(
+        &self,
+        SeekCharIdx(running_sum): Self,
+        _s: &str,
+    ) -> Result<usize, OutOfBounds<Self>> {
+        Ok(self.0 - running_sum)
     }
 }
 impl<'a> std::ops::Add<&'a TextSummary> for SeekCharIdx {
@@ -1161,6 +1207,16 @@ impl SeekSoftWrapPosition {
         let ret = Self::new(wrap_width, 0) + summary;
         ret.total_rows()
     }
+
+    fn add_char(mut self, ch: char) -> Self {
+        if ch == '\n' || self.trailing_line_chars + 1 == self.wrap_width.get() {
+            self.line_idx += 1;
+            self.trailing_line_chars = 0;
+        } else {
+            self.trailing_line_chars += 1;
+        }
+        self
+    }
 }
 impl SeekTarget for SeekSoftWrapPosition {
     fn zero(&self) -> Self {
@@ -1170,38 +1226,29 @@ impl SeekTarget for SeekSoftWrapPosition {
         }
     }
 
-    fn to_char_idx(&self, s: &str) -> Option<usize> {
+    fn to_char_idx(&self, mut running_sum: Self, s: &str) -> Result<usize, OutOfBounds<Self>> {
         assert!(
             self.trailing_line_chars < self.wrap_width.get(),
             "trailing chars must be less than the line wrap width"
         );
-        let mut lines_to_skip = self.line_idx;
-        let mut chars_to_skip = if self.line_idx == 0 {
-            self.trailing_line_chars
-        } else {
-            self.wrap_width.get()
-        };
         for (i, ch) in s.chars().enumerate() {
-            if lines_to_skip == 0 && chars_to_skip == 0 {
-                return Some(i);
-            }
-            if ch == '\n' || (lines_to_skip > 0 && chars_to_skip == 1) {
-                if lines_to_skip == 0 {
-                    // encountered new line when we don't have any more lines
-                    // to skip. This is an invalid position
-                    return None;
+            match running_sum.cmp(self) {
+                std::cmp::Ordering::Less => {
+                    let next_sum = running_sum.add_char(ch);
+                    if next_sum > *self {
+                        // we overshot the target; return the last valid target
+                        break;
+                    }
+                    running_sum = next_sum
                 }
-                lines_to_skip -= 1;
-                chars_to_skip = if lines_to_skip == 0 {
-                    self.trailing_line_chars
-                } else {
-                    self.wrap_width.get()
-                };
-            } else {
-                chars_to_skip -= 1;
-            }
+                std::cmp::Ordering::Equal => return Ok(i),
+                std::cmp::Ordering::Greater => break,
+            };
         }
-        None
+        Err(OutOfBounds {
+            attempted_position: *self,
+            last_valid_position: running_sum,
+        })
     }
 }
 
@@ -1240,17 +1287,14 @@ impl std::ops::Sub for SeekSoftWrapPosition {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        let line_idx = self.line_idx - rhs.line_idx;
-        let trailing_line_chars = if line_idx == 0 {
-            self.trailing_line_chars - rhs.trailing_line_chars
-        } else {
-            self.trailing_line_chars
-        };
-        Self {
-            wrap_width: self.wrap_width,
-            line_idx,
-            trailing_line_chars,
-        }
+        todo!()
+    }
+}
+impl std::ops::Add for SeekSoftWrapPosition {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        todo!()
     }
 }
 
@@ -1469,8 +1513,9 @@ mod tests {
             tree.resolve_dimension(SeekSoftWrapPosition::new(
                 usize::MAX.try_into().unwrap(),
                 42
-            )),
-            Some(42 * line_bytes_len)
+            ))
+            .unwrap(),
+            42 * line_bytes_len
         )
     }
 
@@ -1526,6 +1571,7 @@ mod tests {
             tree.push_str(line.as_str(), SgrState::default());
         }
 
+        let wrap_width: NonZeroUsize = 8.try_into().unwrap();
         // with hard wraps, lines looks like:
         //
         // 00: |Long Line 000. <01>|
@@ -1555,21 +1601,100 @@ mod tests {
         // valid position
         assert_eq!(
             tree.resolve_dimension(SeekSoftWrapPosition {
-                wrap_width: 8.try_into().unwrap(),
+                wrap_width,
                 line_idx: 2,
                 trailing_line_chars: 1,
-            }),
-            Some(17)
+            })
+            .unwrap(),
+            17
         );
 
         // invalid position
         assert_eq!(
             tree.resolve_dimension(SeekSoftWrapPosition {
-                wrap_width: 8.try_into().unwrap(),
+                wrap_width,
                 line_idx: 2,
                 trailing_line_chars: 3,
+            })
+            .map_err(|err| err.last_valid_position),
+            Err(SeekSoftWrapPosition {
+                wrap_width,
+                line_idx: 2,
+                trailing_line_chars: 2,
             }),
-            None,
+        );
+    }
+
+    #[test]
+    fn test_dim_soft_wrap_2() {
+        let summaries = vec![
+            TextSummary {
+                chars: 24,
+                bytes: 24,
+                lines: 1,
+                leading_line_chars: 0,
+                trailing_line_chars: 24,
+            },
+            TextSummary {
+                chars: 22,
+                bytes: 24,
+                lines: 2,
+                leading_line_chars: 12,
+                trailing_line_chars: 4,
+            },
+            TextSummary {
+                chars: 24,
+                bytes: 24,
+                lines: 0,
+                leading_line_chars: 24,
+                trailing_line_chars: 24,
+            },
+            TextSummary {
+                chars: 24,
+                bytes: 24,
+                lines: 1,
+                leading_line_chars: 1,
+                trailing_line_chars: 22,
+            },
+            TextSummary {
+                chars: 13,
+                bytes: 13,
+                lines: 2,
+                leading_line_chars: 9,
+                trailing_line_chars: 2,
+            },
+            TextSummary {
+                chars: 36,
+                bytes: 38,
+                lines: 1,
+                leading_line_chars: 33,
+                trailing_line_chars: 2,
+            },
+        ];
+
+        let target = SeekSoftWrapPosition {
+            wrap_width: 35.try_into().unwrap(),
+            line_idx: 6,
+            trailing_line_chars: 2,
+        };
+
+        let mut running_sum = target.zero();
+        for s in &summaries {
+            let next_sum = running_sum + s;
+            if next_sum > target {
+                break;
+            }
+            running_sum = next_sum;
+        }
+
+        assert_eq!(running_sum.line_idx, 5);
+        assert_eq!(running_sum.trailing_line_chars, 22);
+
+        let input = "abcdefghijklmnopqrstuvwxyz";
+        let partial_line_chars = 35 - 22;
+        assert_eq!(
+            target.to_char_idx(running_sum, input).unwrap(),
+            partial_line_chars + target.trailing_line_chars
         );
     }
 
