@@ -1,5 +1,5 @@
 use std::{
-    num::NonZeroUsize,
+    num::NonZeroU32,
     ops::{Range, RangeBounds},
     rc::Rc,
 };
@@ -53,12 +53,12 @@ impl Grid {
     #[cfg(not(test))]
     const FILL_CHAR: u8 = b' ';
 
-    pub fn new(num_rows: usize, num_cols: usize) -> Self {
+    pub fn new(num_rows: u32, num_cols: u32) -> Self {
         let cursor_state = CursorState::default();
         let saved_cursor_state = None;
         let blank_line = Rc::new(String::from_iter(
             std::iter::repeat(Self::FILL_CHAR as char)
-                .take(num_cols)
+                .take(num_cols as usize)
                 .chain(std::iter::once('\n')),
         ));
         let text = Tree::new();
@@ -74,21 +74,21 @@ impl Grid {
         }
     }
 
-    pub fn num_rows(&self) -> usize {
-        self.num_screen_rows.0
+    pub fn num_rows(&self) -> u32 {
+        self.num_screen_rows.0 as u32
     }
 
-    pub fn num_cols(&self) -> usize {
-        self.num_screen_cols.0
+    pub fn num_cols(&self) -> u32 {
+        self.num_screen_cols.0 as u32
     }
 
     // in range num_rows..=max_scrollback_rows
-    pub fn total_rows(&self) -> usize {
+    pub fn total_rows(&self) -> u32 {
         // TODO: will need to use len_graphemes() later
         self.max_buf_position().total_rows()
     }
 
-    pub fn cursor_position(&self) -> (usize, usize) {
+    pub fn cursor_position(&self) -> (u32, u32) {
         let (ScreenCoord(row), ScreenCoord(col)) = self.cursor_state.position;
         (row, col)
     }
@@ -97,7 +97,7 @@ impl Grid {
     //  - imagine there are 80 total rows currently in the buffer
     //  - first visible line no will be: 80 - 24 = 56
     //  - visible line range will be 56..80
-    pub fn first_visible_line_no(&self) -> usize {
+    pub fn first_visible_line_no(&self) -> u32 {
         self.total_rows().saturating_sub(self.num_rows())
     }
 
@@ -111,14 +111,14 @@ impl Grid {
         }
     }
 
-    pub fn max_scrollback_lines(&mut self, n: usize) {
+    pub fn max_scrollback_lines(&mut self, n: u32) {
         self.max_rows = BufferCoord(n.max(self.num_screen_rows.0));
     }
 
     pub fn clear_screen(&mut self) {
         puffin::profile_function!();
         let line_idx = tree::SeekSoftWrapPosition::new(
-            self.num_cols()
+            (self.num_cols() as u32)
                 .try_into()
                 .expect("num_cols must be non-zero"),
             self.first_visible_line_no(),
@@ -136,16 +136,16 @@ impl Grid {
         self.cursor_state = CursorState::default();
     }
 
-    pub fn move_cursor_relative(&mut self, dr: isize, dc: isize) {
+    pub fn move_cursor_relative(&mut self, dr: i32, dc: i32) {
         let (row, col) = self.cursor_position();
-        let mut new_row = (row as isize + dr) as usize;
-        let mut new_col = (col as isize + dc) as usize;
+        let mut new_row = (row as i32 + dr) as u32;
+        let mut new_col = (col as i32 + dc) as u32;
         new_row += new_col / self.num_cols();
         new_col %= self.num_cols();
         self.move_cursor(new_row, new_col)
     }
 
-    pub fn move_cursor(&mut self, new_row: usize, new_col: usize) {
+    pub fn move_cursor(&mut self, new_row: u32, new_col: u32) {
         puffin::profile_function!();
         assert!(new_col < self.num_cols());
         self.cursor_state.pending_wrap = false;
@@ -156,7 +156,7 @@ impl Grid {
         &mut self.cursor_state.sgr_state
     }
 
-    pub fn resize(&mut self, new_num_rows: usize, new_num_cols: usize) -> bool {
+    pub fn resize(&mut self, new_num_rows: u32, new_num_cols: u32) -> bool {
         if self.num_rows() == new_num_rows && self.num_cols() == new_num_cols {
             return false;
         }
@@ -168,7 +168,7 @@ impl Grid {
 
         let new_blank_line = String::from_iter(
             std::iter::repeat(Self::FILL_CHAR as char)
-                .take(new_num_cols)
+                .take(new_num_cols as usize)
                 .chain(std::iter::once('\n')),
         );
         self.blank_line = Rc::new(new_blank_line);
@@ -182,7 +182,7 @@ impl Grid {
         if let Err(err) = self.text.resolve_dimension(self.screen_to_buffer_pos()) {
             self.move_cursor(
                 err.last_valid_position.line_idx,
-                err.last_valid_position.trailing_line_chars,
+                err.last_valid_position.col_idx,
             );
         }
         self.cursor_state
@@ -210,19 +210,19 @@ impl Grid {
         );
 
         // move cursor along
-        let edit_len = txt.chars().count();
+        let edit_len = txt.chars().count() as u32;
         let (_, cur_col) = self.cursor_position();
         if cur_col + (edit_len % self.num_cols()) == self.num_cols() {
-            self.move_cursor_relative(0, edit_len as isize - 1);
+            self.move_cursor_relative(0, edit_len as i32 - 1);
             self.cursor_state.pending_wrap = true;
         } else {
-            self.move_cursor_relative(0, edit_len as isize);
+            self.move_cursor_relative(0, edit_len as i32);
         }
 
         if let Some(lines_to_remove) = self
             .total_rows()
             .checked_sub(self.max_rows.0)
-            .and_then(NonZeroUsize::new)
+            .and_then(NonZeroU32::new)
         {
             self.text
                 .remove_range(..self.new_buf_pos(lines_to_remove.get(), 0));
@@ -243,28 +243,29 @@ impl Grid {
         if let Err(tree::OutOfBounds {
             mut last_valid_position,
             ..
-        }) = self.text.resolve_dimension(desired_pos)
+        }) = self.text.resolve_dimension(desired_pos.clone())
         {
             let before = self.text.to_string();
             dbg!(&last_valid_position);
+            let x = self.text.resolve_dimension(desired_pos.clone());
             if let Some(lines_to_add) = desired_pos
                 .line_idx
                 .checked_sub(last_valid_position.line_idx)
-                .and_then(NonZeroUsize::new)
+                .and_then(NonZeroU32::new)
             {
                 self.text.push_str(
-                    "\n".repeat(lines_to_add.get()).as_str(),
+                    "\n".repeat(lines_to_add.get() as usize).as_str(),
                     SgrState::default(),
                 );
                 last_valid_position.line_idx = desired_pos.line_idx;
-                last_valid_position.trailing_line_chars = 0;
+                last_valid_position.col_idx = 0;
             }
             let after = self.text.to_string();
 
-            let n = desired_pos.trailing_line_chars - last_valid_position.trailing_line_chars;
+            let n = desired_pos.col_idx - last_valid_position.col_idx;
             self.text.insert_str(
                 last_valid_position,
-                &self.blank_line[..n],
+                &self.blank_line[..n as usize],
                 SgrState::default(),
             );
             debug_assert!(self.text.resolve_dimension(desired_pos).is_ok());
@@ -274,16 +275,13 @@ impl Grid {
     // scan the rope counting the number of display lines (with soft-wrapping) until
     // we reach the beginning of query_range. Then take query_range.len() number of lines.
     // Note that a display line may begin the middle of a rope line because of soft-wrapping.
-    pub fn display_lines<'a, R: RangeBounds<usize>>(
+    pub fn display_lines<'a, R: RangeBounds<u32>>(
         &'a self,
         query_range: R,
     ) -> impl Iterator<Item = DisplayLine> + 'a {
         puffin::profile_function!();
         self.text
-            .iter_soft_wrapped_lines(
-                NonZeroUsize::new(self.num_cols()).expect("columns must be non-zero"),
-                query_range,
-            )
+            .iter_soft_wrapped_lines(query_range)
             .expect("query_range to be valid")
             .map(|display_slice: tree::TreeSlice| {
                 let mut padded_text: String = display_slice.text;
@@ -319,9 +317,9 @@ impl Grid {
 
                 // add padding so that the line is at least num_cols wide
                 {
-                    let n = padded_text.chars().count();
+                    let n = padded_text.chars().count() as u32;
                     if let Some(to_add) = self.num_cols().checked_sub(n) {
-                        let blanks = &self.blank_line[..to_add];
+                        let blanks = &self.blank_line[..to_add as usize];
                         if let Some(FormatAttribute { byte_range, .. }) = format_attributes
                             .last_mut()
                             .filter(|format| format.sgr_state == SgrState::default())
@@ -346,45 +344,29 @@ impl Grid {
 
     pub fn erase_from_cursor_to_eol(&mut self) {
         let cursor_pos = self.screen_to_buffer_pos();
-        if let Err(_) = self.text.resolve_dimension(cursor_pos) {
+        if let Err(_) = self.text.resolve_dimension(cursor_pos.clone()) {
             // cursor is already outside anywhere we have text anyway.
             // Nothing to erase in this case.
             return;
         }
 
-        let end_of_buf = self.text.max_bound(cursor_pos);
-        if cursor_pos >= end_of_buf {
-            // nothing to erase
-            return;
-        }
-
         let mut next_line = self.new_buf_pos(cursor_pos.line_idx + 1, 0);
-        if next_line < end_of_buf {
-            if let Err(err) = self.text.resolve_dimension(next_line) {
-                next_line = err.last_valid_position;
-            }
-        } else {
-            next_line = end_of_buf;
+        if let Err(err) = self.text.resolve_dimension(next_line.clone()) {
+            next_line = err.last_valid_position;
         }
         self.text.remove_range(cursor_pos..next_line);
     }
 
     pub fn erase_from_cursor_to_screen(&mut self) {
         let mut cursor_pos = self.screen_to_buffer_pos();
-        let end_of_buf = self.text.max_bound(cursor_pos);
-        if cursor_pos >= end_of_buf {
-            return;
-        }
-
-        if let Err(err) = self.text.resolve_dimension(cursor_pos) {
+        if let Err(err) = self.text.resolve_dimension(cursor_pos.clone()) {
             // hmm? won't this cause text before the cursor to get erased?
             cursor_pos = err.last_valid_position;
-            return;
         }
         self.text.truncate(cursor_pos);
     }
 
-    pub fn move_lines_down(&mut self, start_line_no: usize, n: usize) {
+    pub fn move_lines_down(&mut self, start_line_no: u32, n: u32) {
         assert!(start_line_no < self.num_rows());
         todo!()
     }
@@ -395,7 +377,7 @@ impl Grid {
         self.new_buf_pos(scrollback_rows + row, col)
     }
 
-    fn rope_with_n_blank_lines(num_rows: usize, blank_line: &str) -> Tree {
+    fn rope_with_n_blank_lines(num_rows: u32, blank_line: &str) -> Tree {
         puffin::profile_function!();
         let mut tree = tree::Tree::new();
         for _ in 0..num_rows {
@@ -413,17 +395,17 @@ impl Grid {
     }
 
     fn max_buf_position(&self) -> tree::SeekSoftWrapPosition {
-        self.text.max_bound(self.new_buf_pos(0, 0))
+        self.text.max_bound()
     }
 
-    fn new_buf_pos(&self, line_idx: usize, col_idx: usize) -> tree::SeekSoftWrapPosition {
+    fn new_buf_pos(&self, line_idx: u32, col_idx: u32) -> tree::SeekSoftWrapPosition {
         let mut pos = tree::SeekSoftWrapPosition::new(
             self.num_cols()
                 .try_into()
                 .expect("num_cols must be non-zero"),
             line_idx,
         );
-        pos.trailing_line_chars = col_idx;
+        pos.col_idx = col_idx;
         pos
     }
 }
@@ -476,7 +458,7 @@ struct CursorState {
     pending_wrap: bool,
 }
 impl CursorState {
-    fn clamp_position(&mut self, new_num_rows: usize, new_num_cols: usize) {
+    fn clamp_position(&mut self, new_num_rows: u32, new_num_cols: u32) {
         let (ScreenCoord(row), ScreenCoord(col)) = &mut self.position;
         *row = (*row).min(new_num_rows - 1);
         *col = (*col).min(new_num_cols - 1);
@@ -484,72 +466,72 @@ impl CursorState {
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct ScreenCoord(usize); // always in the range [0..grid.num_rows]
+struct ScreenCoord(u32); // always in the range [0..grid.num_rows]
 
-impl std::ops::Add<isize> for ScreenCoord {
+impl std::ops::Add<i32> for ScreenCoord {
     type Output = Self;
 
-    fn add(self, rhs: isize) -> Self::Output {
-        Self((self.0 as isize + rhs) as usize)
+    fn add(self, rhs: i32) -> Self::Output {
+        Self((self.0 as i32 + rhs) as u32)
     }
 }
-impl std::ops::AddAssign<usize> for ScreenCoord {
-    fn add_assign(&mut self, rhs: usize) {
+impl std::ops::AddAssign<u32> for ScreenCoord {
+    fn add_assign(&mut self, rhs: u32) {
         self.0 += rhs;
     }
 }
-impl std::ops::Sub<isize> for ScreenCoord {
+impl std::ops::Sub<i32> for ScreenCoord {
     type Output = Self;
 
-    fn sub(self, rhs: isize) -> Self::Output {
-        Self((self.0 as isize).saturating_sub(rhs) as usize)
+    fn sub(self, rhs: i32) -> Self::Output {
+        Self((self.0 as i32).saturating_sub(rhs) as u32)
     }
 }
 impl std::ops::Sub<ScreenCoord> for ScreenCoord {
-    type Output = usize;
+    type Output = u32;
 
     fn sub(self, rhs: ScreenCoord) -> Self::Output {
         self.0.saturating_sub(rhs.0)
     }
 }
-impl std::ops::Div<usize> for ScreenCoord {
-    type Output = usize;
+impl std::ops::Div<u32> for ScreenCoord {
+    type Output = u32;
 
-    fn div(self, rhs: usize) -> Self::Output {
+    fn div(self, rhs: u32) -> Self::Output {
         self.0 / rhs
     }
 }
-impl std::ops::Rem<usize> for ScreenCoord {
-    type Output = usize;
+impl std::ops::Rem<u32> for ScreenCoord {
+    type Output = u32;
 
-    fn rem(self, rhs: usize) -> Self::Output {
+    fn rem(self, rhs: u32) -> Self::Output {
         self.0 % rhs
     }
 }
-impl std::ops::RemAssign<usize> for ScreenCoord {
-    fn rem_assign(&mut self, rhs: usize) {
+impl std::ops::RemAssign<u32> for ScreenCoord {
+    fn rem_assign(&mut self, rhs: u32) {
         self.0 %= rhs;
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 // always in the range [0..grid.max_rows*grid.num_cols)
-struct BufferCoord(usize);
+struct BufferCoord(u32);
 
-impl std::ops::Mul<usize> for BufferCoord {
+impl std::ops::Mul<u32> for BufferCoord {
     type Output = Self;
 
-    fn mul(self, rhs: usize) -> Self::Output {
+    fn mul(self, rhs: u32) -> Self::Output {
         Self(self.0 * rhs)
     }
 }
-impl std::ops::AddAssign<usize> for BufferCoord {
-    fn add_assign(&mut self, rhs: usize) {
+impl std::ops::AddAssign<u32> for BufferCoord {
+    fn add_assign(&mut self, rhs: u32) {
         *self = Self(self.0 + rhs)
     }
 }
-impl std::ops::SubAssign<usize> for BufferCoord {
-    fn sub_assign(&mut self, rhs: usize) {
+impl std::ops::SubAssign<u32> for BufferCoord {
+    fn sub_assign(&mut self, rhs: u32) {
         *self = Self(self.0 - rhs)
     }
 }
@@ -674,7 +656,7 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target"#;
         );
 
         // that should work even when the window gets sized smaller than current output
-        grid.resize(input.lines().count() / 2, 80);
+        grid.resize(input.lines().count() as u32 / 2, 80);
         assert_nth_line(
             &grid,
             10,
@@ -682,12 +664,12 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target"#;
         );
     }
 
-    fn assert_nth_line(grid: &Grid, line_idx: usize, expected: &str) {
+    fn assert_nth_line(grid: &Grid, line_idx: u32, expected: &str) {
         let line = grid.display_lines(line_idx..).next().unwrap().padded_text;
         assert_eq!(&line, expected);
     }
 
-    fn assert_is_blank(grid: &Grid, line_range: Range<usize>) {
+    fn assert_is_blank(grid: &Grid, line_range: Range<u32>) {
         let lines = grid.display_lines(line_range.clone());
 
         let mut blank_line = grid.blank_line.to_string();

@@ -156,7 +156,7 @@ impl eframe::App for TerminalEmulator {
                     .chain(std::iter::once(&mut self.primary_grid));
                 let mut needs_signal = false;
                 for grid in grids {
-                    needs_signal |= grid.resize(winsz.ws_row as usize, winsz.ws_col as usize);
+                    needs_signal |= grid.resize(winsz.ws_row as u32, winsz.ws_col as u32);
                 }
                 if needs_signal {
                     pty::update_pty_window_size(pty_fd, &winsz)
@@ -191,7 +191,7 @@ impl eframe::App for TerminalEmulator {
                         .show_rows(
                             ui,
                             char_dims.y,
-                            grid.total_rows(),
+                            grid.total_rows() as usize,
                             |ui, visible_rows| -> anyhow::Result<()> {
                                 if self.enable_debug_render {
                                     ctx.debug_painter().debug_rect(
@@ -353,7 +353,7 @@ impl TerminalEmulator {
 
         {
             puffin::profile_scope!("render_lines");
-            for line in grid.display_lines(visible_rows) {
+            for line in grid.display_lines(visible_rows.start as u32..visible_rows.end as u32) {
                 let layout = build_line_layout(line);
                 let galley = ui.fonts(|fonts| {
                     puffin::profile_scope!("galley_construction");
@@ -508,7 +508,8 @@ impl TerminalEmulator {
         let (cursor_row_in_screen_space, cursor_col) = grid.cursor_position();
         let cursor_row_in_scrollback_space =
             grid.first_visible_line_no() + cursor_row_in_screen_space;
-        let num_rows_from_top = cursor_row_in_scrollback_space.saturating_sub(visible_rows.start);
+        let num_rows_from_top =
+            cursor_row_in_scrollback_space.saturating_sub(visible_rows.start as u32);
         let char_dims = self.char_dimensions.unwrap_or(egui::vec2(12.0, 12.0));
         let cursor_rect = Rect::from_min_size(
             egui::pos2(
@@ -597,19 +598,22 @@ impl TerminalEmulator {
                         grid.move_cursor(current_row, 0);
                     }
                     AnsiToken::CursorControl(CursorControl::MoveUp { lines }) => {
-                        grid.move_cursor_relative(lines.try_into().unwrap_or(0_isize).neg(), 0);
+                        grid.move_cursor_relative(lines.try_into().unwrap_or(0_i32).neg(), 0);
                     }
                     AnsiToken::CursorControl(CursorControl::MoveDown { lines }) => {
-                        grid.move_cursor_relative(lines.try_into().unwrap_or(0_isize), 0);
+                        grid.move_cursor_relative(lines.try_into().unwrap_or(0_i32), 0);
                     }
                     AnsiToken::CursorControl(CursorControl::MoveLeft { cols }) => {
-                        grid.move_cursor_relative(0, cols.try_into().unwrap_or(0_isize).neg());
+                        grid.move_cursor_relative(0, cols.try_into().unwrap_or(0_i32).neg());
                     }
                     AnsiToken::CursorControl(CursorControl::MoveRight { cols }) => {
-                        grid.move_cursor_relative(0, cols.try_into().unwrap_or(0_isize));
+                        grid.move_cursor_relative(0, cols.try_into().unwrap_or(0_i32));
                     }
                     AnsiToken::CursorControl(CursorControl::MoveTo { line, col }) => {
-                        grid.move_cursor(line.saturating_sub(1), col.saturating_sub(1));
+                        grid.move_cursor(
+                            line.saturating_sub(1) as u32,
+                            col.saturating_sub(1) as u32,
+                        );
                     }
                     AnsiToken::CursorControl(CursorControl::ScrollUpFromHome) => {
                         let (cursor_row, _) = grid.cursor_position();
