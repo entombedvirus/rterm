@@ -7,7 +7,7 @@ use std::{
 use crate::{
     puffin,
     terminal_emulator::SgrState,
-    tree::{self, Tree},
+    tree::{self, SeekSoftWrapPosition, Tree},
 };
 
 #[derive(Debug)]
@@ -61,7 +61,8 @@ impl Grid {
                 .take(num_cols as usize)
                 .chain(std::iter::once('\n')),
         ));
-        let text = Tree::new();
+        let mut text = Tree::new();
+        text.rewrap(num_cols.try_into().expect("num_cols to be non-zero"));
 
         Self {
             num_screen_rows: ScreenCoord(num_rows),
@@ -85,7 +86,7 @@ impl Grid {
     // in range num_rows..=max_scrollback_rows
     pub fn total_rows(&self) -> u32 {
         // TODO: will need to use len_graphemes() later
-        self.max_buf_position().total_rows()
+        self.text.max_bound::<SeekSoftWrapPosition>().total_rows()
     }
 
     pub fn cursor_position(&self) -> (u32, u32) {
@@ -225,7 +226,7 @@ impl Grid {
             .and_then(NonZeroU32::new)
         {
             self.text
-                .remove_range(..self.new_buf_pos(lines_to_remove.get(), 0));
+                .remove_range(..tree::SeekSoftWrapPosition::new(lines_to_remove.get(), 0));
         }
     }
 
@@ -350,7 +351,7 @@ impl Grid {
             return;
         }
 
-        let mut next_line = self.new_buf_pos(cursor_pos.line_idx + 1, 0);
+        let mut next_line = tree::SeekSoftWrapPosition::new(cursor_pos.line_idx + 1, 0);
         if let Err(err) = self.text.resolve_dimension(next_line.clone()) {
             next_line = err.last_valid_position;
         }
@@ -374,7 +375,7 @@ impl Grid {
     fn screen_to_buffer_pos(&self) -> tree::SeekSoftWrapPosition {
         let (row, col) = self.cursor_position();
         let scrollback_rows = self.total_rows().saturating_sub(self.num_rows());
-        self.new_buf_pos(scrollback_rows + row, col)
+        tree::SeekSoftWrapPosition::new(scrollback_rows + row, col)
     }
 
     fn rope_with_n_blank_lines(num_rows: u32, blank_line: &str) -> Tree {
@@ -389,24 +390,11 @@ impl Grid {
     /// Inserts a hard line-wrap `\n` if the cursor is on the last row of the buffer. Otherwise,
     /// does nothing.
     pub fn insert_linebreak_if_needed(&mut self) {
-        if self.screen_to_buffer_pos().line_idx == self.max_buf_position().line_idx {
+        if self.screen_to_buffer_pos().line_idx
+            == self.text.max_bound::<SeekSoftWrapPosition>().line_idx
+        {
             self.text.push_str("\n", SgrState::default());
         }
-    }
-
-    fn max_buf_position(&self) -> tree::SeekSoftWrapPosition {
-        self.text.max_bound()
-    }
-
-    fn new_buf_pos(&self, line_idx: u32, col_idx: u32) -> tree::SeekSoftWrapPosition {
-        let mut pos = tree::SeekSoftWrapPosition::new(
-            self.num_cols()
-                .try_into()
-                .expect("num_cols must be non-zero"),
-            line_idx,
-        );
-        pos.col_idx = col_idx;
-        pos
     }
 }
 
