@@ -7,7 +7,7 @@ use std::{
 use crate::{
     puffin,
     terminal_emulator::SgrState,
-    tree::{self, SeekSoftWrapPosition, Tree},
+    tree::{self, SeekCharIdx, SeekSoftWrapPosition, Tree},
 };
 
 #[derive(Debug)]
@@ -171,9 +171,7 @@ impl Grid {
 
         self.num_screen_rows = ScreenCoord(new_num_rows);
         self.num_screen_cols = ScreenCoord(new_num_cols);
-
-        let new_num_rows = BufferCoord(new_num_rows);
-        self.max_rows = self.max_rows.max(new_num_rows);
+        self.max_rows = self.max_rows.max(BufferCoord(new_num_rows));
 
         self.text.rewrap(
             self.num_cols()
@@ -181,14 +179,22 @@ impl Grid {
                 .expect("num_cols must be non-zero"),
         );
 
-        if let Err(err) = self.text.resolve_dimension(self.screen_to_buffer_pos()) {
-            self.move_cursor(
-                err.last_valid_position.line_idx,
-                err.last_valid_position.col_idx,
-            );
+        let (row, col) = self.cursor_position();
+        let new_row;
+        let new_col;
+        if let Some(delta) = (col + 1)
+            .checked_sub(new_num_cols)
+            .and_then(NonZeroU32::new)
+        {
+            new_row = row + delta.get().div_ceil(new_num_cols);
+            new_col = (delta.get() % new_num_cols) - 1;
+        } else {
+            new_row = row;
+            new_col = col;
         }
-        self.cursor_state
-            .clamp_position(self.num_rows(), self.num_cols());
+        self.move_cursor(new_row, new_col);
+        self.cursor_state.clamp_position(new_num_rows, new_num_cols);
+        self.sync_buffer_to_cursor_position();
         true
     }
 
@@ -242,13 +248,16 @@ impl Grid {
     // to make the position valid.
     fn sync_buffer_to_cursor_position(&mut self) {
         let desired_pos = self.screen_to_buffer_pos();
-        if let Err(tree::OutOfBounds {
-            mut last_valid_position,
-            ..
-        }) = self.text.resolve_dimension(desired_pos.clone())
+        if let Err(
+            err @ tree::OutOfBounds {
+                mut last_valid_position,
+                mut last_char_idx,
+                ..
+            },
+        ) = self.text.resolve_dimension(desired_pos.clone())
         {
             let before = self.text.to_string();
-            dbg!(&last_valid_position);
+            dbg!(&err);
             let x = self.text.resolve_dimension(desired_pos.clone());
             if let Some(lines_to_add) = desired_pos
                 .line_idx
@@ -259,17 +268,20 @@ impl Grid {
                     "\n".repeat(lines_to_add.get() as usize).as_str(),
                     SgrState::default(),
                 );
+                last_char_idx += lines_to_add.get() as usize;
                 last_valid_position.line_idx = desired_pos.line_idx;
                 last_valid_position.col_idx = 0;
             }
             let after = self.text.to_string();
 
-            let n = desired_pos.col_idx - last_valid_position.col_idx;
+            let n = desired_pos.col_idx - last_valid_position.col_idx + 1;
             self.text.insert_str(
-                last_valid_position,
+                SeekCharIdx(last_char_idx),
                 &self.blank_line[..n as usize],
                 SgrState::default(),
             );
+            let after = self.text.to_string();
+
             debug_assert!(self.text.resolve_dimension(desired_pos).is_ok());
             self.cursor_state
                 .clamp_position(self.num_rows(), self.num_cols());
@@ -613,11 +625,27 @@ mod tests {
     }
 
     #[test]
-    fn test_erase_after_resizing_down_num_columns() {
+    fn test_erase_after_resizing_1() {
         let mut grid = Grid::new(10, 50);
         grid.resize(10, 30);
         // should not panic
         grid.erase_from_cursor_to_screen();
+    }
+
+    #[test]
+    fn test_cursor_pos_after_resize_1() {
+        let mut grid = Grid::new(10, 50);
+        grid.move_cursor(9, 49);
+        grid.resize(10, 49);
+        assert_eq!(grid.cursor_position(), (9, 0));
+
+        grid.move_cursor(5, 30);
+        grid.resize(20, 100);
+        assert_eq!(grid.cursor_position(), (5, 30));
+
+        grid.move_cursor(19, 99);
+        grid.resize(5, 100);
+        assert_eq!(grid.cursor_position(), (4, 99));
     }
 
     #[test]
@@ -633,12 +661,15 @@ drwxr-xr-x  15 rravi  staff    480 Apr 15 14:12 .git
 -rw-r--r--   1 rravi  staff   1857 Mar 26 17:17 TODO
 drwxr-xr-x   3 rravi  staff     96 Apr  9 13:38 res
 drwxr-xr-x  10 rravi  staff    320 Apr 15 14:06 src
-drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target"#;
+drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
+"#;
         for line in input.lines() {
             grid.write_text_at_cursor(line);
+
             let (row, _) = grid.cursor_position();
             grid.move_cursor(row, 0); // \r
-            grid.move_cursor(row + 1, 0); // \n
+            grid.insert_linebreak_if_needed(); // \n
+            grid.move_cursor_relative(1, 0); // \n
         }
         assert_nth_line(
             &grid,

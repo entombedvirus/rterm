@@ -19,6 +19,7 @@ pub const MIN_CHILDREN: usize = B;
 pub struct OutOfBounds<T> {
     pub attempted_position: T,
     pub last_valid_position: T,
+    pub last_char_idx: usize,
 }
 
 impl<T> std::fmt::Display for OutOfBounds<T>
@@ -427,6 +428,7 @@ mod iter {
             Err(OutOfBounds {
                 attempted_position: seek_target.clone(),
                 last_valid_position: self.tree.max_bound(),
+                last_char_idx: self.tree.len_chars(),
             })
         }
 
@@ -965,6 +967,7 @@ impl Node {
         Err(OutOfBounds {
             attempted_position: seek_target.clone(),
             last_valid_position: T::from_summary(cx, &running_sum),
+            last_char_idx: running_sum.chars,
         })
     }
 
@@ -1263,6 +1266,8 @@ impl SeekTarget for SeekSoftWrapPosition {
         s: &str,
     ) -> Result<usize, OutOfBounds<Self>> {
         let wrap_width = cx.wrap_width.map(|w| w.get());
+
+        let mut last_char_idx = agg_summary.chars;
         let mut next_pos = Self::from_summary(cx, agg_summary);
         let mut last_valid_position =
             Self::new(next_pos.line_idx, next_pos.col_idx.saturating_sub(1));
@@ -1270,6 +1275,7 @@ impl SeekTarget for SeekSoftWrapPosition {
         for (i, ch) in s.chars().enumerate() {
             match next_pos.cmp(self) {
                 std::cmp::Ordering::Less => {
+                    last_char_idx += 1;
                     last_valid_position = next_pos;
                     next_pos = next_pos.add_char(wrap_width, ch);
                 }
@@ -1290,6 +1296,7 @@ impl SeekTarget for SeekSoftWrapPosition {
         Err(OutOfBounds {
             attempted_position: *self,
             last_valid_position,
+            last_char_idx: last_char_idx.saturating_sub(1),
         })
     }
 }
