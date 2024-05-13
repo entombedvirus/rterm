@@ -1263,27 +1263,33 @@ impl SeekTarget for SeekSoftWrapPosition {
         s: &str,
     ) -> Result<usize, OutOfBounds<Self>> {
         let wrap_width = cx.wrap_width.map(|w| w.get());
-        let mut cur_pos = Self::from_summary(cx, agg_summary);
+        let mut next_pos = Self::from_summary(cx, agg_summary);
+        let mut last_valid_position =
+            Self::new(next_pos.line_idx, next_pos.col_idx.saturating_sub(1));
 
         for (i, ch) in s.chars().enumerate() {
-            match cur_pos.cmp(self) {
+            match next_pos.cmp(self) {
                 std::cmp::Ordering::Less => {
-                    let next_pos = cur_pos.add_char(wrap_width, ch);
-                    if next_pos.cmp(self) == std::cmp::Ordering::Greater {
-                        // we overshot the target; return the last valid target
+                    last_valid_position = next_pos;
+                    next_pos = next_pos.add_char(wrap_width, ch);
+                }
+                std::cmp::Ordering::Equal => {
+                    // check that `ch` is a valid position. newlines are
+                    // not directly addressable .
+                    if ch == '\n' {
                         break;
                     }
-                    cur_pos = next_pos
+                    return Ok(agg_summary.chars + i);
                 }
-                std::cmp::Ordering::Equal => return Ok(agg_summary.chars + i),
                 std::cmp::Ordering::Greater => {
-                    panic!("cur_pos should never exceed self unless the caller messed up: cur_pos: {cur_pos:?}, self: {self:?}");
+                    // we overshot the target; return the last valid target
+                    break;
                 }
             };
         }
         Err(OutOfBounds {
             attempted_position: *self,
-            last_valid_position: cur_pos,
+            last_valid_position,
         })
     }
 }
@@ -1332,7 +1338,7 @@ impl LineSummary {
                 .wrap_width
                 .map(|wrap_width| {
                     if lsum.ends_with_newline {
-                        line_chars.div_ceil(wrap_width.get())
+                        line_chars.div_ceil(wrap_width.get()).max(1)
                     } else {
                         line_chars / wrap_width.get()
                     }
@@ -1353,6 +1359,10 @@ impl LineSummary {
     }
 
     fn add(&mut self, cx: SummarizeContext, rhs: &Self) {
+        if rhs.line_chars.is_empty() {
+            // rhs is empty
+            return;
+        }
         let Some(last_line) = self.line_chars.last_mut() else {
             // lhs is empty
             *self = rhs.clone();
@@ -1609,7 +1619,7 @@ mod tests {
                 format!("Long Line {:03}.", i)
             } else {
                 // odd lines are shorter with a newLine
-                format!("<{:02}>\n", i)
+                format!(" <{:02}>\n", i)
             };
             tree.push_str(line.as_str(), SgrState::default());
         }
@@ -1771,5 +1781,63 @@ mod tests {
         assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("e\n"));
         assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("f"));
         assert_eq!(iter.next().map(|slice| slice.text).as_deref(), None);
+    }
+
+    #[test]
+    fn test_summary_2() {
+        let s1 = TextSummary::from(&GridString::from_str("abcd\n").unwrap());
+        let zero = TextSummary::default();
+        let cx = SummarizeContext { wrap_width: None };
+        let sum = s1.add(cx, &zero);
+        assert_eq!(sum, s1);
+    }
+
+    #[test]
+    fn test_tree_2() {
+        let mut tree = Tree::from_str("\n");
+        tree.rewrap(80.try_into().unwrap());
+        assert_eq!(tree.len_lines(), 1);
+
+        let mut tree = Tree::new();
+        tree.rewrap(80.try_into().unwrap());
+        tree.push_str("\n", SgrState::default());
+        assert_eq!(tree.len_lines(), 1);
+        assert_eq!(tree.root.node_summary().lines.num_complete, 1);
+    }
+
+    #[test]
+    fn test_soft_wrap_3() {
+        let mut tree = Tree::from_str("Line 001\nLine 002\nLine 003\n");
+        //                                              [---------)
+        tree.remove_range(SeekSoftWrapPosition::new(1, 7)..SeekSoftWrapPosition::new(2, 7));
+        assert_eq!(tree.to_string().as_str(), "Line 001\nLine 003\n");
+        tree.remove_range(SeekSoftWrapPosition::new(1, 0)..);
+        assert_eq!(tree.to_string().as_str(), "Line 001\n");
+    }
+
+    #[test]
+    fn test_from_summary() {
+        let tree = Tree::from_str("\n012345678\n9abcde");
+        assert_eq!(
+            tree.max_bound::<SeekSoftWrapPosition>(),
+            SeekSoftWrapPosition::new(2, 6)
+        );
+
+        let tree = Tree::from_str("012345678\n9abcde\n");
+        assert_eq!(
+            tree.max_bound::<SeekSoftWrapPosition>(),
+            SeekSoftWrapPosition::new(2, 0)
+        );
+
+        let mut tree = Tree::from_str("012345678\n9abcde\n");
+        tree.rewrap(5.try_into().unwrap());
+        // 01234
+        // 5678\n
+        // 9abcd
+        // e\n
+        assert_eq!(
+            tree.max_bound::<SeekSoftWrapPosition>(),
+            SeekSoftWrapPosition::new(4, 0)
+        );
     }
 }

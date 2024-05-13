@@ -118,12 +118,7 @@ impl Grid {
 
     pub fn clear_screen(&mut self) {
         puffin::profile_function!();
-        let line_idx = tree::SeekSoftWrapPosition::new(
-            (self.num_cols() as u32)
-                .try_into()
-                .expect("num_cols must be non-zero"),
-            self.first_visible_line_no(),
-        );
+        let line_idx = tree::SeekSoftWrapPosition::new(self.first_visible_line_no(), 0);
         self.text.remove_range(line_idx..);
         for _ in 0..self.num_rows() {
             self.text
@@ -179,6 +174,12 @@ impl Grid {
 
         let new_num_rows = BufferCoord(new_num_rows);
         self.max_rows = self.max_rows.max(new_num_rows);
+
+        self.text.rewrap(
+            self.num_cols()
+                .try_into()
+                .expect("num_cols must be non-zero"),
+        );
 
         if let Err(err) = self.text.resolve_dimension(self.screen_to_buffer_pos()) {
             self.move_cursor(
@@ -270,6 +271,8 @@ impl Grid {
                 SgrState::default(),
             );
             debug_assert!(self.text.resolve_dimension(desired_pos).is_ok());
+            self.cursor_state
+                .clamp_position(self.num_rows(), self.num_cols());
         }
     }
 
