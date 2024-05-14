@@ -179,22 +179,11 @@ impl Grid {
                 .expect("num_cols must be non-zero"),
         );
 
-        let (row, col) = self.cursor_position();
-        let new_row;
-        let new_col;
-        if let Some(delta) = (col + 1)
-            .checked_sub(new_num_cols)
-            .and_then(NonZeroU32::new)
-        {
-            new_row = row + delta.get().div_ceil(new_num_cols);
-            new_col = (delta.get() % new_num_cols) - 1;
-        } else {
-            new_row = row;
-            new_col = col;
-        }
-        self.move_cursor(new_row, new_col);
+        // move cursor to the last cell
+        let max_pos = self.text.max_bound::<SeekSoftWrapPosition>();
+        self.move_cursor(max_pos.line_idx, max_pos.col_idx);
         self.cursor_state.clamp_position(new_num_rows, new_num_cols);
-        self.sync_buffer_to_cursor_position();
+
         true
     }
 
@@ -630,6 +619,37 @@ mod tests {
         grid.resize(10, 30);
         // should not panic
         grid.erase_from_cursor_to_screen();
+    }
+
+    #[test]
+    fn test_erase_after_resize_2() {
+        let mut grid = Grid::new(24, 80);
+        let parts = [
+            "\nuser@host: /some/path\n",
+            "> ls\n",
+            "Cargo.lock\tCargo.toml\tTODO\t\tres\t\tsrc\t\ttarget\n",
+            "\nuser@host: /some/path\n",
+            "> ",
+        ];
+        for p in parts {
+            for line in p.split_inclusive('\n') {
+                if line.ends_with('\n') {
+                    grid.write_text_at_cursor(&line[..line.len() - 1]);
+                    grid.insert_linebreak_if_needed();
+                    let (_, col) = grid.cursor_position();
+                    // simulate \r\n
+                    grid.move_cursor_relative(1, -1 * col as i32);
+                } else {
+                    grid.write_text_at_cursor(line);
+                }
+            }
+        }
+
+        // simulate user resizing the window a bunch
+        for (r, c) in [(24, 15), (5, 15), (50, 100)] {
+            grid.resize(r, c);
+            grid.erase_from_cursor_to_screen();
+        }
     }
 
     #[test]
