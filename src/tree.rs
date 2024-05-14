@@ -493,11 +493,12 @@ mod iter {
             &'b mut self,
             seek_target: T,
         ) -> impl Iterator<Item = (&'a str, &'a [SgrState])> + 'b {
+            let x = self.tree.to_string();
+            let target_char_idx = self
+                .tree
+                .resolve_dimension(seek_target.clone())
+                .unwrap_or_else(|err| (err.last_char_idx + 1).min(self.tree.len_chars()));
             std::iter::from_fn(move || {
-                let target_char_idx = self
-                    .tree
-                    .resolve_dimension(seek_target.clone())
-                    .unwrap_or(self.tree.len_chars());
                 if self.char_position >= target_char_idx {
                     return None;
                 }
@@ -1787,6 +1788,26 @@ mod tests {
         assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("d\n"));
         assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("e\n"));
         assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("f"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), None);
+    }
+
+    #[test]
+    fn test_soft_wrap_iter_3() {
+        let mut tree = Tree::from_str("\ncwd\n> \n\ncwd\n> ");
+        tree.rewrap(100.try_into().unwrap());
+        let mut iter = tree.iter_soft_wrapped_lines(..).unwrap();
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("\n"));
+        assert_eq!(
+            iter.next().map(|slice| slice.text).as_deref(),
+            Some("cwd\n")
+        );
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("> \n"));
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("\n"));
+        assert_eq!(
+            iter.next().map(|slice| slice.text).as_deref(),
+            Some("cwd\n")
+        );
+        assert_eq!(iter.next().map(|slice| slice.text).as_deref(), Some("> "));
         assert_eq!(iter.next().map(|slice| slice.text).as_deref(), None);
     }
 

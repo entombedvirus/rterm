@@ -635,14 +635,17 @@ mod tests {
     #[test]
     fn test_cursor_pos_after_resize_1() {
         let mut grid = Grid::new(10, 50);
+        // resize cols to be smaller
         grid.move_cursor(9, 49);
         grid.resize(10, 49);
         assert_eq!(grid.cursor_position(), (9, 0));
 
+        // resize rows and cols to be bigger
         grid.move_cursor(5, 30);
         grid.resize(20, 100);
         assert_eq!(grid.cursor_position(), (5, 30));
 
+        // resize rows to be smaller
         grid.move_cursor(19, 99);
         grid.resize(5, 100);
         assert_eq!(grid.cursor_position(), (4, 99));
