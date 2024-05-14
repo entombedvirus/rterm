@@ -400,6 +400,10 @@ impl Grid {
             self.text.push_str("\n", SgrState::default());
         }
     }
+
+    pub fn text_contents(&self) -> String {
+        self.text.to_string()
+    }
 }
 
 fn resolve_range<R: RangeBounds<usize>>(

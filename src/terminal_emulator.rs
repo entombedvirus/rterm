@@ -489,6 +489,15 @@ impl TerminalEmulator {
                 pressed: true,
                 ..
             } => self.buffered_input.push_str("\u{1b}[D"),
+            egui::Event::Key {
+                key: Key::F1,
+                pressed: false,
+                ..
+            } => {
+                let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
+                let grid_contents = grid.text_contents();
+                log::info!("\n=====================\n{grid_contents}\n=====================\n");
+            }
             egui::Event::Key { pressed: false, .. } => (),
             egui::Event::PointerMoved { .. } => (),
             egui::Event::PointerGone { .. } => (),
