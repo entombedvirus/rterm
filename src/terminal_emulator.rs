@@ -587,7 +587,12 @@ impl TerminalEmulator {
                         grid.move_cursor_relative(0, -1);
                     }
                     AnsiToken::AsciiControl(AsciiControl::Tab) => {
-                        grid.move_cursor_relative(0, 4);
+                        // as advertised in the "it" terminfo entry
+                        let tab_width = 8;
+                        let (row, col) = grid.cursor_position();
+                        let next_tabstop = col + (tab_width - col % tab_width);
+                        let limit = grid.num_cols() - 1;
+                        grid.move_cursor(row, next_tabstop.min(limit));
                     }
                     AnsiToken::AsciiControl(AsciiControl::LineFeed) => {
                         grid.insert_linebreak_if_needed();

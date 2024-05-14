@@ -10,6 +10,9 @@ rterm|80-column dumb tty,
 	lines#24,
 	bel=^G,
 
+# init_tabs                   it       it     tabs initially every # spaces
+	it#8,
+
 # Color Stuff
 	colors#256,
 # boolean, asserts that the terminal interprets SGR 39 and
