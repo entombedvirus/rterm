@@ -263,6 +263,7 @@ impl Grid {
             }
             let after = self.text.to_string();
 
+            // TODO: this will always insert 1 blank
             let n = desired_pos.col_idx - last_valid_position.col_idx + 1;
             self.text.insert_str(
                 SeekCharIdx(last_char_idx),
@@ -271,6 +272,10 @@ impl Grid {
             );
             let after = self.text.to_string();
 
+            if !self.text.resolve_dimension(desired_pos).is_ok() {
+                // break point
+                let _ = after.len();
+            }
             debug_assert!(self.text.resolve_dimension(desired_pos).is_ok());
             self.cursor_state
                 .clamp_position(self.num_rows(), self.num_cols());
@@ -363,12 +368,17 @@ impl Grid {
     }
 
     pub fn erase_from_cursor_to_screen(&mut self) {
-        let mut cursor_pos = self.screen_to_buffer_pos();
-        if let Err(err) = self.text.resolve_dimension(cursor_pos.clone()) {
-            // hmm? won't this cause text before the cursor to get erased?
-            cursor_pos = err.last_valid_position;
+        let cursor_pos = self.screen_to_buffer_pos();
+        match self.text.resolve_dimension(cursor_pos) {
+            Ok(char_idx) => {
+                self.text.truncate(SeekCharIdx(char_idx));
+            }
+            Err(err) => {
+                // hmm? won't this cause text before the cursor to get erased?
+                let x = self.text.to_string();
+                self.text.truncate(SeekCharIdx(err.last_char_idx + 1));
+            }
         }
-        self.text.truncate(cursor_pos);
     }
 
     pub fn move_lines_down(&mut self, start_line_no: u32, n: u32) {
@@ -647,22 +657,71 @@ mod tests {
     }
 
     #[test]
+    fn test_erase_after_resize_3() {
+        let mut grid = Grid::new(17, 57);
+        grid_feed_input(&mut grid, ["\n~/work/rterm rohith-rendering-perf*\n❯ ls -al\ntotal 224\ndrwxr-xr-x  10 rravi  staff    320 Apr 30 18:56 .\ndrwxr-xr-x   6 rravi  staff    192 Apr 12 16:0
+8 ..\ndrwxr-xr-x  15 rravi  staff    480 May 14 18:02 .git\n-rw-r--r--   1 rravi  staff      8 Mar 18 21:01 .gitignore\n-rw-r--r--@  1 rravi  staff  99246 Apr 25
+15:02 Cargo.lock\n-rw-r--r--@  1 rravi  staff    650 Apr 25 15:02 Cargo.toml\n-rw-r--r--   1 rravi  staff   1857 Mar 26 17:17 TODO\ndrwxr-xr-x   3 rravi  staff
+  96 May 14 16:26 res\ndrwxr-xr-x  12 rravi  staff    384 May 14 18:07 src\ndrwxr-xr-x@  7 rravi  staff    224 May  7 21:29 target\n\n\n~/work/rterm rohith-render
+ing-perf*\n\n"]);
+
+        // should not panic
+        grid.resize(17, 58);
+        grid.erase_from_cursor_to_screen();
+        grid_feed_input(&mut grid, ["❯"]);
+    }
+
+    #[test]
     fn test_cursor_pos_after_resize_1() {
         let mut grid = Grid::new(10, 50);
         // resize cols to be smaller
         grid.move_cursor(9, 49);
+        grid.sync_buffer_to_cursor_position();
+        let expected_contents = {
+            let mut sb = "\n".repeat(9);
+            for _ in 0..=49 {
+                sb.push(Grid::FILL_CHAR as char);
+            }
+            sb
+        };
+
+        assert_eq!(grid.text_contents(), expected_contents);
         grid.resize(10, 49);
-        assert_eq!(grid.cursor_position(), (9, 0));
+        // contents should not change due to resize
+        assert_eq!(grid.text_contents(), expected_contents);
+        assert_eq!(
+            grid.cursor_position(),
+            (9, 1),
+            "expected due to wrapping one space"
+        );
 
         // resize rows and cols to be bigger
-        grid.move_cursor(5, 30);
         grid.resize(20, 100);
-        assert_eq!(grid.cursor_position(), (5, 30));
+        assert_eq!(
+            grid.cursor_position(),
+            (9, 50),
+            "expected cursor to be at the end after resize"
+        );
+        grid.move_cursor(5, 30);
+        grid.sync_buffer_to_cursor_position();
+        assert_eq!(grid.text_contents(), {
+            let mut sb = "\n".repeat(5);
+            for _ in 0..=30 {
+                sb.push(Grid::FILL_CHAR as char);
+            }
+            sb.push('\n');
+            for _ in 6..9 {
+                sb.push('\n');
+            }
+            for _ in 0..50 {
+                sb.push(Grid::FILL_CHAR as char);
+            }
+            sb
+        });
 
         // resize rows to be smaller
-        grid.move_cursor(19, 99);
-        grid.resize(5, 100);
-        assert_eq!(grid.cursor_position(), (4, 99));
+        grid.resize(6, 100);
+        assert_eq!(grid.cursor_position(), (5, 50));
     }
 
     #[test]

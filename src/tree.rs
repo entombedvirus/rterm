@@ -1871,4 +1871,22 @@ mod tests {
             SeekSoftWrapPosition::new(4, 0)
         );
     }
+
+    #[test]
+    fn test_max_bound_insert_1() {
+        let mut tree = Tree::from_str("hello\n\n");
+        let max_pos: SeekSoftWrapPosition = tree.max_bound();
+        assert_eq!(max_pos, SeekSoftWrapPosition::new(2, 0));
+
+        let err = tree
+            .resolve_dimension(SeekSoftWrapPosition::new(1, 0))
+            .unwrap_err();
+        tree.truncate(SeekCharIdx(err.last_char_idx + 1));
+        tree.insert_str(
+            SeekCharIdx(err.last_char_idx + 1),
+            "world",
+            SgrState::default(),
+        );
+        assert_eq!(tree.to_string().as_str(), "hello\nworld");
+    }
 }
