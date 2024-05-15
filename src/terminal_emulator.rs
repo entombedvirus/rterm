@@ -158,10 +158,11 @@ impl eframe::App for TerminalEmulator {
                 for grid in grids {
                     needs_signal |= grid.resize(winsz.ws_row as u32, winsz.ws_col as u32);
                 }
-                if needs_signal {
-                    pty::update_pty_window_size(pty_fd, &winsz)
-                        .context("update_pty_window_size")?;
-                }
+                // TODO: debounce sending of signals to pty
+                // if needs_signal {
+                //     pty::update_pty_window_size(pty_fd, &winsz)
+                //         .context("update_pty_window_size")?;
+                // }
 
                 ui.input(|input_state| -> anyhow::Result<()> {
                     for event in &input_state.events {

@@ -67,8 +67,10 @@ impl Tree {
     }
 
     pub fn rewrap(&mut self, new_wrap_width: NonZeroU32) {
-        self.summarize_context.wrap_width = Some(new_wrap_width);
-        Arc::make_mut(&mut self.root).rewrap(self.summarize_context);
+        if self.summarize_context.wrap_width != Some(new_wrap_width) {
+            let old_wrap_width = self.summarize_context.wrap_width.replace(new_wrap_width);
+            Arc::make_mut(&mut self.root).rewrap(self.summarize_context, old_wrap_width);
+        }
     }
 
     pub fn len_bytes(&self) -> usize {
@@ -972,9 +974,10 @@ impl Node {
         })
     }
 
-    fn rewrap(&mut self, cx: SummarizeContext) {
-        if let Some(wrap_width) = cx.wrap_width {
-            if self.node_summary().lines.longest_line_chars < wrap_width.get() {
+    fn rewrap(&mut self, cx: SummarizeContext, old_wrap_width: Option<NonZeroU32>) {
+        if let Some((new_wrap_width, old_wrap_width)) = cx.wrap_width.zip(old_wrap_width) {
+            let longest_line = self.node_summary().lines.longest_line_chars;
+            if longest_line < old_wrap_width.get() && longest_line < new_wrap_width.get() {
                 return;
             }
         }
@@ -983,7 +986,7 @@ impl Node {
             Node::Leaf { .. } => self.recompute_summaries(cx),
             Node::Internal { children, .. } => {
                 for child in children {
-                    Arc::make_mut(child).rewrap(cx);
+                    Arc::make_mut(child).rewrap(cx, old_wrap_width);
                 }
                 self.recompute_summaries(cx);
             }

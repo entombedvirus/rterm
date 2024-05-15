@@ -628,26 +628,16 @@ mod tests {
     #[test]
     fn test_erase_after_resize_2() {
         let mut grid = Grid::new(24, 80);
-        let parts = [
-            "\nuser@host: /some/path\n",
-            "> ls\n",
-            "Cargo.lock\tCargo.toml\tTODO\t\tres\t\tsrc\t\ttarget\n",
-            "\nuser@host: /some/path\n",
-            "> ",
-        ];
-        for p in parts {
-            for line in p.split_inclusive('\n') {
-                if line.ends_with('\n') {
-                    grid.write_text_at_cursor(&line[..line.len() - 1]);
-                    grid.insert_linebreak_if_needed();
-                    let (_, col) = grid.cursor_position();
-                    // simulate \r\n
-                    grid.move_cursor_relative(1, -1 * col as i32);
-                } else {
-                    grid.write_text_at_cursor(line);
-                }
-            }
-        }
+        grid_feed_input(
+            &mut grid,
+            [
+                "\nuser@host: /some/path\n",
+                "> ls\n",
+                "Cargo.lock\tCargo.toml\tTODO\t\tres\t\tsrc\t\ttarget\n",
+                "\nuser@host: /some/path\n",
+                "> ",
+            ],
+        );
 
         // simulate user resizing the window a bunch
         for (r, c) in [(24, 15), (5, 15), (50, 100)] {
@@ -673,6 +663,25 @@ mod tests {
         grid.move_cursor(19, 99);
         grid.resize(5, 100);
         assert_eq!(grid.cursor_position(), (4, 99));
+    }
+
+    #[test]
+    fn test_cursor_pos_after_resize_2() {
+        let mut grid = Grid::new(10, 50);
+        grid_feed_input(&mut grid, ["user@host ~/work/rterm\n", "> "]);
+        assert_eq!(grid.cursor_position(), (1, 2));
+
+        // resize to be tight fit, but not cause any wrapping
+        grid.resize(10, 23);
+        assert_eq!(grid.cursor_position(), (1, 2));
+
+        // resize smaller to cause some wrapping
+        grid.resize(10, 22);
+        assert_eq!(grid.cursor_position(), (2, 2));
+
+        // resize bigger to go back to original pos
+        grid.resize(10, 23);
+        assert_eq!(grid.cursor_position(), (1, 2));
     }
 
     #[test]
@@ -730,6 +739,22 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
                 &blank_line,
                 "for line: {line_idx}"
             );
+        }
+    }
+
+    fn grid_feed_input<'a, I: IntoIterator<Item = &'a str>>(grid: &mut Grid, parts: I) {
+        for p in parts {
+            for line in p.split_inclusive('\n') {
+                if line.ends_with('\n') {
+                    grid.write_text_at_cursor(&line[..line.len() - 1]);
+                    grid.insert_linebreak_if_needed();
+                    let (_, col) = grid.cursor_position();
+                    // simulate \r\n
+                    grid.move_cursor_relative(1, -1 * col as i32);
+                } else {
+                    grid.write_text_at_cursor(line);
+                }
+            }
         }
     }
 }
