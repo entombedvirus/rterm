@@ -508,11 +508,18 @@ impl TerminalEmulator {
             egui::Event::Key {
                 key: Key::F1,
                 pressed: false,
+                modifiers,
                 ..
             } => {
                 let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
                 let grid_contents = grid.text_contents();
-                log::info!("\n=====================\n{grid_contents}\n=====================\n");
+                if modifiers.alt {
+                    log::info!(
+                        "\n=====================\n{grid_contents:?}\n=====================\n"
+                    );
+                } else {
+                    log::info!("\n=====================\n{grid_contents}\n=====================\n");
+                }
             }
             egui::Event::Key { pressed: false, .. } => (),
             egui::Event::PointerMoved { .. } => (),
