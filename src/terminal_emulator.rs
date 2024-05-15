@@ -4,6 +4,7 @@ use std::{
     ops::{Neg, Range},
     os::fd::{AsFd, AsRawFd, OwnedFd},
     sync::{mpsc, Arc},
+    time::{self, Duration},
 };
 
 use crate::{
@@ -67,6 +68,8 @@ pub struct TerminalEmulator {
     enable_focus_tracking: bool,
     enable_application_escape: bool,
     enable_debug_render: bool,
+
+    debounce_resize_signal: Option<time::Instant>,
 }
 
 impl eframe::App for TerminalEmulator {
@@ -158,11 +161,22 @@ impl eframe::App for TerminalEmulator {
                 for grid in grids {
                     needs_signal |= grid.resize(winsz.ws_row as u32, winsz.ws_col as u32);
                 }
-                // TODO: debounce sending of signals to pty
-                // if needs_signal {
-                //     pty::update_pty_window_size(pty_fd, &winsz)
-                //         .context("update_pty_window_size")?;
-                // }
+                if needs_signal {
+                    let delay = Duration::from_millis(100);
+                    self.debounce_resize_signal = time::Instant::now().checked_add(delay);
+                    ctx.request_repaint_after(delay);
+                } else if let Some(t) = self.debounce_resize_signal {
+                    let now = time::Instant::now();
+                    if now >= t {
+                        log::info!("sending resize signal to pty");
+                        pty::update_pty_window_size(pty_fd, &winsz)
+                            .context("update_pty_window_size")?;
+                        self.debounce_resize_signal = None;
+                    } else {
+                        let delay = t.duration_since(now);
+                        ctx.request_repaint_after(delay)
+                    }
+                }
 
                 ui.input(|input_state| -> anyhow::Result<()> {
                     for event in &input_state.events {
@@ -263,6 +277,7 @@ impl TerminalEmulator {
             enable_bracketed_paste: false,
             enable_focus_tracking: false,
             enable_application_escape: false,
+            debounce_resize_signal: None,
         })
     }
 
