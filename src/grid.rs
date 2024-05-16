@@ -635,6 +635,21 @@ mod tests {
     }
 
     #[test]
+    fn test_grid_4() {
+        let mut grid = Grid::new(3, 5);
+        // cause wrapping
+        grid.write_text_at_cursor("a".repeat(6).as_str());
+        assert_eq!(grid.total_rows(), 2);
+
+        // then resize to get rid of it
+        grid.resize(3, 6);
+        assert_eq!(grid.total_rows(), 1);
+
+        grid.resize(3, 12);
+        assert_eq!(grid.total_rows(), 1);
+    }
+
+    #[test]
     fn test_erase_after_resizing_1() {
         let mut grid = Grid::new(10, 50);
         grid.resize(10, 30);

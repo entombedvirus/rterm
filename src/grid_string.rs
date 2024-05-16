@@ -172,14 +172,21 @@ impl GridString {
             );
         }
 
-        if char_idx == self.len_chars() {
+        if char_idx == self.buf.capacity() {
             return Self::split(new_text, new_sgr);
         }
 
         let mut edited_buf = ArrayString::new();
         let mut edited_sgr = ArrayVec::new();
 
-        let (old_text_prefix, old_text_suffix) = self.buf.split_at(char_idx);
+        let byte_idx = self
+            .buf
+            .as_str()
+            .char_indices()
+            .nth(char_idx)
+            .map(|(bi, _)| bi)
+            .unwrap_or(self.buf.len());
+        let (old_text_prefix, old_text_suffix) = self.buf.split_at(byte_idx);
         edited_buf
             .try_push_str(old_text_prefix)
             .expect("part of old text should always fit");
@@ -682,5 +689,15 @@ mod tests {
         assert_eq!(gs.as_str(), "ab123456");
         assert_eq!(rest, "");
         assert_eq!(overflow.as_ref().map(GridString::as_str), Some("cd"));
+    }
+
+    #[test]
+    fn test_insert_2() {
+        let mut gs = GridString::from_str("❯~").unwrap();
+        let _ = gs.insert_str(1, "hi", SgrState::default());
+        assert_eq!(gs.as_str(), "❯hi~");
+
+        let _ = gs.insert_str(4, "a", SgrState::default());
+        assert_eq!(gs.as_str(), "❯hi~a");
     }
 }
