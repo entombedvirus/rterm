@@ -105,7 +105,14 @@ impl Tree {
     }
 
     pub fn replace_str<D: SeekTarget>(&mut self, target: D, mut new_text: &str, sgr: SgrState) {
-        let mut char_idx = self.resolve_dimension(target).expect("invalid target");
+        if let Err(err) = self.resolve_dimension(target.clone()) {
+            // breakpoint
+            let x = self.to_string();
+            dbg!(err.last_char_idx);
+        }
+        let mut char_idx = self
+            .resolve_dimension(target.clone())
+            .expect("replace_str: invalid target");
         while !new_text.is_empty() {
             self.find_string_segment_mut(
                 SeekCharIdx(char_idx),
@@ -849,7 +856,7 @@ impl Node {
                 let child = &mut children[child_idx];
                 let char_idx = seek_target
                     .to_char_idx(cx, &running_sum, child.as_str())
-                    .ok()?;
+                    .expect("to_char_idx failed unexpectedly");
                 edit_op(child, char_idx - running_sum.chars).and_then(|overflow| {
                     let overflow_pos = child_idx + 1;
                     children
@@ -1284,11 +1291,6 @@ impl SeekTarget for SeekSoftWrapPosition {
                     next_pos = next_pos.add_char(wrap_width, ch);
                 }
                 std::cmp::Ordering::Equal => {
-                    // check that `ch` is a valid position. newlines are
-                    // not directly addressable .
-                    if ch == '\n' {
-                        break;
-                    }
                     return Ok(agg_summary.chars + i);
                 }
                 std::cmp::Ordering::Greater => {
@@ -1673,9 +1675,9 @@ mod tests {
 
         // invalid position
         assert_eq!(
-            tree.resolve_dimension(SeekSoftWrapPosition::new(2, 3))
+            tree.resolve_dimension(SeekSoftWrapPosition::new(2, 4))
                 .map_err(|err| err.last_valid_position),
-            Err(SeekSoftWrapPosition::new(2, 2)),
+            Err(SeekSoftWrapPosition::new(2, 3)),
         );
     }
 
@@ -1879,14 +1881,14 @@ mod tests {
         assert_eq!(max_pos, SeekSoftWrapPosition::new(2, 0));
 
         let err = tree
-            .resolve_dimension(SeekSoftWrapPosition::new(1, 0))
+            .resolve_dimension(SeekSoftWrapPosition::new(2, 1))
             .unwrap_err();
-        tree.truncate(SeekCharIdx(err.last_char_idx + 1));
+        tree.truncate(SeekCharIdx(err.last_char_idx));
         tree.insert_str(
-            SeekCharIdx(err.last_char_idx + 1),
+            SeekCharIdx(err.last_char_idx - 1),
             "world",
             SgrState::default(),
         );
-        assert_eq!(tree.to_string().as_str(), "hello\nworld");
+        assert_eq!(tree.to_string().as_str(), "hello\nworld\n");
     }
 }

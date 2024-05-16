@@ -146,6 +146,8 @@ impl Grid {
         assert!(new_col < self.num_cols());
         self.cursor_state.pending_wrap = false;
         self.cursor_state.position = (ScreenCoord(new_row), ScreenCoord(new_col));
+        self.cursor_state
+            .clamp_position(self.num_rows(), self.num_cols());
     }
 
     pub fn cursor_format_mut(&mut self) -> &mut SgrState {
@@ -182,7 +184,6 @@ impl Grid {
         // move cursor to the last cell
         let max_pos = self.text.max_bound::<SeekSoftWrapPosition>();
         self.move_cursor(max_pos.line_idx, max_pos.col_idx);
-        self.cursor_state.clamp_position(new_num_rows, new_num_cols);
 
         true
     }
@@ -194,17 +195,20 @@ impl Grid {
 
         // before inserting txt, check if a wrap is pending
         if self.cursor_state.pending_wrap {
-            // moving will clear the pending wrap flag
             let (row, _) = self.cursor_position();
             self.move_cursor(row + 1, 0);
+            self.cursor_state.pending_wrap = false;
         }
 
+        let x = self.text.to_string();
         self.sync_buffer_to_cursor_position();
+        let x = self.text.to_string();
         self.text.replace_str(
             self.screen_to_buffer_pos(),
             txt,
             self.cursor_state.sgr_state,
         );
+        let x = self.text.to_string();
 
         // move cursor along
         let edit_len = txt.chars().count() as u32;
@@ -375,7 +379,7 @@ impl Grid {
             }
             Err(err) => {
                 // hmm? won't this cause text before the cursor to get erased?
-                let x = self.text.to_string();
+                let _ = self.text.to_string();
                 self.text.truncate(SeekCharIdx(err.last_char_idx + 1));
             }
         }
@@ -388,7 +392,8 @@ impl Grid {
 
     fn screen_to_buffer_pos(&self) -> tree::SeekSoftWrapPosition {
         let (row, col) = self.cursor_position();
-        let scrollback_rows = self.total_rows().saturating_sub(self.num_rows());
+        let max_pos: tree::SeekSoftWrapPosition = self.text.max_bound();
+        let scrollback_rows = (max_pos.line_idx + 1).saturating_sub(self.num_rows());
         tree::SeekSoftWrapPosition::new(scrollback_rows + row, col)
     }
 
@@ -402,13 +407,15 @@ impl Grid {
     }
 
     /// Inserts a hard line-wrap `\n` if the cursor is on the last row of the buffer. Otherwise,
-    /// does nothing.
+    /// moves the cursor down a line.
     pub fn insert_linebreak_if_needed(&mut self) {
         if self.screen_to_buffer_pos().line_idx
             == self.text.max_bound::<SeekSoftWrapPosition>().line_idx
         {
             self.text.push_str("\n", SgrState::default());
         }
+
+        self.move_cursor_relative(1, 0);
     }
 
     pub fn text_contents(&self) -> String {
@@ -764,7 +771,6 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
             let (row, _) = grid.cursor_position();
             grid.move_cursor(row, 0); // \r
             grid.insert_linebreak_if_needed(); // \n
-            grid.move_cursor_relative(1, 0); // \n
         }
         assert_nth_line(
             &grid,
@@ -806,10 +812,9 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
             for line in p.split_inclusive('\n') {
                 if line.ends_with('\n') {
                     grid.write_text_at_cursor(&line[..line.len() - 1]);
-                    grid.insert_linebreak_if_needed();
-                    let (_, col) = grid.cursor_position();
-                    // simulate \r\n
-                    grid.move_cursor_relative(1, -1 * col as i32);
+                    let (row, _) = grid.cursor_position();
+                    grid.move_cursor(row, 0); // \r
+                    grid.insert_linebreak_if_needed(); // \n
                 } else {
                     grid.write_text_at_cursor(line);
                 }

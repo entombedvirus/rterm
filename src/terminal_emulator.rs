@@ -628,7 +628,6 @@ impl TerminalEmulator {
                     }
                     AnsiToken::AsciiControl(AsciiControl::LineFeed) => {
                         grid.insert_linebreak_if_needed();
-                        grid.move_cursor_relative(1, 0);
                     }
                     AnsiToken::AsciiControl(AsciiControl::CarriageReturn) => {
                         let (current_row, _) = grid.cursor_position();
@@ -731,6 +730,7 @@ impl TerminalEmulator {
                 .context("child process not spawned yet")?;
             match token_stream.try_recv() {
                 Ok(tokens) => {
+                    log::info!("got tokens: {tokens:?}");
                     for token in tokens {
                         self.handle_ansi_token(ctx, token);
                     }
