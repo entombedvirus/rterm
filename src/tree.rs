@@ -275,6 +275,12 @@ impl Tree {
     pub fn truncate<T: SeekTarget>(&mut self, target: T) {
         self.remove_range(target..);
     }
+
+    pub fn clear(&mut self) {
+        let cx = self.summarize_context;
+        *self = Self::new();
+        self.summarize_context = cx;
+    }
 }
 
 #[derive(Debug)]

@@ -120,15 +120,11 @@ impl Grid {
         puffin::profile_function!();
         let line_idx = tree::SeekSoftWrapPosition::new(self.first_visible_line_no(), 0);
         self.text.remove_range(line_idx..);
-        for _ in 0..self.num_rows() {
-            self.text
-                .push_str(self.blank_line.as_ref(), SgrState::default());
-        }
     }
 
     pub fn clear_including_scrollback(&mut self) {
         puffin::profile_function!();
-        self.text = Self::rope_with_n_blank_lines(self.num_rows(), self.blank_line.as_ref());
+        self.text.clear();
         self.cursor_state = CursorState::default();
     }
 
@@ -155,7 +151,10 @@ impl Grid {
     }
 
     pub fn resize(&mut self, new_num_rows: u32, new_num_cols: u32) -> bool {
-        if self.num_rows() == new_num_rows && self.num_cols() == new_num_cols {
+        if new_num_rows == 0
+            || new_num_cols == 0
+            || self.num_rows() == new_num_rows && self.num_cols() == new_num_cols
+        {
             return false;
         }
         log::info!(
@@ -800,6 +799,58 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
             10,
             "drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target--------------------------",
         );
+    }
+
+    #[test]
+    fn test_resize_to_zero() {
+        let mut grid = Grid::new(10, 20);
+        grid.write_text_at_cursor("hi");
+        // should not panic
+        grid.resize(0, 0);
+        assert_eq!(grid.num_rows(), 10);
+        assert_eq!(grid.num_cols(), 20);
+    }
+
+    #[test]
+    fn test_clear_screen_1() {
+        let mut grid = Grid::new(10, 20);
+        grid_feed_input(&mut grid, ["> ls\n", "foo bar baz\n", "abc def ghi\n"]);
+        assert_eq!(grid.total_rows(), 3);
+
+        grid.clear_screen();
+        assert_eq!(grid.total_rows(), 0);
+    }
+
+    #[test]
+    fn test_clear_screen_2() {
+        let mut grid = Grid::new(10, 20);
+        grid.max_scrollback_lines(100);
+        grid_feed_input(&mut grid, std::iter::repeat("foo\n").take(15));
+        assert_eq!(grid.total_rows(), 15);
+
+        grid.clear_screen();
+        assert_eq!(grid.total_rows(), 5);
+    }
+
+    #[test]
+    fn test_clear_screen_3() {
+        let mut grid = Grid::new(10, 20);
+        grid_feed_input(&mut grid, ["> ls\n", "foo bar baz\n", "abc def ghi\n"]);
+        assert_eq!(grid.total_rows(), 3);
+
+        grid.clear_including_scrollback();
+        assert_eq!(grid.total_rows(), 0);
+    }
+
+    #[test]
+    fn test_clear_screen_4() {
+        let mut grid = Grid::new(10, 20);
+        grid.max_scrollback_lines(100);
+        grid_feed_input(&mut grid, std::iter::repeat("foo\n").take(15));
+        assert_eq!(grid.total_rows(), 15);
+
+        grid.clear_including_scrollback();
+        assert_eq!(grid.total_rows(), 0);
     }
 
     fn assert_nth_line(grid: &Grid, line_idx: u32, expected: &str) {
