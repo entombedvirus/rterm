@@ -105,11 +105,6 @@ impl Tree {
     }
 
     pub fn replace_str<D: SeekTarget>(&mut self, target: D, mut new_text: &str, sgr: SgrState) {
-        if let Err(err) = self.resolve_dimension(target.clone()) {
-            // breakpoint
-            let x = self.to_string();
-            dbg!(err.last_char_idx);
-        }
         let mut char_idx = self
             .resolve_dimension(target.clone())
             .expect("replace_str: invalid target");
@@ -159,7 +154,6 @@ impl Tree {
             self.find_string_segment_mut(
                 SeekCharIdx(char_range.start),
                 |segment: &mut GridString, segment_char_idx: usize| -> Option<GridString> {
-                    let foo = segment.as_str();
                     let end_char_idx = (segment_char_idx + n).min(segment.len_chars());
                     let remove_range = segment_char_idx..end_char_idx;
                     segment
@@ -235,7 +229,6 @@ impl Tree {
         } else if seek_target == self.max_bound() {
             Ok(self.len_chars())
         } else {
-            let foo = self.to_string();
             let running_sum = TextSummary::default();
             self.root
                 .dimension_to_char_idx(self.summarize_context, running_sum, seek_target)
@@ -515,7 +508,6 @@ mod iter {
             &'b mut self,
             seek_target: T,
         ) -> impl Iterator<Item = (&'a str, &'a [SgrState])> + 'b {
-            let x = self.tree.to_string();
             let target_char_idx = self
                 .tree
                 .resolve_dimension(seek_target.clone())
@@ -951,27 +943,6 @@ impl Node {
         seek_target: T,
     ) -> Result<usize, OutOfBounds<T>> {
         for (child_idx, child_summary) in self.child_summaries().into_iter().enumerate() {
-            {
-                match self {
-                    Node::Leaf { children, .. } => {
-                        let foo = children[child_idx].as_str();
-                        let _ = foo.len();
-                    }
-                    Node::Internal {
-                        children,
-                        child_summaries,
-                        node_summary,
-                        ..
-                    } => {
-                        let sub_tree = Tree {
-                            summarize_context: cx,
-                            root: children[child_idx].clone(),
-                        };
-                        let sub_tree_str = sub_tree.to_string();
-                        let _ = sub_tree_str.len();
-                    }
-                }
-            }
             let next_sum = running_sum.add(cx, child_summary);
             if seek_target.cmp_summary(cx, &next_sum) == std::cmp::Ordering::Less {
                 return match self {
@@ -1101,7 +1072,7 @@ impl Compactable for GridString {
         self.len_chars() == 0
     }
 
-    fn compact_two(cx: SummarizeContext, a: &mut Self, b: &mut Self) -> bool {
+    fn compact_two(_cx: SummarizeContext, a: &mut Self, b: &mut Self) -> bool {
         let (to_write, rem) =
             split_str_at_utf8_boundary(b.as_str(), a.buf_mut().remaining_capacity());
         let chars_written = to_write.chars().count();
@@ -1121,7 +1092,7 @@ impl<T, const N: usize> Compactable for ArrayVec<T, N> {
         self.is_empty()
     }
 
-    fn compact_two(cx: SummarizeContext, a: &mut Self, b: &mut Self) -> bool {
+    fn compact_two(_cx: SummarizeContext, a: &mut Self, b: &mut Self) -> bool {
         let room_available = a.remaining_capacity();
         let num_children = b.len();
         a.extend(b.drain(0..room_available.min(num_children)));

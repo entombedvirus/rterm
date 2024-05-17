@@ -1,5 +1,5 @@
 use std::{
-    num::{NonZeroI32, NonZeroU32},
+    num::NonZeroU32,
     ops::{Range, RangeBounds},
     rc::Rc,
 };
@@ -209,9 +209,7 @@ impl Grid {
             // use append
             self.text.push_str(txt, self.cursor_state.sgr_state);
         } else {
-            let x = self.text.to_string();
             self.sync_buffer_to_cursor_position();
-            let x = self.text.to_string();
 
             // we could use `replace_str` if the cells that would be overwritten are occuplied.
             // Otherwise, we have to use insert_str in order to not overwrite subsequent lines.
@@ -227,14 +225,12 @@ impl Grid {
                 pos.col_idx += edit_len;
                 pos.line_idx += pos.col_idx / self.num_cols();
                 pos.col_idx %= self.num_cols();
-                self.text.resolve_dimension(pos).unwrap_or_else(|err| {
-                    let x = err.last_char_idx;
-                    err.last_char_idx
-                })
+                self.text
+                    .resolve_dimension(pos)
+                    .unwrap_or_else(|err| err.last_char_idx)
             };
             self.text
                 .remove_range(SeekCharIdx(edit_pos_start)..SeekCharIdx(edit_pos_end));
-            let x = self.text.to_string();
 
             self.text.insert_str(
                 SeekCharIdx(edit_pos_start),
@@ -242,7 +238,6 @@ impl Grid {
                 self.cursor_state.sgr_state,
             );
         }
-        let x = self.text.to_string();
 
         // move cursor along
         let cur_col = edit_pos.col_idx;
@@ -274,17 +269,12 @@ impl Grid {
     // to make the position valid.
     fn sync_buffer_to_cursor_position(&mut self) {
         let desired_pos = self.screen_to_buffer_pos();
-        if let Err(
-            err @ tree::OutOfBounds {
-                mut last_valid_position,
-                mut last_char_idx,
-                ..
-            },
-        ) = self.text.resolve_dimension(desired_pos.clone())
+        if let Err(tree::OutOfBounds {
+            mut last_valid_position,
+            mut last_char_idx,
+            ..
+        }) = self.text.resolve_dimension(desired_pos.clone())
         {
-            let before = self.text.to_string();
-            dbg!(&err);
-            let x = self.text.resolve_dimension(desired_pos.clone());
             if let Some(lines_to_add) = desired_pos
                 .line_idx
                 .checked_sub(last_valid_position.line_idx)
@@ -298,7 +288,6 @@ impl Grid {
                 last_valid_position.line_idx = desired_pos.line_idx;
                 last_valid_position.col_idx = 0;
             }
-            let after = self.text.to_string();
 
             let n = desired_pos.col_idx - last_valid_position.col_idx + 1;
             self.text.insert_str(
@@ -432,10 +421,8 @@ impl Grid {
         {
             n = n + 1;
         }
-        let x = self.text.to_string();
         self.text
             .insert_str(pos, "\n".repeat(n as usize).as_str(), SgrState::default());
-        let x = self.text.to_string();
 
         let total_rows = self.total_rows();
         if let Some(to_remove) = total_rows
@@ -454,15 +441,6 @@ impl Grid {
     fn screen_to_buffer_pos(&self) -> tree::SeekSoftWrapPosition {
         let (row, col) = self.cursor_position();
         tree::SeekSoftWrapPosition::new(self.first_visible_line_no() + row, col)
-    }
-
-    fn rope_with_n_blank_lines(num_rows: u32, blank_line: &str) -> Tree {
-        puffin::profile_function!();
-        let mut tree = tree::Tree::new();
-        for _ in 0..num_rows {
-            tree.push_str(blank_line, SgrState::default());
-        }
-        tree
     }
 
     /// Inserts a hard line-wrap `\n` if the cursor is on the last row of the buffer. Otherwise,
@@ -485,47 +463,6 @@ impl Grid {
     pub fn text_contents(&self) -> String {
         self.text.to_string()
     }
-}
-
-fn resolve_range<R: RangeBounds<usize>>(
-    query_range: R,
-    valid_range: Range<usize>,
-) -> anyhow::Result<Range<usize>> {
-    use std::ops::Bound::{Excluded, Included, Unbounded};
-
-    let start = match query_range.start_bound() {
-        Included(&n) => n,
-        Excluded(&n) => n + 1,
-        Unbounded => valid_range.start,
-    };
-    let end = match query_range.end_bound() {
-        Included(&n) => n + 1,
-        Excluded(&n) => n,
-        Unbounded => valid_range.end,
-    };
-
-    if start > end {
-        anyhow::bail!(
-            "range out of bounds: start {} is smaller than end: {:?}",
-            start,
-            end,
-        );
-    }
-    if start < valid_range.start {
-        anyhow::bail!(
-            "range out of bounds: {} is outside valid_range: {:?}",
-            start,
-            valid_range
-        );
-    }
-    if end > valid_range.end {
-        anyhow::bail!(
-            "range out of bounds: {} is outside valid_range: {:?}",
-            end,
-            valid_range
-        );
-    }
-    Ok(start..end)
 }
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -994,21 +931,6 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
     fn assert_nth_line(grid: &Grid, line_idx: u32, expected: &str) {
         let line = grid.display_lines(line_idx..).next().unwrap().padded_text;
         assert_eq!(&line, expected);
-    }
-
-    fn assert_is_blank(grid: &Grid, line_range: Range<u32>) {
-        let lines = grid.display_lines(line_range.clone());
-
-        let mut blank_line = grid.blank_line.to_string();
-        // tailing newline won't be in the output
-        blank_line.pop();
-        for (line_idx, line) in line_range.zip(lines) {
-            assert_eq!(
-                line.padded_text.as_str(),
-                &blank_line,
-                "for line: {line_idx}"
-            );
-        }
     }
 
     fn grid_feed_input<'a, I: IntoIterator<Item = S>, S: AsRef<str>>(grid: &mut Grid, parts: I) {
