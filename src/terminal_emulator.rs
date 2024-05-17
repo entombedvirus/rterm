@@ -730,7 +730,6 @@ impl TerminalEmulator {
                 .context("child process not spawned yet")?;
             match token_stream.try_recv() {
                 Ok(tokens) => {
-                    log::info!("got tokens: {tokens:?}");
                     for token in tokens {
                         self.handle_ansi_token(ctx, token);
                     }

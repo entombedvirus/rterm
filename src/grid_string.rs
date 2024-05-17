@@ -172,7 +172,12 @@ impl GridString {
             );
         }
 
-        if char_idx == self.buf.capacity() {
+        let Some(first_char) = new_text.chars().next() else {
+            // new_text is empty
+            return (None, 0, "");
+        };
+
+        if char_idx == self.len_chars() && first_char.len_utf8() > self.buf.remaining_capacity() {
             return Self::split(new_text, new_sgr);
         }
 
@@ -699,5 +704,21 @@ mod tests {
 
         let _ = gs.insert_str(4, "a", SgrState::default());
         assert_eq!(gs.as_str(), "❯hi~a");
+    }
+
+    #[test]
+    fn test_insert_3() {
+        // multi-byte char causing len_chars < capacity (8)
+        let mut gs = GridString::from_str("❯45678").unwrap();
+        let (overflow, _, rem) = gs.insert_str(1, "hi", SgrState::default());
+        assert_eq!(gs.as_str(), "❯hi456");
+        assert_eq!(overflow.as_ref().map(GridString::as_str), Some("78"));
+        assert_eq!(rem, "");
+
+        // there's some room at the end, but the first char won't fit
+        let mut gs = GridString::from_str("123456").unwrap();
+        let (overflow, _, rem) = gs.insert_str(6, "❯", SgrState::default());
+        assert_eq!(overflow.as_ref().map(GridString::as_str), Some("❯"));
+        assert_eq!(rem, "");
     }
 }

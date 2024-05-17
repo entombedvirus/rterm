@@ -154,8 +154,6 @@ impl Tree {
         let mut char_range = self
             .resolve_dimensions(target_range)
             .expect("invalid range supplied");
-        // let mut char_range =
-        //     resolve_range(char_range, 0..self.len_chars()).expect("invalid range supplied");
         while !char_range.is_empty() {
             let n = char_range.len();
             self.find_string_segment_mut(
@@ -280,6 +278,15 @@ impl Tree {
         let cx = self.summarize_context;
         *self = Self::new();
         self.summarize_context = cx;
+    }
+
+    pub fn get_char(&self, char_idx: usize) -> Option<char> {
+        if char_idx >= self.len_chars() {
+            return None;
+        }
+        let mut cursor = iter::Cursor::new(self);
+        cursor.seek_to_char(SeekCharIdx(char_idx)).ok()?;
+        cursor.segment_str()?.chars().next()
     }
 }
 
@@ -1896,5 +1903,20 @@ mod tests {
             SgrState::default(),
         );
         assert_eq!(tree.to_string().as_str(), "hello\nworld\n");
+    }
+
+    #[test]
+    fn test_get_char_1() {
+        let mut tree = Tree::new();
+        assert_eq!(tree.get_char(0), None);
+
+        tree.push_str("hello\n", SgrState::default());
+        assert_eq!(tree.get_char(4), Some('o'));
+        assert_eq!(tree.get_char(5), Some('\n'));
+
+        tree.push_str("world", SgrState::default());
+        assert_eq!(tree.get_char(6), Some('w'));
+        assert_eq!(tree.get_char(10), Some('d'));
+        assert_eq!(tree.get_char(11), None);
     }
 }

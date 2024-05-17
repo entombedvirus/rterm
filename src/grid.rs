@@ -1,5 +1,5 @@
 use std::{
-    num::NonZeroU32,
+    num::{NonZeroI32, NonZeroU32},
     ops::{Range, RangeBounds},
     rc::Rc,
 };
@@ -190,29 +190,63 @@ impl Grid {
     pub fn write_text_at_cursor(&mut self, txt: &str) {
         puffin::profile_function!();
 
+        if txt.is_empty() {
+            return;
+        }
+
         debug_assert!(!txt.contains('\n'));
 
-        // before inserting txt, check if a wrap is pending
+        let edit_len = txt.chars().count() as u32;
+        let mut edit_pos = self.screen_to_buffer_pos();
         if self.cursor_state.pending_wrap {
-            let (row, _) = self.cursor_position();
-            self.move_cursor(row + 1, 0);
+            edit_pos.line_idx += 1;
+            edit_pos.col_idx = 0;
+            self.move_cursor(edit_pos.line_idx, edit_pos.col_idx);
             self.cursor_state.pending_wrap = false;
         }
 
-        let x = self.text.to_string();
-        self.sync_buffer_to_cursor_position();
-        let x = self.text.to_string();
-        self.text.replace_str(
-            self.screen_to_buffer_pos(),
-            txt,
-            self.cursor_state.sgr_state,
-        );
+        if edit_pos == self.text.max_bound() {
+            // use append
+            self.text.push_str(txt, self.cursor_state.sgr_state);
+        } else {
+            let x = self.text.to_string();
+            self.sync_buffer_to_cursor_position();
+            let x = self.text.to_string();
+
+            // we could use `replace_str` if the cells that would be overwritten are occuplied.
+            // Otherwise, we have to use insert_str in order to not overwrite subsequent lines.
+            // In order to makes the edge case of some of the chars from `txt` needing to use
+            // `replace_str` and the rest needing `insert_str`, we will remove the affected cells and
+            // then use `insert_str`.
+            let edit_pos_start = self
+                .text
+                .resolve_dimension(edit_pos)
+                .expect("sync_buffer_to_cursor_position to ensure that cursor_pos is valid");
+            let edit_pos_end = {
+                let mut pos = edit_pos.clone();
+                pos.col_idx += edit_len;
+                pos.line_idx += pos.col_idx / self.num_cols();
+                pos.col_idx %= self.num_cols();
+                self.text.resolve_dimension(pos).unwrap_or_else(|err| {
+                    let x = err.last_char_idx;
+                    err.last_char_idx
+                })
+            };
+            self.text
+                .remove_range(SeekCharIdx(edit_pos_start)..SeekCharIdx(edit_pos_end));
+            let x = self.text.to_string();
+
+            self.text.insert_str(
+                SeekCharIdx(edit_pos_start),
+                txt,
+                self.cursor_state.sgr_state,
+            );
+        }
         let x = self.text.to_string();
 
         // move cursor along
-        let edit_len = txt.chars().count() as u32;
-        let (_, cur_col) = self.cursor_position();
-        if cur_col + (edit_len % self.num_cols()) == self.num_cols() {
+        let cur_col = edit_pos.col_idx;
+        if (cur_col + edit_len) % self.num_cols() == 0 {
             self.move_cursor_relative(0, edit_len as i32 - 1);
             self.cursor_state.pending_wrap = true;
         } else {
@@ -266,7 +300,6 @@ impl Grid {
             }
             let after = self.text.to_string();
 
-            // TODO: this will always insert 1 blank
             let n = desired_pos.col_idx - last_valid_position.col_idx + 1;
             self.text.insert_str(
                 SeekCharIdx(last_char_idx),
@@ -384,16 +417,43 @@ impl Grid {
         }
     }
 
-    pub fn move_lines_down(&mut self, start_line_no: u32, n: u32) {
+    pub fn move_lines_down(&mut self, start_line_no: u32, mut n: u32) {
         assert!(start_line_no < self.num_rows());
-        todo!()
+        let first_line_idx = self.first_visible_line_no();
+        let pos = tree::SeekSoftWrapPosition::new(first_line_idx + start_line_no, 0);
+        // if the line is a soft-wrapped, we have to insert a hard break first
+        if self
+            .text
+            .resolve_dimension(pos)
+            .ok()
+            .and_then(|char_idx| char_idx.checked_sub(1))
+            .and_then(|prev_idx| self.text.get_char(prev_idx))
+            .is_some_and(|prev_ch| prev_ch != '\n')
+        {
+            n = n + 1;
+        }
+        let x = self.text.to_string();
+        self.text
+            .insert_str(pos, "\n".repeat(n as usize).as_str(), SgrState::default());
+        let x = self.text.to_string();
+
+        let total_rows = self.total_rows();
+        if let Some(to_remove) = total_rows
+            .checked_sub(self.num_rows())
+            .and_then(NonZeroU32::new)
+        {
+            // trim from the bottom
+            let line_idx = total_rows - to_remove.get();
+            let pos = SeekSoftWrapPosition::new(line_idx, 0);
+            self.text.remove_range(pos..);
+        }
+        let x = self.text.to_string();
+        let _ = x.len() + 0;
     }
 
     fn screen_to_buffer_pos(&self) -> tree::SeekSoftWrapPosition {
         let (row, col) = self.cursor_position();
-        let max_pos: tree::SeekSoftWrapPosition = self.text.max_bound();
-        let scrollback_rows = (max_pos.line_idx + 1).saturating_sub(self.num_rows());
-        tree::SeekSoftWrapPosition::new(scrollback_rows + row, col)
+        tree::SeekSoftWrapPosition::new(self.first_visible_line_no() + row, col)
     }
 
     fn rope_with_n_blank_lines(num_rows: u32, blank_line: &str) -> Tree {
@@ -414,7 +474,12 @@ impl Grid {
             self.text.push_str("\n", SgrState::default());
         }
 
-        self.move_cursor_relative(1, 0);
+        let (row, _) = self.cursor_position();
+        if row + 1 == self.num_rows() {
+            self.cursor_state.pending_wrap = true;
+        } else {
+            self.move_cursor_relative(1, 0);
+        }
     }
 
     pub fn text_contents(&self) -> String {
@@ -601,12 +666,16 @@ mod tests {
         // check pending wrapping
         grid.write_text_at_cursor("aaaaaaaaa");
         assert_eq!(grid.cursor_position(), (1, 9));
+        assert_nth_line(&grid, 1, "zaaaaaaaaa");
+
         grid.write_text_at_cursor("b");
+        assert_eq!(grid.cursor_position(), (2, 1));
         assert_nth_line(&grid, 2, "b---------");
 
-        // check buffer overflow + truncation
         grid.write_text_at_cursor("ccccccccc");
         assert_nth_line(&grid, 2, "bccccccccc");
+
+        // cause scrollback + truncation
         grid.write_text_at_cursor("d");
 
         assert_nth_line(&grid, 0, "zaaaaaaaaa");
@@ -853,6 +922,75 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
         assert_eq!(grid.total_rows(), 0);
     }
 
+    #[test]
+    fn test_move_lines_down_1() {
+        let mut grid = Grid::new(10, 20);
+        grid.move_lines_down(0, 2);
+        assert_eq!(grid.text_contents().as_str(), "\n\n");
+    }
+
+    #[test]
+    fn test_move_lines_down_2() {
+        let mut grid = Grid::new(10, 5);
+        grid_feed_input(
+            &mut grid,
+            std::iter::repeat("a")
+                .take(5)
+                .chain(std::iter::repeat("b").take(5)),
+        );
+
+        // insert line between soft-wrapped lines
+        grid.move_lines_down(1, 1);
+        assert_eq!(grid.text_contents().as_str(), "aaaaa\n\nbbbbb");
+        assert_eq!(grid.total_rows(), 3);
+    }
+
+    #[test]
+    fn test_move_lines_down_3() {
+        let mut grid = Grid::new(10, 5);
+        grid_feed_input(&mut grid, ["foo\nbar"]);
+
+        grid.move_cursor(0, 0);
+        grid.move_lines_down(0, 1);
+        assert_eq!(grid.text_contents(), "\nfoo\nbar");
+
+        grid_feed_input(&mut grid, ["baz\n"]);
+        assert_eq!(grid.text_contents(), "baz\nfoo\nbar");
+    }
+
+    #[test]
+    fn test_random_write_1() {
+        let mut grid = Grid::new(10, 10);
+        grid.write_text_at_cursor("foo");
+        assert_eq!(grid.text_contents(), "foo");
+
+        grid.move_cursor(9, 0);
+        grid.write_text_at_cursor("baz");
+        assert_eq!(grid.text_contents(), "foo\n\n\n\n\n\n\n\n\nbaz");
+
+        // go back to an earlier line and cause writes where we didn't have chars already
+        grid.move_cursor(8, 3);
+        grid_feed_input(&mut grid, ["bar qux\n"]);
+        // the hard wrap between line_idx 8 and 9 is consumed by the soft wrapping
+        assert_eq!(grid.text_contents(), "foo\n\n\n\n\n\n\n\n---bar quxbaz");
+    }
+
+    #[test]
+    fn test_screen_to_buf_pos_1() {
+        let mut grid = Grid::new(5, 10);
+        grid_feed_input(&mut grid, (1..=5).map(|i| format!("{i}\n")));
+        assert_eq!(grid.total_rows(), 5);
+        assert_eq!(grid.text_contents(), "1\n2\n3\n4\n5\n");
+
+        grid.move_cursor(0, 0);
+        grid.move_lines_down(0, 1);
+        assert_eq!(grid.total_rows(), 5);
+        assert_eq!(grid.text_contents(), "\n1\n2\n3\n4\n");
+
+        grid.write_text_at_cursor("0");
+        assert_eq!(grid.text_contents(), "0\n1\n2\n3\n4\n");
+    }
+
     fn assert_nth_line(grid: &Grid, line_idx: u32, expected: &str) {
         let line = grid.display_lines(line_idx..).next().unwrap().padded_text;
         assert_eq!(&line, expected);
@@ -873,9 +1011,9 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
         }
     }
 
-    fn grid_feed_input<'a, I: IntoIterator<Item = &'a str>>(grid: &mut Grid, parts: I) {
+    fn grid_feed_input<'a, I: IntoIterator<Item = S>, S: AsRef<str>>(grid: &mut Grid, parts: I) {
         for p in parts {
-            for line in p.split_inclusive('\n') {
+            for line in p.as_ref().split_inclusive('\n') {
                 if line.ends_with('\n') {
                     grid.write_text_at_cursor(&line[..line.len() - 1]);
                     let (row, _) = grid.cursor_position();
