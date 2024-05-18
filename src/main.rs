@@ -2,6 +2,7 @@ pub use puffin_egui::puffin;
 use terminal_emulator::TerminalEmulator;
 
 mod ansi;
+mod buffer;
 mod config;
 mod fonts;
 mod grid;

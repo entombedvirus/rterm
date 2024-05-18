@@ -1,9 +1,12 @@
 use std::{
     collections::VecDeque,
     fmt::Write,
-    ops::{Neg, Range},
+    ops::{DerefMut, Neg, Range},
     os::fd::{AsFd, AsRawFd, OwnedFd},
-    sync::{mpsc, Arc},
+    sync::{
+        atomic::{self, AtomicPtr},
+        mpsc, Arc, Mutex, MutexGuard,
+    },
     time::{self, Duration},
 };
 
@@ -12,6 +15,7 @@ use crate::{
     config::{self, Config},
     fonts::{FontDesc, FontManager},
     grid, pty, puffin, terminal_input,
+    tree::Tree,
 };
 use ansi::AsciiControl;
 use anyhow::Context;

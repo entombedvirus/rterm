@@ -214,7 +214,7 @@ impl Tree {
         }
     }
 
-    fn from_str(input: &str) -> Self {
+    pub fn from_str(input: &str) -> Self {
         let mut tree = Self::new();
         tree.push_str(input, SgrState::default());
         tree
