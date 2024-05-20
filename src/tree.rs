@@ -281,6 +281,10 @@ impl Tree {
         cursor.seek_to_char(SeekCharIdx(char_idx)).ok()?;
         cursor.segment_str()?.chars().next()
     }
+
+    pub fn ends_with_newline(&self) -> bool {
+        self.root.node_summary().lines.ends_with_newline
+    }
 }
 
 #[derive(Debug)]

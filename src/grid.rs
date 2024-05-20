@@ -1,8 +1,10 @@
 use std::{
     num::NonZeroU32,
     ops::{Range, RangeBounds},
-    rc::Rc,
+    sync::Arc,
 };
+
+use arrayvec::ArrayVec;
 
 use crate::{
     puffin,
@@ -10,12 +12,62 @@ use crate::{
     tree::{self, SeekCharIdx, SeekSoftWrapPosition, Tree},
 };
 
+/// Handle to primary and alternates grids. Allows callers to switch in and out of alternate grid.
+/// Alternate grid is used for fullscreen apps. It does not have scrollback.
+#[derive(Debug)]
+pub struct GridStack {
+    grids: ArrayVec<Grid, 2>,
+}
+
+impl GridStack {
+    pub fn new(num_rows: u32, num_cols: u32) -> Self {
+        let mut primary_grid = Grid::new(num_rows, num_cols);
+        primary_grid.max_scrollback_lines(5000);
+        Self {
+            grids: ArrayVec::from_iter([primary_grid]),
+        }
+    }
+
+    pub fn current(&self) -> &Grid {
+        self.grids.last().expect("grids is never empty")
+    }
+
+    pub fn current_mut(&mut self) -> &mut Grid {
+        self.grids.last_mut().expect("grids is never empty")
+    }
+
+    pub fn resize(&mut self, new_num_rows: u32, new_num_cols: u32) -> bool {
+        self.grids
+            .iter_mut()
+            .map(|g| g.resize(new_num_rows, new_num_cols))
+            .any(|needs_update| needs_update)
+    }
+
+    pub fn enter_alternate_grid(&mut self) {
+        if self.grids.len() == self.grids.capacity() {
+            return;
+        }
+        let current = self.current_mut();
+        current.save_cursor_state();
+        let alt = Grid::new(current.num_rows(), current.num_cols());
+        self.grids.push(alt);
+    }
+
+    pub fn exit_alternate_grid(&mut self) {
+        if self.grids.len() == 1 {
+            return;
+        }
+        self.grids.pop();
+        self.current_mut().restore_cursor_state();
+    }
+}
+
 #[derive(Debug)]
 pub struct Grid {
     num_screen_rows: ScreenCoord,
     num_screen_cols: ScreenCoord,
     max_rows: BufferCoord, // always >= num_screen_rows
-    blank_line: Rc<String>,
+    blank_line: Arc<String>,
 
     text: tree::Tree,
 
@@ -56,7 +108,7 @@ impl Grid {
     pub fn new(num_rows: u32, num_cols: u32) -> Self {
         let cursor_state = CursorState::default();
         let saved_cursor_state = None;
-        let blank_line = Rc::new(String::from_iter(
+        let blank_line = Arc::new(String::from_iter(
             std::iter::repeat(Self::FILL_CHAR as char)
                 .take(num_cols as usize)
                 .chain(std::iter::once('\n')),
@@ -99,7 +151,7 @@ impl Grid {
     //  - first visible line no will be: 80 - 24 = 56
     //  - visible line range will be 56..80
     pub fn first_visible_line_no(&self) -> u32 {
-        self.total_rows().saturating_sub(self.num_rows())
+        self.cursor_state.home_row_line_idx
     }
 
     pub fn save_cursor_state(&mut self) {
@@ -116,10 +168,10 @@ impl Grid {
         self.max_rows = BufferCoord(n.max(self.num_screen_rows.0));
     }
 
-    pub fn clear_screen(&mut self) {
+    pub fn erase_screen(&mut self) {
         puffin::profile_function!();
-        let line_idx = tree::SeekSoftWrapPosition::new(self.first_visible_line_no(), 0);
-        self.text.remove_range(line_idx..);
+        let home_pos = tree::SeekSoftWrapPosition::new(self.first_visible_line_no(), 0);
+        self.text.remove_range(home_pos..);
     }
 
     pub fn clear_including_scrollback(&mut self) {
@@ -168,7 +220,7 @@ impl Grid {
                 .take(new_num_cols as usize)
                 .chain(std::iter::once('\n')),
         );
-        self.blank_line = Rc::new(new_blank_line);
+        self.blank_line = Arc::new(new_blank_line);
 
         self.num_screen_rows = ScreenCoord(new_num_rows);
         self.num_screen_cols = ScreenCoord(new_num_cols);
@@ -180,11 +232,23 @@ impl Grid {
                 .expect("num_cols must be non-zero"),
         );
 
+        self.compute_home_row();
+
         // move cursor to the last cell
         let max_pos = self.text.max_bound::<SeekSoftWrapPosition>();
         self.move_cursor(max_pos.line_idx, max_pos.col_idx);
 
         true
+    }
+
+    fn compute_home_row(&mut self) {
+        let total_rows = self.total_rows();
+        let num_rows = self.num_rows();
+        self.cursor_state.home_row_line_idx = self.total_rows().saturating_sub(self.num_rows());
+        eprintln!(
+            "home_row_line_idx computed as {total_rows} - {num_rows} = {}",
+            self.cursor_state.home_row_line_idx
+        );
     }
 
     pub fn write_text_at_cursor(&mut self, txt: &str) {
@@ -197,10 +261,8 @@ impl Grid {
         debug_assert!(!txt.contains('\n'));
 
         let edit_len = txt.chars().count() as u32;
-        let mut edit_pos = self.screen_to_buffer_pos();
+        let edit_pos = self.screen_to_buffer_pos();
         if self.cursor_state.pending_wrap {
-            edit_pos.line_idx += 1;
-            edit_pos.col_idx = 0;
             self.move_cursor(edit_pos.line_idx, edit_pos.col_idx);
             self.cursor_state.pending_wrap = false;
         }
@@ -255,6 +317,7 @@ impl Grid {
         {
             self.text
                 .remove_range(..tree::SeekSoftWrapPosition::new(lines_to_remove.get(), 0));
+            self.compute_home_row();
         }
     }
 
@@ -400,7 +463,6 @@ impl Grid {
             }
             Err(err) => {
                 // hmm? won't this cause text before the cursor to get erased?
-                let _ = self.text.to_string();
                 self.text.truncate(SeekCharIdx(err.last_char_idx + 1));
             }
         }
@@ -424,6 +486,7 @@ impl Grid {
         self.text
             .insert_str(pos, "\n".repeat(n as usize).as_str(), SgrState::default());
 
+        let x = self.text.to_string();
         let total_rows = self.total_rows();
         if let Some(to_remove) = total_rows
             .checked_sub(self.num_rows())
@@ -435,29 +498,48 @@ impl Grid {
             self.text.remove_range(pos..);
         }
         let x = self.text.to_string();
-        let _ = x.len() + 0;
     }
 
     fn screen_to_buffer_pos(&self) -> tree::SeekSoftWrapPosition {
-        let (row, col) = self.cursor_position();
-        tree::SeekSoftWrapPosition::new(self.first_visible_line_no() + row, col)
+        let (row, mut col) = self.cursor_position();
+        let first_visible_line_no = self.first_visible_line_no();
+        let extra = if self.cursor_state.pending_wrap {
+            col = 0;
+            1
+        } else {
+            0
+        };
+        tree::SeekSoftWrapPosition::new(first_visible_line_no + row + extra, col)
     }
 
     /// Inserts a hard line-wrap `\n` if the cursor is on the last row of the buffer. Otherwise,
     /// moves the cursor down a line.
     pub fn insert_linebreak_if_needed(&mut self) {
-        if self.screen_to_buffer_pos().line_idx
-            == self.text.max_bound::<SeekSoftWrapPosition>().line_idx
-        {
+        let x = self.text.to_string();
+        let cur_line_idx = self.screen_to_buffer_pos().line_idx;
+        let total_rows = self.total_rows();
+        if cur_line_idx + 1 >= total_rows {
             self.text.push_str("\n", SgrState::default());
         }
 
+        // we may need to scroll if cursor in in the last line of the screen and we have enough rows in the buffer
         let (row, _) = self.cursor_position();
-        if row + 1 == self.num_rows() {
-            self.cursor_state.pending_wrap = true;
-        } else {
-            self.move_cursor_relative(1, 0);
+        let total_rows = self.total_rows();
+
+        eprintln!(
+            "insert_linebreak: total_rows: {total_rows}, cur_line_idx: {cur_line_idx}, row: {row}"
+        );
+
+        if row + 1 == self.num_rows() && total_rows >= self.num_rows() {
+            let x = self.text.to_string();
+            self.cursor_state.home_row_line_idx += 1;
+            eprintln!(
+                "home_row_line_idx bumped to {}",
+                self.cursor_state.home_row_line_idx
+            );
         }
+
+        self.move_cursor_relative(1, 0);
     }
 
     pub fn text_contents(&self) -> String {
@@ -470,6 +552,7 @@ struct CursorState {
     position: (ScreenCoord, ScreenCoord), // in the range (0..num_rows, 0..num_cols)
     sgr_state: SgrState,
     pending_wrap: bool,
+    home_row_line_idx: u32,
 }
 impl CursorState {
     fn clamp_position(&mut self, new_num_rows: u32, new_num_cols: u32) {
@@ -823,7 +906,7 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
         grid_feed_input(&mut grid, ["> ls\n", "foo bar baz\n", "abc def ghi\n"]);
         assert_eq!(grid.total_rows(), 3);
 
-        grid.clear_screen();
+        grid.erase_screen();
         assert_eq!(grid.total_rows(), 0);
     }
 
@@ -834,8 +917,10 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
         grid_feed_input(&mut grid, std::iter::repeat("foo\n").take(15));
         assert_eq!(grid.total_rows(), 15);
 
-        grid.clear_screen();
-        assert_eq!(grid.total_rows(), 5);
+        grid.erase_screen();
+        // +1 because the last newline after "foo" causes a blank line at the end. Which means only 9 rows
+        // are removed.
+        assert_eq!(grid.total_rows(), 15 - 10 + 1);
     }
 
     #[test]
@@ -875,6 +960,7 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
                 .take(5)
                 .chain(std::iter::repeat("b").take(5)),
         );
+        assert_eq!(grid.text_contents().as_str(), "aaaaabbbbb");
 
         // insert line between soft-wrapped lines
         grid.move_lines_down(1, 1);
@@ -922,10 +1008,36 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
         grid.move_cursor(0, 0);
         grid.move_lines_down(0, 1);
         assert_eq!(grid.total_rows(), 5);
-        assert_eq!(grid.text_contents(), "\n1\n2\n3\n4\n");
+        // the first line is above the fold, so new line gets inserted between first and second
+        // line
+        assert_eq!(grid.text_contents(), "1\n\n2\n3\n4\n");
 
         grid.write_text_at_cursor("0");
-        assert_eq!(grid.text_contents(), "0\n1\n2\n3\n4\n");
+        assert_eq!(grid.text_contents(), "1\n0\n2\n3\n4\n");
+    }
+
+    #[test]
+    fn test_screen_pending_wrap_1() {
+        let mut grid = Grid::new(5, 20);
+        // last line is blank
+        grid_feed_input(&mut grid, ["1\n2\n3\n4\n"]);
+        let x = grid.text_contents();
+        assert_eq!(grid.total_rows(), 4);
+        assert_eq!(grid.cursor_position(), (4, 0));
+
+        // can't use grid input here because of specific order of newlines and carriage returns
+        // required to trigger the edge case
+
+        // print something on line_idx 4
+        grid.write_text_at_cursor("hello");
+        // then newline
+        grid.insert_linebreak_if_needed();
+        // then carriage return
+        let (row, _) = grid.cursor_position();
+        grid.move_cursor(row, 0);
+        // then print on the line_idx 5
+        grid.write_text_at_cursor("world");
+        assert_eq!(grid.text_contents(), "2\n3\n4\nhello\nworld");
     }
 
     fn assert_nth_line(grid: &Grid, line_idx: u32, expected: &str) {

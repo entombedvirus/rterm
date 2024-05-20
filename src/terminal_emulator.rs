@@ -1,67 +1,32 @@
 use std::{
-    collections::VecDeque,
-    fmt::Write,
-    ops::{DerefMut, Neg, Range},
-    os::fd::{AsFd, AsRawFd, OwnedFd},
-    sync::{
-        atomic::{self, AtomicPtr},
-        mpsc, Arc, Mutex, MutexGuard,
-    },
+    fmt::Write as _,
+    ops::Range,
+    os::fd::{AsFd, AsRawFd},
+    sync::{mpsc, Arc},
     time::{self, Duration},
 };
 
 use crate::{
-    ansi::{self, AnsiToken, SgrControl},
+    ansi::{self, AnsiToken},
     config::{self, Config},
     fonts::{FontDesc, FontManager},
-    grid, pty, puffin, terminal_input,
-    tree::Tree,
+    grid::{self, Grid, GridStack},
+    pty, puffin,
+    terminal_input::{self, ChildProcess},
 };
 use ansi::AsciiControl;
 use anyhow::Context;
-use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, Rect};
-use log::info;
+use egui::{mutex::RwLock, text::LayoutJob, CentralPanel, Color32, DragValue, Key, Rect};
 use nix::errno::Errno;
 
-#[derive(Debug)]
-struct ChildProcess {
-    _io_thread: std::thread::JoinHandle<()>,
-    pty_fd: Arc<OwnedFd>,
-    token_stream: mpsc::Receiver<VecDeque<ansi::AnsiToken>>,
-}
-
-impl ChildProcess {
-    fn spawn(ctx: egui::Context) -> Self {
-        let pty_fd = pty::create_pty().expect("create_pty failed");
-        let pty_fd = Arc::new(pty_fd);
-        let (tx, rx) = mpsc::channel();
-
-        let io_fd = Arc::clone(&pty_fd);
-        let _io_thread = std::thread::Builder::new()
-            .name("rterm i/o thread".to_string())
-            .spawn(move || {
-                terminal_input::input_loop(ctx, io_fd, tx);
-            })
-            .expect("Failed to spawn input_loop thread");
-
-        Self {
-            _io_thread,
-            pty_fd,
-            token_stream: rx,
-        }
-    }
-}
-#[derive(Debug)]
 pub struct TerminalEmulator {
     config: Config,
     font_manager: FontManager,
-    child_process: Option<ChildProcess>,
+    child_process: ChildProcess,
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
 
-    primary_grid: grid::Grid,
-    // used for fullscreen apps. does not have scrollback
-    alternate_grid: Option<grid::Grid>,
+    grids: Arc<RwLock<GridStack>>,
 
     show_settings: bool,
     settings_state: Option<SettingsState>,
@@ -114,7 +79,6 @@ impl eframe::App for TerminalEmulator {
                 );
         }
 
-        Self::init_fonts(&self.config, &mut self.font_manager);
         CentralPanel::default()
             .frame(egui::Frame::default().fill(ansi::Color::DefaultBg.into()))
             .show(ctx, |ui| -> anyhow::Result<()> {
@@ -152,19 +116,11 @@ impl eframe::App for TerminalEmulator {
                     char_dims.y,
                 );
 
-                let pty_fd = self
-                    .child_process
-                    .get_or_insert_with(|| ChildProcess::spawn(ctx.clone()))
-                    .pty_fd
-                    .as_fd();
-                let grids = self
-                    .alternate_grid
-                    .iter_mut()
-                    .chain(std::iter::once(&mut self.primary_grid));
-                let mut needs_signal = false;
-                for grid in grids {
-                    needs_signal |= grid.resize(winsz.ws_row as u32, winsz.ws_col as u32);
-                }
+                let pty_fd = self.child_process.pty_fd.as_fd();
+                let needs_signal = self
+                    .grids
+                    .write()
+                    .resize(winsz.ws_row as u32, winsz.ws_col as u32);
                 if needs_signal {
                     let delay = Duration::from_millis(100);
                     self.debounce_resize_signal = time::Instant::now().checked_add(delay);
@@ -191,62 +147,9 @@ impl eframe::App for TerminalEmulator {
                 })
                 .context("input handling failed")?;
 
-                let read_input = self.read_from_pty(ctx).context("reading from pty failed")?;
+                let did_read = self.read_from_pty(ctx).context("reading from pty failed")?;
                 self.write_to_pty().context("writing to pty failed")?;
-
-                ui.with_layout(egui::Layout::top_down_justified(egui::Align::TOP), |ui| {
-                    let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
-                    ui.set_height(grid.num_rows() as f32 * char_dims.y);
-                    ui.set_width(grid.num_cols() as f32 * char_dims.x);
-                    if self.enable_debug_render {
-                        ctx.debug_painter()
-                            .debug_rect(ui.max_rect(), Color32::GREEN, "layout");
-                    }
-
-                    let grid_cols = grid.num_cols();
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .stick_to_bottom(true)
-                        .show_rows(
-                            ui,
-                            char_dims.y,
-                            grid.total_rows() as usize,
-                            |ui, visible_rows| -> anyhow::Result<()> {
-                                if self.enable_debug_render {
-                                    ctx.debug_painter().debug_rect(
-                                        ui.max_rect(),
-                                        Color32::WHITE,
-                                        "scroll_area",
-                                    );
-                                    for r in 0..visible_rows.len() {
-                                        for c in 0..grid_cols {
-                                            let min = egui::Vec2::new(
-                                                c as f32 * char_dims.x,
-                                                r as f32 * char_dims.y,
-                                            );
-                                            let rect = egui::Rect::from_min_size(
-                                                ui.max_rect().min + min,
-                                                char_dims,
-                                            );
-                                            ui.painter().rect_stroke(
-                                                rect,
-                                                0.0,
-                                                (1.0, Color32::DARK_GRAY),
-                                            );
-                                        }
-                                    }
-                                }
-                                self.render(ctx, ui, visible_rows.clone());
-                                let cursor_rect = self
-                                    .paint_cursor(ui, &visible_rows)
-                                    .context("paint_cursor failed")?;
-                                if read_input && !ui.clip_rect().contains_rect(cursor_rect) {
-                                    ui.scroll_to_rect(cursor_rect, None);
-                                }
-                                Ok(())
-                            },
-                        );
-                });
+                self.render_grid(ctx, ui, char_dims, did_read);
                 Ok(())
             });
     }
@@ -256,23 +159,67 @@ impl eframe::App for TerminalEmulator {
     }
 }
 
+fn render_debug_cell_outlines(
+    ctx: &egui::Context,
+    ui: &mut egui::Ui,
+    num_cols: u32,
+    char_dims: egui::Vec2,
+    visible_rows: Range<usize>,
+) {
+    ctx.debug_painter()
+        .debug_rect(ui.max_rect(), Color32::WHITE, "scroll_area");
+    for r in 0..visible_rows.len() {
+        for c in 0..num_cols {
+            let min = egui::Vec2::new(c as f32 * char_dims.x, r as f32 * char_dims.y);
+            let rect = egui::Rect::from_min_size(ui.max_rect().min + min, char_dims);
+            ui.painter()
+                .rect_stroke(rect, 0.0, (1.0, Color32::DARK_GRAY));
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FontSpec {
+    regular: egui::FontFamily,
+    italic: egui::FontFamily,
+    bold: egui::FontFamily,
+    bold_italic: egui::FontFamily,
+}
+
+impl FontSpec {
+    fn new(config: &Config, font_manager: &mut FontManager) -> Self {
+        puffin::profile_function!();
+        let regular = font_manager.get_or_init("regular", &config.regular_font);
+        let bold = font_manager.get_or_init("bold", &config.bold_font);
+        let bold_italic = font_manager.get_or_init("bold_italic", &config.bold_italic_font);
+        let italic = font_manager.get_or_init("italic", &config.italic_font);
+        Self {
+            regular,
+            italic,
+            bold,
+            bold_italic,
+        }
+    }
+}
+
 impl TerminalEmulator {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        child_process: ChildProcess,
+        grids: Arc<RwLock<GridStack>>,
+    ) -> anyhow::Result<Self> {
         let config = dbg!(config::get(cc.storage));
 
         // initialize fonts before first frame render
         let mut font_manager = FontManager::new(cc.egui_ctx.clone());
-        Self::init_fonts(&config, &mut font_manager);
+        let _ = FontSpec::new(&config, &mut font_manager);
 
-        let mut primary_grid = grid::Grid::new(24, 80);
-        primary_grid.max_scrollback_lines(5000);
         Ok(Self {
             config,
             font_manager,
-            primary_grid,
-            child_process: None,
+            child_process,
+            grids,
             buffered_input: String::new(),
-            alternate_grid: None,
             char_dimensions: None,
             enable_debug_render: false,
             show_profiler: false,
@@ -285,104 +232,69 @@ impl TerminalEmulator {
         })
     }
 
-    fn init_fonts(config: &Config, font_manager: &mut FontManager) {
-        puffin::profile_function!();
-        for (family_name, font_postscript_name) in [
-            ("regular", &config.regular_font),
-            ("bold", &config.bold_font),
-            ("bold_italic", &config.bold_italic_font),
-            ("italic", &config.italic_font),
-        ] {
-            font_manager.get_or_init(family_name, font_postscript_name);
-        }
-    }
-
-    pub fn render(
+    pub fn render_grid(
         &mut self,
-        _ctx: &egui::Context,
+        ctx: &egui::Context,
         ui: &mut egui::Ui,
-        visible_rows: Range<usize>,
-    ) -> Vec<egui::Response> {
+        char_dims: egui::Vec2,
+        did_read_from_pty: bool,
+    ) {
         puffin::profile_function!();
-        let mut label_responses = Vec::new();
-        let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
 
-        let font_bold_italic = self
-            .font_manager
-            .get_or_init("bold_italic", &self.config.bold_italic_font);
-        let font_bold = self
-            .font_manager
-            .get_or_init("bold", &self.config.bold_font);
-        let font_italic = self
-            .font_manager
-            .get_or_init("italic", &self.config.italic_font);
-        let font_regular = self
-            .font_manager
-            .get_or_init("regular", &self.config.regular_font);
+        let grids = self.grids.read();
+        let grid = grids.current();
+        let fonts = FontSpec::new(&self.config, &mut self.font_manager);
 
-        let build_text_format = |format: &SgrState| -> egui::text::TextFormat {
-            let font_id = egui::FontId::new(
-                self.config.font_size,
-                if format.bold && format.italic {
-                    font_bold_italic.clone()
-                } else if format.bold {
-                    font_bold.clone()
-                } else if format.italic {
-                    font_italic.clone()
-                } else {
-                    font_regular.clone()
-                },
-            );
-            egui::text::TextFormat {
-                font_id,
-                color: format.fg_color.into(),
-                background: format.bg_color.into(),
-                ..Default::default()
+        ui.with_layout(egui::Layout::top_down_justified(egui::Align::TOP), |ui| {
+            ui.set_height(grid.num_rows() as f32 * char_dims.y);
+            ui.set_width(grid.num_cols() as f32 * char_dims.x);
+            if self.enable_debug_render {
+                ctx.debug_painter()
+                    .debug_rect(ui.max_rect(), Color32::GREEN, "layout");
             }
-        };
 
-        let build_line_layout = |line: grid::DisplayLine| -> LayoutJob {
-            puffin::profile_function!("build_line_layout");
-            let mut layout = LayoutJob::default();
-            layout.break_on_newline = false;
-            layout.wrap = egui::text::TextWrapping::no_max_width();
-            layout.text = line.padded_text;
-            layout.sections = line
-                .format_attributes
-                .into_iter()
-                .map(|attrs| egui::text::LayoutSection {
-                    leading_space: 0.0,
-                    byte_range: attrs.byte_range,
-                    format: build_text_format(&attrs.sgr_state),
-                })
-                .collect();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show_rows(
+                    ui,
+                    char_dims.y,
+                    grid.total_rows() as usize,
+                    |ui, visible_rows| -> anyhow::Result<()> {
+                        if self.enable_debug_render {
+                            render_debug_cell_outlines(
+                                ctx,
+                                ui,
+                                grid.num_cols(),
+                                char_dims,
+                                visible_rows.clone(),
+                            );
+                        }
 
-            //             for format in formats {
-            //                 let format = build_text_format(format);
-            //                 let byte_range = layout.text.len()..layout.text.len() + ch.len_utf8();
-            //                 let section = egui::text::LayoutSection {
-            //                     leading_space: 0.0,
-            //                     byte_range,
-            //                     format,
-            //                 };
-            //                 layout.sections.push(section);
-            //             }
+                        {
+                            puffin::profile_scope!("render_lines");
+                            for line in grid
+                                .display_lines(visible_rows.start as u32..visible_rows.end as u32)
+                            {
+                                let layout = self.build_line_layout(&fonts, line);
+                                let galley = ui.fonts(|fonts| {
+                                    puffin::profile_scope!("galley_construction");
+                                    fonts.layout_job(layout)
+                                });
+                                ui.label(galley);
+                            }
+                        }
 
-            layout
-        };
-
-        {
-            puffin::profile_scope!("render_lines");
-            for line in grid.display_lines(visible_rows.start as u32..visible_rows.end as u32) {
-                let layout = build_line_layout(line);
-                let galley = ui.fonts(|fonts| {
-                    puffin::profile_scope!("galley_construction");
-                    fonts.layout_job(layout)
-                });
-                label_responses.push(ui.label(galley));
-            }
-        }
-        label_responses
+                        let cursor_rect = self
+                            .paint_cursor(ui, grid, &visible_rows)
+                            .context("paint_cursor failed")?;
+                        if did_read_from_pty && !ui.clip_rect().contains_rect(cursor_rect) {
+                            ui.scroll_to_rect(cursor_rect, None);
+                        }
+                        Ok(())
+                    },
+                );
+        });
     }
 
     pub fn write_to_pty(&mut self) -> anyhow::Result<()> {
@@ -391,12 +303,7 @@ impl TerminalEmulator {
             return Ok(());
         }
 
-        let pty_fd = self
-            .child_process
-            .as_ref()
-            .map(|child| child.pty_fd.as_raw_fd())
-            .context("child process not spawned yet")?;
-
+        let pty_fd = self.child_process.pty_fd.as_raw_fd();
         let mut buf = self.buffered_input.as_bytes();
         while !buf.is_empty() {
             match nix::unistd::write(pty_fd, buf) {
@@ -515,8 +422,7 @@ impl TerminalEmulator {
                 modifiers,
                 ..
             } => {
-                let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
-                let grid_contents = grid.text_contents();
+                let grid_contents = self.grids.read().current().text_contents();
                 if modifiers.alt {
                     log::info!(
                         "\n=====================\n{grid_contents:?}\n=====================\n"
@@ -538,9 +444,9 @@ impl TerminalEmulator {
     pub fn paint_cursor(
         &self,
         ui: &mut egui::Ui,
+        grid: &Grid,
         visible_rows: &Range<usize>,
     ) -> anyhow::Result<egui::Rect> {
-        let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
         let (cursor_row_in_screen_space, cursor_col) = grid.cursor_position();
         let cursor_row_in_scrollback_space =
             grid.first_visible_line_no() + cursor_row_in_screen_space;
@@ -558,6 +464,46 @@ impl TerminalEmulator {
         Ok(cursor_rect)
     }
 
+    fn build_line_layout(&self, fonts: &FontSpec, line: grid::DisplayLine) -> LayoutJob {
+        puffin::profile_function!("build_line_layout");
+        let mut layout = LayoutJob::default();
+        layout.break_on_newline = false;
+        layout.wrap = egui::text::TextWrapping::no_max_width();
+        layout.text = line.padded_text;
+        layout.sections = line
+            .format_attributes
+            .into_iter()
+            .map(|attrs| egui::text::LayoutSection {
+                leading_space: 0.0,
+                byte_range: attrs.byte_range,
+                format: self.build_text_format(fonts, &attrs.sgr_state),
+            })
+            .collect();
+
+        layout
+    }
+
+    fn build_text_format(&self, fonts: &FontSpec, format: &SgrState) -> egui::text::TextFormat {
+        let font_id = egui::FontId::new(
+            self.config.font_size,
+            if format.bold && format.italic {
+                fonts.bold_italic.clone()
+            } else if format.bold {
+                fonts.bold.clone()
+            } else if format.italic {
+                fonts.italic.clone()
+            } else {
+                fonts.regular.clone()
+            },
+        );
+        egui::text::TextFormat {
+            font_id,
+            color: format.fg_color.into(),
+            background: format.bg_color.into(),
+            ..Default::default()
+        }
+    }
+
     fn handle_ansi_token(&mut self, ctx: &egui::Context, token: AnsiToken) {
         match token {
             AnsiToken::OSC(osc_ctrl) => self.handle_osc_token(ctx, osc_ctrl),
@@ -566,12 +512,6 @@ impl TerminalEmulator {
             }
             AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteExit) => {
                 self.enable_bracketed_paste = false
-            }
-            AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenEnter) => {
-                self.enter_alternate_screen();
-            }
-            AnsiToken::ModeControl(ansi::ModeControl::AlternateScreenExit) => {
-                self.exit_alternate_screen();
             }
             AnsiToken::ModeControl(ansi::ModeControl::FocusTrackEnter) => {
                 self.enable_focus_tracking = true;
@@ -604,120 +544,8 @@ impl TerminalEmulator {
                     "\x1b[>1;{PRIMARY_VERSION};{SECONDARY_VERSION}c"
                 );
             }
-            _ => {
-                puffin::profile_scope!("grid token handling");
-                use ansi::CursorControl;
-                use ansi::EraseControl;
-                let grid = self
-                    .alternate_grid
-                    .as_mut()
-                    .unwrap_or(&mut self.primary_grid);
-                match token {
-                    AnsiToken::ResetToInitialState => {
-                        grid.clear_including_scrollback();
-                    }
-                    AnsiToken::Text(txt) => {
-                        grid.write_text_at_cursor(&txt);
-                    }
-                    AnsiToken::AsciiControl(AsciiControl::Backspace) => {
-                        grid.move_cursor_relative(0, -1);
-                    }
-                    AnsiToken::AsciiControl(AsciiControl::Tab) => {
-                        // as advertised in the "it" terminfo entry
-                        let tab_width = 8;
-                        let (row, col) = grid.cursor_position();
-                        let next_tabstop = col + (tab_width - col % tab_width);
-                        let limit = grid.num_cols() - 1;
-                        grid.move_cursor(row, next_tabstop.min(limit));
-                    }
-                    AnsiToken::AsciiControl(AsciiControl::LineFeed) => {
-                        grid.insert_linebreak_if_needed();
-                    }
-                    AnsiToken::AsciiControl(AsciiControl::CarriageReturn) => {
-                        let (current_row, _) = grid.cursor_position();
-                        grid.move_cursor(current_row, 0);
-                    }
-                    AnsiToken::CursorControl(CursorControl::MoveUp { lines }) => {
-                        grid.move_cursor_relative(lines.try_into().unwrap_or(0_i32).neg(), 0);
-                    }
-                    AnsiToken::CursorControl(CursorControl::MoveDown { lines }) => {
-                        grid.move_cursor_relative(lines.try_into().unwrap_or(0_i32), 0);
-                    }
-                    AnsiToken::CursorControl(CursorControl::MoveLeft { cols }) => {
-                        grid.move_cursor_relative(0, cols.try_into().unwrap_or(0_i32).neg());
-                    }
-                    AnsiToken::CursorControl(CursorControl::MoveRight { cols }) => {
-                        grid.move_cursor_relative(0, cols.try_into().unwrap_or(0_i32));
-                    }
-                    AnsiToken::CursorControl(CursorControl::MoveTo { line, col }) => {
-                        grid.move_cursor(
-                            line.saturating_sub(1) as u32,
-                            col.saturating_sub(1) as u32,
-                        );
-                    }
-                    AnsiToken::CursorControl(CursorControl::ScrollUpFromHome) => {
-                        let (cursor_row, _) = grid.cursor_position();
-                        if cursor_row > 0 {
-                            // no need to scroll
-                            grid.move_cursor_relative(-1, 0);
-                        } else {
-                            grid.move_lines_down(0, 1);
-                        }
-                    }
-                    AnsiToken::CursorControl(CursorControl::SavePositionDEC) => {
-                        grid.save_cursor_state();
-                    }
-                    AnsiToken::CursorControl(CursorControl::RestorePositionDEC) => {
-                        grid.restore_cursor_state();
-                    }
-                    AnsiToken::EraseControl(EraseControl::Screen) => {
-                        grid.clear_screen();
-                    }
-                    AnsiToken::EraseControl(EraseControl::ScreenAndScrollback) => {
-                        grid.clear_including_scrollback();
-                    }
-                    AnsiToken::EraseControl(EraseControl::FromCursorToEndOfScreen) => {
-                        grid.erase_from_cursor_to_screen();
-                    }
-                    AnsiToken::EraseControl(EraseControl::FromCursorToEndOfLine) => {
-                        grid.erase_from_cursor_to_eol();
-                    }
-                    AnsiToken::SGR(params) => {
-                        let sgr_state = grid.cursor_format_mut();
-                        for sgr in params {
-                            match sgr {
-                                SgrControl::Bold => {
-                                    sgr_state.bold = true;
-                                }
-                                SgrControl::EnterItalicsMode => {
-                                    sgr_state.italic = true;
-                                }
-                                SgrControl::ExitItalicsMode => {
-                                    sgr_state.italic = false;
-                                }
-                                SgrControl::ForgroundColor(color) => {
-                                    sgr_state.fg_color = color;
-                                }
-                                SgrControl::BackgroundColor(color) => {
-                                    sgr_state.bg_color = color;
-                                }
-                                SgrControl::Reset => {
-                                    *sgr_state = SgrState::default();
-                                }
-                                SgrControl::ResetFgColor => {
-                                    sgr_state.fg_color = ansi::Color::DefaultFg;
-                                }
-                                SgrControl::ResetBgColor => {
-                                    sgr_state.bg_color = ansi::Color::DefaultBg;
-                                }
-                                SgrControl::Unimplemented(_) => {
-                                    // noop
-                                }
-                            }
-                        }
-                    }
-                    ignored => info!("ignoring ansii token: {ignored:?}"),
-                }
+            unknown => {
+                log::warn!("gui: ignoring unknown ansi token: {unknown:?}");
             }
         }
     }
@@ -727,11 +555,7 @@ impl TerminalEmulator {
 
         let mut read_input = false;
         loop {
-            let token_stream = self
-                .child_process
-                .as_ref()
-                .map(|child| &child.token_stream)
-                .context("child process not spawned yet")?;
+            let token_stream = &self.child_process.token_stream;
             match token_stream.try_recv() {
                 Ok(tokens) => {
                     for token in tokens {
@@ -773,21 +597,6 @@ impl TerminalEmulator {
             Reset => (),
             SetWindowTitle(title) => ctx.send_viewport_cmd(egui::ViewportCommand::Title(title)),
             Unknown(seq) => log::warn!("unknown osc sequence: {seq:?}"),
-        }
-    }
-
-    fn enter_alternate_screen(&mut self) {
-        self.alternate_grid.get_or_insert_with(|| {
-            self.primary_grid.save_cursor_state();
-            let num_rows = self.primary_grid.num_rows();
-            let num_cols = self.primary_grid.num_cols();
-            grid::Grid::new(num_rows, num_cols)
-        });
-    }
-
-    fn exit_alternate_screen(&mut self) {
-        if let Some(_) = self.alternate_grid.take() {
-            self.primary_grid.restore_cursor_state();
         }
     }
 }
