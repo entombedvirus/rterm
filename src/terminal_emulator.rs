@@ -16,8 +16,14 @@ use crate::{
 };
 use ansi::AsciiControl;
 use anyhow::Context;
-use egui::{mutex::RwLock, text::LayoutJob, CentralPanel, Color32, DragValue, Key, Rect};
+use egui::{mutex::RwLock, text::LayoutJob, Align, CentralPanel, Color32, DragValue, Key, Rect};
 use nix::errno::Errno;
+
+#[derive(Debug, PartialEq, Eq)]
+enum ScrollTarget {
+    Cursor,
+    Line(u32),
+}
 
 pub struct TerminalEmulator {
     config: Config,
@@ -39,6 +45,7 @@ pub struct TerminalEmulator {
     enable_debug_render: bool,
 
     debounce_resize_signal: Option<time::Instant>,
+    scroll_to: Option<ScrollTarget>,
 }
 
 impl eframe::App for TerminalEmulator {
@@ -147,9 +154,9 @@ impl eframe::App for TerminalEmulator {
                 })
                 .context("input handling failed")?;
 
-                let did_read = self.read_from_pty(ctx).context("reading from pty failed")?;
+                self.read_from_pty(ctx).context("reading from pty failed")?;
                 self.write_to_pty().context("writing to pty failed")?;
-                self.render_grid(ctx, ui, char_dims, did_read);
+                self.render_grid(ctx, ui, char_dims);
                 Ok(())
             });
     }
@@ -229,18 +236,14 @@ impl TerminalEmulator {
             enable_focus_tracking: false,
             enable_application_escape: false,
             debounce_resize_signal: None,
+            scroll_to: None,
         })
     }
 
-    pub fn render_grid(
-        &mut self,
-        ctx: &egui::Context,
-        ui: &mut egui::Ui,
-        char_dims: egui::Vec2,
-        did_read_from_pty: bool,
-    ) {
+    pub fn render_grid(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, char_dims: egui::Vec2) {
         puffin::profile_function!();
 
+        let scroll_to = self.scroll_to.take();
         let grids = self.grids.read();
         let grid = grids.current();
         let fonts = FontSpec::new(&self.config, &mut self.font_manager);
@@ -253,47 +256,69 @@ impl TerminalEmulator {
                     .debug_rect(ui.max_rect(), Color32::GREEN, "layout");
             }
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show_rows(
-                    ui,
-                    char_dims.y,
-                    grid.total_rows() as usize,
-                    |ui, visible_rows| -> anyhow::Result<()> {
-                        if self.enable_debug_render {
-                            render_debug_cell_outlines(
-                                ctx,
-                                ui,
-                                grid.num_cols(),
-                                char_dims,
-                                visible_rows.clone(),
-                            );
-                        }
+            let mut add_contents =
+                |ui: &mut egui::Ui, visible_rows: Range<usize>| -> anyhow::Result<()> {
+                    if self.enable_debug_render {
+                        render_debug_cell_outlines(
+                            ctx,
+                            ui,
+                            grid.num_cols(),
+                            char_dims,
+                            visible_rows.clone(),
+                        );
+                    }
 
-                        {
-                            puffin::profile_scope!("render_lines");
-                            for line in grid
-                                .display_lines(visible_rows.start as u32..visible_rows.end as u32)
-                            {
-                                let layout = self.build_line_layout(&fonts, line);
-                                let galley = ui.fonts(|fonts| {
-                                    puffin::profile_scope!("galley_construction");
-                                    fonts.layout_job(layout)
-                                });
-                                ui.label(galley);
+                    {
+                        puffin::profile_scope!("render_lines");
+                        let start_row = visible_rows.start as u32;
+                        let end_row = (visible_rows.end as u32).min(grid.total_rows());
+                        for (i, line) in grid.display_lines(start_row..end_row).enumerate() {
+                            let layout = self.build_line_layout(&fonts, line);
+                            let galley = ui.fonts(|fonts| {
+                                puffin::profile_scope!("galley_construction");
+                                fonts.layout_job(layout)
+                            });
+                            let line_idx = (visible_rows.start + i) as u32;
+                            let resp = ui.label(galley);
+                            if scroll_to == Some(ScrollTarget::Line(line_idx)) {
+                                resp.scroll_to_me(Some(Align::TOP));
                             }
                         }
+                    }
 
-                        let cursor_rect = self
-                            .paint_cursor(ui, grid, &visible_rows)
-                            .context("paint_cursor failed")?;
-                        if did_read_from_pty && !ui.clip_rect().contains_rect(cursor_rect) {
-                            ui.scroll_to_rect(cursor_rect, None);
+                    let cursor_rect = self
+                        .paint_cursor(ui, grid, &visible_rows)
+                        .context("paint_cursor failed")?;
+                    match scroll_to {
+                        Some(ScrollTarget::Cursor) => {
+                            if !ui.clip_rect().contains_rect(cursor_rect) {
+                                ui.scroll_to_rect(cursor_rect, None);
+                            }
                         }
-                        Ok(())
-                    },
-                );
+                        Some(ScrollTarget::Line(_)) => {
+                            // already handled in the line rendering loop above
+                        }
+                        None => (),
+                    }
+                    Ok(())
+                };
+
+            let mut scroll_area = egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true);
+
+            if let Some(ScrollTarget::Line(target_line_idx)) = scroll_to {
+                let row_height = char_dims.y + ui.spacing().item_spacing.y;
+                let offset = row_height * target_line_idx as f32;
+                scroll_area = scroll_area.vertical_scroll_offset(offset);
+            }
+
+            // adjust the total number of rows so that the ScrollArea will place the
+            // home row at the top of the screen.
+            let total_rows = grid
+                .total_rows()
+                .max(grid.first_visible_line_no() + grid.num_rows());
+            scroll_area.show_rows(ui, char_dims.y, total_rows as usize, add_contents);
         });
     }
 
@@ -544,16 +569,19 @@ impl TerminalEmulator {
                     "\x1b[>1;{PRIMARY_VERSION};{SECONDARY_VERSION}c"
                 );
             }
+            AnsiToken::EraseControl(ansi::EraseControl::Screen) => {
+                let home_row_line_idx = self.grids.read().current().first_visible_line_no();
+                self.scroll_to = Some(ScrollTarget::Line(home_row_line_idx));
+            }
             unknown => {
                 log::warn!("gui: ignoring unknown ansi token: {unknown:?}");
             }
         }
     }
 
-    fn read_from_pty(&mut self, ctx: &egui::Context) -> anyhow::Result<bool> {
+    fn read_from_pty(&mut self, ctx: &egui::Context) -> anyhow::Result<()> {
         puffin::profile_function!();
 
-        let mut read_input = false;
         loop {
             let token_stream = &self.child_process.token_stream;
             match token_stream.try_recv() {
@@ -561,7 +589,9 @@ impl TerminalEmulator {
                     for token in tokens {
                         self.handle_ansi_token(ctx, token);
                     }
-                    read_input = true;
+                    // if none of the token handling has specified a specific scroll target,
+                    // default to scrolling the cursor into view.
+                    self.scroll_to.get_or_insert(ScrollTarget::Cursor);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -570,8 +600,7 @@ impl TerminalEmulator {
                 Err(mpsc::TryRecvError::Empty) => break,
             }
         }
-
-        Ok(read_input)
+        Ok(())
     }
 
     fn handle_osc_token(&mut self, ctx: &egui::Context, osc_ctrl: ansi::OscControl) {

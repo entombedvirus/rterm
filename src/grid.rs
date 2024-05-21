@@ -486,7 +486,6 @@ impl Grid {
         self.text
             .insert_str(pos, "\n".repeat(n as usize).as_str(), SgrState::default());
 
-        let x = self.text.to_string();
         let total_rows = self.total_rows();
         if let Some(to_remove) = total_rows
             .checked_sub(self.num_rows())
@@ -497,7 +496,6 @@ impl Grid {
             let pos = SeekSoftWrapPosition::new(line_idx, 0);
             self.text.remove_range(pos..);
         }
-        let x = self.text.to_string();
     }
 
     fn screen_to_buffer_pos(&self) -> tree::SeekSoftWrapPosition {
@@ -515,7 +513,6 @@ impl Grid {
     /// Inserts a hard line-wrap `\n` if the cursor is on the last row of the buffer. Otherwise,
     /// moves the cursor down a line.
     pub fn insert_linebreak_if_needed(&mut self) {
-        let x = self.text.to_string();
         let cur_line_idx = self.screen_to_buffer_pos().line_idx;
         let total_rows = self.total_rows();
         if cur_line_idx + 1 >= total_rows {
@@ -526,17 +523,8 @@ impl Grid {
         let (row, _) = self.cursor_position();
         let total_rows = self.total_rows();
 
-        eprintln!(
-            "insert_linebreak: total_rows: {total_rows}, cur_line_idx: {cur_line_idx}, row: {row}"
-        );
-
         if row + 1 == self.num_rows() && total_rows >= self.num_rows() {
-            let x = self.text.to_string();
             self.cursor_state.home_row_line_idx += 1;
-            eprintln!(
-                "home_row_line_idx bumped to {}",
-                self.cursor_state.home_row_line_idx
-            );
         }
 
         self.move_cursor_relative(1, 0);
@@ -1021,7 +1009,6 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
         let mut grid = Grid::new(5, 20);
         // last line is blank
         grid_feed_input(&mut grid, ["1\n2\n3\n4\n"]);
-        let x = grid.text_contents();
         assert_eq!(grid.total_rows(), 4);
         assert_eq!(grid.cursor_position(), (4, 0));
 

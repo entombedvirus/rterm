@@ -128,10 +128,10 @@ pub fn input_loop(
                         tokens
                     };
 
-                    if !gui_tokens.is_empty() {
-                        tx.send(gui_tokens)
-                            .expect("send to never fail, unless on app shutdown");
-                    }
+                    // even if gui_tokens is empty, send it as a signal that we handled some token
+                    // so that GUI do some things like scrolling to the bottom
+                    tx.send(gui_tokens)
+                        .expect("send to never fail, unless on app shutdown");
                     ctx.request_repaint();
                 }
             }
@@ -209,6 +209,9 @@ fn handle_grid_tokens(grids: &mut GridStack, token: &AnsiToken) -> bool {
         }
         AnsiToken::EraseControl(EraseControl::Screen) => {
             grid.erase_screen();
+            // UI need to scroll to the home row, so we don't mark this token has handled at this
+            // later
+            return false;
         }
         AnsiToken::EraseControl(EraseControl::ScreenAndScrollback) => {
             grid.clear_including_scrollback();
