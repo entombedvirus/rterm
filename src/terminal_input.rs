@@ -5,11 +5,10 @@ use std::{
     sync::{mpsc, Arc},
 };
 
-use egui::mutex::RwLock;
-
 use crate::{
     ansi::{self, AnsiToken},
-    grid::{Grid, GridStack},
+    buffer::Buffer,
+    grid::GridStack,
     pty,
     terminal_emulator::SgrState,
 };
@@ -22,7 +21,7 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
-    pub fn spawn(ctx: egui::Context, grids: Arc<RwLock<GridStack>>) -> Self {
+    pub fn spawn(ctx: egui::Context, grids: Arc<Buffer<GridStack>>) -> Self {
         let pty_fd = pty::create_pty().expect("create_pty failed");
         let pty_fd = Arc::new(pty_fd);
         let (tx, rx) = mpsc::channel();
@@ -99,7 +98,7 @@ pub fn input_loop(
     ctx: egui::Context,
     pty_fd: Arc<OwnedFd>,
     tx: mpsc::Sender<VecDeque<AnsiToken>>,
-    grids: Arc<RwLock<GridStack>>,
+    grids: Arc<Buffer<GridStack>>,
 ) {
     let mut parser = ansi::Parser::new();
     let mut buf = [0u8; 1024];
@@ -123,8 +122,9 @@ pub fn input_loop(
                         let mut tokens = parser.tokens();
                         // TODO; don't make UI thread wait while we handle grid
                         // tokens, if possible
-                        let mut grids = grids.write();
-                        tokens.retain(|token| handle_grid_tokens(&mut grids, token) == false);
+                        grids.write(|grids| {
+                            tokens.retain(|token| handle_grid_tokens(grids, token) == false);
+                        });
                         tokens
                     };
 

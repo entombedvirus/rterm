@@ -24,16 +24,19 @@ use crate::tree::Tree;
 /// take turns mutating the `modified` copy and then "commit" the modified copy by storing it as
 /// the `snapshot`.
 #[derive(Debug)]
-pub struct Buffer {
-    snapshot: RwLock<Tree>,
-    modified: Mutex<Tree>,
+pub struct Buffer<T> {
+    snapshot: RwLock<T>,
+    modified: Mutex<T>,
 }
 
-impl Buffer {
-    pub fn from_tree(tree: Tree) -> Self {
+impl<T> Buffer<T>
+where
+    T: Clone,
+{
+    pub fn new(t: T) -> Self {
         // make a cheap clone
-        let modified = Mutex::new(tree.clone());
-        let snapshot = RwLock::new(tree);
+        let modified = Mutex::new(t.clone());
+        let snapshot = RwLock::new(t);
 
         Self { snapshot, modified }
     }
@@ -41,26 +44,27 @@ impl Buffer {
     /// Returns the latest snapshot of the underlying tree. This is a cheap clone-on-write copy and
     /// modifications made by future calls to `write` will not be visible to the returned copy. The
     /// caller is free to modify the returned Tree as they see fit.
-    pub fn read(&self) -> Tree {
+    pub fn read(&self) -> T {
         let guard = self.snapshot.read().expect("mutex was poisoned");
         guard.clone()
     }
 
     /// Allows callers to modify the shared Tree instance safely. The modified tree is committed to
     /// the snapshot and will be visible on next call to read (on the same thread).
-    pub fn write<F>(&self, mut f: F)
+    pub fn write<F, U>(&self, mut f: F) -> U
     where
-        F: FnMut(&mut Tree),
+        F: FnMut(&mut T) -> U,
     {
         let mut modified = self.modified.lock().expect("mutex was poisoned");
 
         // hand out the modified copy for mutation
-        f(&mut modified);
+        let u = f(&mut modified);
 
         // commit the modified copy for subsequent reads
         let modified = modified.clone();
         let mut commit_guard = self.snapshot.write().expect("rwlock poisoned");
         *commit_guard = modified;
+        u
     }
 }
 
@@ -73,7 +77,7 @@ mod tests {
     #[test]
     fn test_buffer_1() {
         let tree = Tree::new();
-        let buf = Buffer::from_tree(tree);
+        let buf = Buffer::new(tree);
 
         const N: usize = 100;
         const WRITERS: usize = 2;

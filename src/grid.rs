@@ -14,7 +14,7 @@ use crate::{
 
 /// Handle to primary and alternates grids. Allows callers to switch in and out of alternate grid.
 /// Alternate grid is used for fullscreen apps. It does not have scrollback.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GridStack {
     grids: ArrayVec<Grid, 2>,
 }
@@ -62,7 +62,7 @@ impl GridStack {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Grid {
     num_screen_rows: ScreenCoord,
     num_screen_cols: ScreenCoord,
@@ -244,11 +244,7 @@ impl Grid {
     fn compute_home_row(&mut self) {
         let total_rows = self.total_rows();
         let num_rows = self.num_rows();
-        self.cursor_state.home_row_line_idx = self.total_rows().saturating_sub(self.num_rows());
-        eprintln!(
-            "home_row_line_idx computed as {total_rows} - {num_rows} = {}",
-            self.cursor_state.home_row_line_idx
-        );
+        self.cursor_state.home_row_line_idx = total_rows.saturating_sub(num_rows);
     }
 
     pub fn write_text_at_cursor(&mut self, txt: &str) {

@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
     ansi::{self, AnsiToken},
+    buffer::Buffer,
     config::{self, Config},
     fonts::{FontDesc, FontManager},
     grid::{self, Grid, GridStack},
@@ -16,7 +17,7 @@ use crate::{
 };
 use ansi::AsciiControl;
 use anyhow::Context;
-use egui::{mutex::RwLock, text::LayoutJob, Align, CentralPanel, Color32, DragValue, Key, Rect};
+use egui::{text::LayoutJob, Align, CentralPanel, Color32, DragValue, Key, Rect};
 use nix::errno::Errno;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -32,7 +33,7 @@ pub struct TerminalEmulator {
     pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
 
-    grids: Arc<RwLock<GridStack>>,
+    grids: Arc<Buffer<GridStack>>,
 
     show_settings: bool,
     settings_state: Option<SettingsState>,
@@ -126,8 +127,7 @@ impl eframe::App for TerminalEmulator {
                 let pty_fd = self.child_process.pty_fd.as_fd();
                 let needs_signal = self
                     .grids
-                    .write()
-                    .resize(winsz.ws_row as u32, winsz.ws_col as u32);
+                    .write(|grids| grids.resize(winsz.ws_row as u32, winsz.ws_col as u32));
                 if needs_signal {
                     let delay = Duration::from_millis(100);
                     self.debounce_resize_signal = time::Instant::now().checked_add(delay);
@@ -213,7 +213,7 @@ impl TerminalEmulator {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         child_process: ChildProcess,
-        grids: Arc<RwLock<GridStack>>,
+        grids: Arc<Buffer<GridStack>>,
     ) -> anyhow::Result<Self> {
         let config = dbg!(config::get(cc.storage));
 
@@ -256,7 +256,7 @@ impl TerminalEmulator {
                     .debug_rect(ui.max_rect(), Color32::GREEN, "layout");
             }
 
-            let mut add_contents =
+            let add_contents =
                 |ui: &mut egui::Ui, visible_rows: Range<usize>| -> anyhow::Result<()> {
                     if self.enable_debug_render {
                         render_debug_cell_outlines(
