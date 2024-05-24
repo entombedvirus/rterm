@@ -166,6 +166,13 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
                 AnsiToken::SGR(params.collect())
             }
         })),
+        [b'n', rem @ ..] => Some((
+            rem,
+            match params.as_str() {
+                "5" => AnsiToken::DSR(DeviceStatusReport::StatusReport),
+                _unknown => AnsiToken::DSR(DeviceStatusReport::Unknown(params)),
+            },
+        )),
         [b'h', rem @ ..] => Some((
             rem,
             match params.as_str() {
@@ -322,7 +329,14 @@ pub enum AnsiToken {
     SGR(Vec<SgrControl>),
     OSC(OscControl),
     DA(DeviceAttributes),
+    DSR(DeviceStatusReport),
     ModeControl(ModeControl),
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceStatusReport {
+    StatusReport,
     Unknown(String),
 }
 

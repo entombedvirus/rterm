@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    ansi::{self, AnsiToken, SgrControl},
+    ansi::{self, AnsiToken, DeviceStatusReport, SgrControl},
     config::{self, Config},
     fonts::{FontDesc, FontManager},
     pty, terminal_input,
@@ -525,12 +525,8 @@ impl TerminalEmulator {
                         AnsiToken::ModeControl(ansi::ModeControl::ApplicationEscExit) => {
                             self.enable_application_escape = false;
                         }
-                        AnsiToken::DA(ansi::DeviceAttributes::XtVersion) => {
-                            const XT_VERSION: &str = "0.0.1";
-                            let _ = write!(
-                                &mut self.buffered_input,
-                                "\x1bP>|rterm({XT_VERSION})\x1b\\"
-                            );
+                        AnsiToken::DSR(DeviceStatusReport::StatusReport) => {
+                            let _ = write!(&mut self.buffered_input, "\x1b[0n");
                         }
                         AnsiToken::DA(ansi::DeviceAttributes::Primary) => {
                             // See: https://github.com/kovidgoyal/kitty/blob/5b4ea0052c3db89063a4b4af9f4b78ef90b7332c/kitty/screen.c#L2084
