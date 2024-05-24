@@ -61,6 +61,9 @@ pub struct TerminalEmulator {
     show_settings: bool,
     settings_state: Option<SettingsState>,
 
+    enable_sync_output: bool,
+    frozen_output_rows: Option<Vec<(Vec<char>, Vec<SgrState>)>>,
+
     enable_bracketed_paste: bool,
     enable_focus_tracking: bool,
     enable_application_escape: bool,
@@ -191,11 +194,13 @@ impl eframe::App for TerminalEmulator {
                                     }
                                 }
                                 self.render(ctx, ui, visible_rows.clone());
-                                let cursor_rect = self
-                                    .paint_cursor(ui, &visible_rows)
-                                    .context("paint_cursor failed")?;
-                                if read_input && !ui.clip_rect().contains_rect(cursor_rect) {
-                                    ui.scroll_to_rect(cursor_rect, None);
+                                if !self.enable_sync_output {
+                                    let cursor_rect = self
+                                        .paint_cursor(ui, &visible_rows)
+                                        .context("paint_cursor failed")?;
+                                    if read_input && !ui.clip_rect().contains_rect(cursor_rect) {
+                                        ui.scroll_to_rect(cursor_rect, None);
+                                    }
                                 }
                                 Ok(())
                             },
@@ -232,6 +237,8 @@ impl TerminalEmulator {
             enable_bracketed_paste: false,
             enable_focus_tracking: false,
             enable_application_escape: false,
+            enable_sync_output: false,
+            frozen_output_rows: None,
         })
     }
 
@@ -254,7 +261,34 @@ impl TerminalEmulator {
     ) -> Vec<egui::Response> {
         let mut label_responses = Vec::new();
         let grid = self.alternate_grid.as_ref().unwrap_or(&self.primary_grid);
-        for (line_chars, formats) in grid.lines(visible_rows) {
+
+        let mut frozen_iter = if self.enable_sync_output {
+            Some(
+                self.frozen_output_rows
+                    .get_or_insert_with(|| {
+                        grid.lines(visible_rows.clone())
+                            .map(|(chars, sgr)| (chars.to_vec(), sgr.to_vec()))
+                            .collect()
+                    })
+                    .iter()
+                    .map(|(chars_vec, sgr_vec)| (chars_vec.as_slice(), sgr_vec.as_slice())),
+            )
+        } else {
+            if self.frozen_output_rows.is_some() {
+                let _ = self.frozen_output_rows.take();
+            }
+            None
+        };
+        let mut grid_iter = grid.lines(visible_rows.clone());
+
+        let lines: &mut dyn Iterator<Item = (&[char], &[SgrState])> =
+            if let Some(frozen) = frozen_iter.as_mut() {
+                frozen
+            } else {
+                &mut grid_iter
+            };
+
+        for (line_chars, formats) in lines {
             let mut layout = LayoutJob::default();
             layout.wrap = egui::text::TextWrapping::no_max_width();
             for (&ch, format) in line_chars.into_iter().zip(formats) {
@@ -461,6 +495,12 @@ impl TerminalEmulator {
                 for token in tokens {
                     match token {
                         AnsiToken::OSC(osc_ctrl) => self.handle_osc_token(ctx, osc_ctrl),
+                        AnsiToken::ModeControl(ansi::ModeControl::SyncOutputEnter) => {
+                            self.enable_sync_output = true
+                        }
+                        AnsiToken::ModeControl(ansi::ModeControl::SyncOutputExit) => {
+                            self.enable_sync_output = false
+                        }
                         AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteEnter) => {
                             self.enable_bracketed_paste = true
                         }
