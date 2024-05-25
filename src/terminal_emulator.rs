@@ -17,7 +17,7 @@ use crate::{
 };
 use ansi::AsciiControl;
 use anyhow::Context;
-use egui::{text::LayoutJob, Align, CentralPanel, Color32, DragValue, Key, Rect};
+use egui::{text::LayoutJob, CentralPanel, Color32, DragValue, Key, Rect};
 use nix::errno::Errno;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -38,9 +38,6 @@ pub struct TerminalEmulator {
     show_settings: bool,
     settings_state: Option<SettingsState>,
     show_profiler: bool,
-
-    enable_sync_output: bool,
-    frozen_output_rows: Option<Vec<grid::DisplayLine>>,
 
     enable_bracketed_paste: bool,
     enable_focus_tracking: bool,
@@ -239,8 +236,6 @@ impl TerminalEmulator {
             enable_application_escape: false,
             debounce_resize_signal: None,
             scroll_to: None,
-            enable_sync_output: false,
-            frozen_output_rows: None,
         })
     }
 
@@ -278,59 +273,29 @@ impl TerminalEmulator {
                         let end_row = (visible_rows.end as u32).min(grid.total_rows());
                         let visible_rows = start_row..end_row;
 
-                        let mut frozen_iter = if self.enable_sync_output {
-                            Some(
-                                self.frozen_output_rows
-                                    .get_or_insert_with(|| {
-                                        grid.display_lines(visible_rows.clone()).collect()
-                                    })
-                                    .clone()
-                                    .into_iter(),
-                            )
-                        } else {
-                            if self.frozen_output_rows.is_some() {
-                                let _ = self.frozen_output_rows.take();
-                            }
-                            None
-                        };
-                        let mut grid_iter = grid.display_lines(visible_rows.clone());
-
-                        let lines: &mut dyn Iterator<Item = grid::DisplayLine> =
-                            if let Some(frozen) = frozen_iter.as_mut() {
-                                frozen
-                            } else {
-                                &mut grid_iter
-                            };
-
-                        for (i, line) in lines.enumerate() {
+                        for line in grid.display_lines(visible_rows.clone()) {
                             let layout = self.build_line_layout(&fonts, line);
                             let galley = ui.fonts(|fonts| {
                                 puffin::profile_scope!("galley_construction");
                                 fonts.layout_job(layout)
                             });
-                            let line_idx = visible_rows.start + i as u32;
-                            let resp = ui.label(galley);
-                            if scroll_to == Some(ScrollTarget::Line(line_idx)) {
-                                resp.scroll_to_me(Some(Align::TOP));
-                            }
+                            ui.label(galley);
                         }
                     }
 
-                    if !self.enable_sync_output {
-                        let cursor_rect = self
-                            .paint_cursor(ui, grid, &visible_rows)
-                            .context("paint_cursor failed")?;
-                        match scroll_to {
-                            Some(ScrollTarget::Cursor) => {
-                                if !ui.clip_rect().contains_rect(cursor_rect) {
-                                    ui.scroll_to_rect(cursor_rect, None);
-                                }
+                    let cursor_rect = self
+                        .paint_cursor(ui, grid, &visible_rows)
+                        .context("paint_cursor failed")?;
+                    match scroll_to {
+                        Some(ScrollTarget::Cursor) => {
+                            if !ui.clip_rect().contains_rect(cursor_rect) {
+                                ui.scroll_to_rect(cursor_rect, None);
                             }
-                            Some(ScrollTarget::Line(_)) => {
-                                // already handled in scroll area's vertical_scroll_offset
-                            }
-                            None => (),
                         }
+                        Some(ScrollTarget::Line(_)) => {
+                            // already handled in scroll area's vertical_scroll_offset
+                        }
+                        None => (),
                     }
                     Ok(())
                 };
@@ -504,7 +469,7 @@ impl TerminalEmulator {
         grid: &Grid,
         visible_rows: &Range<usize>,
     ) -> anyhow::Result<egui::Rect> {
-        let (cursor_row_in_screen_space, cursor_col) = grid.cursor_position();
+        let (cursor_row_in_screen_space, cursor_col) = grid.cursor_position_for_display();
         let cursor_row_in_scrollback_space =
             grid.first_visible_line_no() + cursor_row_in_screen_space;
         let num_rows_from_top =
@@ -564,12 +529,6 @@ impl TerminalEmulator {
     fn handle_ansi_token(&mut self, ctx: &egui::Context, token: AnsiToken) {
         match token {
             AnsiToken::OSC(osc_ctrl) => self.handle_osc_token(ctx, osc_ctrl),
-            AnsiToken::ModeControl(ansi::ModeControl::SyncOutputEnter) => {
-                self.enable_sync_output = true
-            }
-            AnsiToken::ModeControl(ansi::ModeControl::SyncOutputExit) => {
-                self.enable_sync_output = false
-            }
             AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteEnter) => {
                 self.enable_bracketed_paste = true
             }

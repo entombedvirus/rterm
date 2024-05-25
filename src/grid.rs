@@ -70,6 +70,7 @@ pub struct Grid {
     blank_line: Arc<String>,
 
     text: tree::Tree,
+    frozen_text: Option<(tree::Tree, CursorState)>,
 
     // TODO: ArrayVec<CursorState; 2> maybe?
     cursor_state: CursorState,
@@ -120,6 +121,7 @@ impl Grid {
             num_screen_rows: ScreenCoord(num_rows),
             num_screen_cols: ScreenCoord(num_cols),
             max_rows: BufferCoord(num_rows),
+            frozen_text: None,
             text,
             cursor_state,
             saved_cursor_state,
@@ -366,6 +368,14 @@ impl Grid {
         }
     }
 
+    pub fn pause_rendering(&mut self) {
+        self.frozen_text = Some((self.text.clone(), self.cursor_state.clone()));
+    }
+
+    pub fn resume_rendering(&mut self) {
+        let _ = self.frozen_text.take();
+    }
+
     // scan the rope counting the number of display lines (with soft-wrapping) until
     // we reach the beginning of query_range. Then take query_range.len() number of lines.
     // Note that a display line may begin the middle of a rope line because of soft-wrapping.
@@ -374,8 +384,12 @@ impl Grid {
         query_range: R,
     ) -> impl Iterator<Item = DisplayLine> + 'a {
         puffin::profile_function!();
-        self.text
-            .iter_soft_wrapped_lines(query_range)
+        let text = self
+            .frozen_text
+            .as_ref()
+            .map(|(text, _)| text)
+            .unwrap_or(&self.text);
+        text.iter_soft_wrapped_lines(query_range)
             .expect("query_range to be valid")
             .map(|display_slice: tree::TreeSlice| {
                 let mut padded_text: String = display_slice.text;
@@ -528,6 +542,14 @@ impl Grid {
 
     pub fn text_contents(&self) -> String {
         self.text.to_string()
+    }
+
+    pub fn cursor_position_for_display(&self) -> (u32, u32) {
+        self.frozen_text
+            .as_ref()
+            .map(|(_, cursor_state)| cursor_state.position)
+            .map(|(ScreenCoord(row), ScreenCoord(col))| (row, col))
+            .unwrap_or_else(|| self.cursor_position())
     }
 }
 

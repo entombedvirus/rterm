@@ -120,8 +120,6 @@ pub fn input_loop(
                 if parser.has_tokens() {
                     let gui_tokens = {
                         let mut tokens = parser.tokens();
-                        // TODO; don't make UI thread wait while we handle grid
-                        // tokens, if possible
                         grids.write(|grids| {
                             tokens.retain(|token| handle_grid_tokens(grids, token) == false);
                         });
@@ -149,6 +147,12 @@ fn handle_grid_tokens(grids: &mut GridStack, token: &AnsiToken) -> bool {
     match token {
         AnsiToken::ResetToInitialState => {
             grid.clear_including_scrollback();
+        }
+        AnsiToken::ModeControl(ModeControl::SyncOutputEnter) => {
+            grid.pause_rendering();
+        }
+        AnsiToken::ModeControl(ModeControl::SyncOutputExit) => {
+            grid.resume_rendering();
         }
         AnsiToken::ModeControl(ModeControl::AlternateScreenEnter) => {
             grids.enter_alternate_grid();
