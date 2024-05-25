@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use buffer::Buffer;
 use eframe::{App, CreationContext};
-use egui::mutex::RwLock;
 use grid::GridStack;
 pub use puffin_egui::puffin;
 use terminal_emulator::TerminalEmulator;
@@ -33,8 +32,7 @@ fn main() {
 fn create_app(cc: &CreationContext) -> Box<dyn App> {
     let grids = Arc::new(Buffer::new(GridStack::new(24, 80)));
     let child_process = terminal_input::ChildProcess::spawn(cc.egui_ctx.clone(), grids.clone());
-    Box::new(
-        TerminalEmulator::new(cc, child_process, grids)
-            .expect("TerminalEmulator initialization failed"),
-    )
+    let emulator = TerminalEmulator::new(cc, child_process, grids)
+        .expect("TerminalEmulator initialization failed");
+    Box::new(emulator)
 }

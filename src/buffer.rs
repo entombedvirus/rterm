@@ -1,11 +1,6 @@
-use std::sync::{
-    atomic::{self, AtomicPtr},
-    Arc, Mutex, RwLock,
-};
+use std::sync::{Mutex, RwLock};
 
-use crate::tree::Tree;
-
-/// Buffer facilitates non-blocing, thread-safe access to the shared text buffer between the UI
+// Buffer facilitates non-blocing, thread-safe access to the shared text buffer between the UI
 /// thread and the IO thread.
 ///
 /// Because we use a clone-on-write data structure to store the buffer contents, this type can hand
@@ -70,7 +65,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::terminal_emulator::SgrState;
+    use crate::{terminal_emulator::SgrState, tree::Tree};
 
     use super::*;
 
