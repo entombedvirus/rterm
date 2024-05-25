@@ -76,7 +76,7 @@ pub struct Grid {
     saved_cursor_state: Option<CursorState>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DisplayLine {
     pub padded_text: String, // always enough to fill the grid line
     pub format_attributes: Vec<FormatAttribute>,

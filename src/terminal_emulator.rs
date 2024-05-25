@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    ansi::{self, AnsiToken},
+    ansi::{self, AnsiToken, DeviceStatusReport},
     buffer::Buffer,
     config::{self, Config},
     fonts::{FontDesc, FontManager},
@@ -37,8 +37,10 @@ pub struct TerminalEmulator {
 
     show_settings: bool,
     settings_state: Option<SettingsState>,
-
     show_profiler: bool,
+
+    enable_sync_output: bool,
+    frozen_output_rows: Option<Vec<grid::DisplayLine>>,
 
     enable_bracketed_paste: bool,
     enable_focus_tracking: bool,
@@ -237,6 +239,8 @@ impl TerminalEmulator {
             enable_application_escape: false,
             debounce_resize_signal: None,
             scroll_to: None,
+            enable_sync_output: false,
+            frozen_output_rows: None,
         })
     }
 
@@ -272,13 +276,39 @@ impl TerminalEmulator {
                         puffin::profile_scope!("render_lines");
                         let start_row = visible_rows.start as u32;
                         let end_row = (visible_rows.end as u32).min(grid.total_rows());
-                        for (i, line) in grid.display_lines(start_row..end_row).enumerate() {
+                        let visible_rows = start_row..end_row;
+
+                        let mut frozen_iter = if self.enable_sync_output {
+                            Some(
+                                self.frozen_output_rows
+                                    .get_or_insert_with(|| {
+                                        grid.display_lines(visible_rows.clone()).collect()
+                                    })
+                                    .clone()
+                                    .into_iter(),
+                            )
+                        } else {
+                            if self.frozen_output_rows.is_some() {
+                                let _ = self.frozen_output_rows.take();
+                            }
+                            None
+                        };
+                        let mut grid_iter = grid.display_lines(visible_rows.clone());
+
+                        let lines: &mut dyn Iterator<Item = grid::DisplayLine> =
+                            if let Some(frozen) = frozen_iter.as_mut() {
+                                frozen
+                            } else {
+                                &mut grid_iter
+                            };
+
+                        for (i, line) in lines.enumerate() {
                             let layout = self.build_line_layout(&fonts, line);
                             let galley = ui.fonts(|fonts| {
                                 puffin::profile_scope!("galley_construction");
                                 fonts.layout_job(layout)
                             });
-                            let line_idx = (visible_rows.start + i) as u32;
+                            let line_idx = visible_rows.start + i as u32;
                             let resp = ui.label(galley);
                             if scroll_to == Some(ScrollTarget::Line(line_idx)) {
                                 resp.scroll_to_me(Some(Align::TOP));
@@ -286,19 +316,21 @@ impl TerminalEmulator {
                         }
                     }
 
-                    let cursor_rect = self
-                        .paint_cursor(ui, grid, &visible_rows)
-                        .context("paint_cursor failed")?;
-                    match scroll_to {
-                        Some(ScrollTarget::Cursor) => {
-                            if !ui.clip_rect().contains_rect(cursor_rect) {
-                                ui.scroll_to_rect(cursor_rect, None);
+                    if !self.enable_sync_output {
+                        let cursor_rect = self
+                            .paint_cursor(ui, grid, &visible_rows)
+                            .context("paint_cursor failed")?;
+                        match scroll_to {
+                            Some(ScrollTarget::Cursor) => {
+                                if !ui.clip_rect().contains_rect(cursor_rect) {
+                                    ui.scroll_to_rect(cursor_rect, None);
+                                }
                             }
+                            Some(ScrollTarget::Line(_)) => {
+                                // already handled in scroll area's vertical_scroll_offset
+                            }
+                            None => (),
                         }
-                        Some(ScrollTarget::Line(_)) => {
-                            // already handled in the line rendering loop above
-                        }
-                        None => (),
                     }
                     Ok(())
                 };
@@ -532,6 +564,12 @@ impl TerminalEmulator {
     fn handle_ansi_token(&mut self, ctx: &egui::Context, token: AnsiToken) {
         match token {
             AnsiToken::OSC(osc_ctrl) => self.handle_osc_token(ctx, osc_ctrl),
+            AnsiToken::ModeControl(ansi::ModeControl::SyncOutputEnter) => {
+                self.enable_sync_output = true
+            }
+            AnsiToken::ModeControl(ansi::ModeControl::SyncOutputExit) => {
+                self.enable_sync_output = false
+            }
             AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteEnter) => {
                 self.enable_bracketed_paste = true
             }
@@ -549,6 +587,9 @@ impl TerminalEmulator {
             }
             AnsiToken::ModeControl(ansi::ModeControl::ApplicationEscExit) => {
                 self.enable_application_escape = false;
+            }
+            AnsiToken::DSR(DeviceStatusReport::StatusReport) => {
+                let _ = write!(&mut self.buffered_input, "\x1b[0n");
             }
             AnsiToken::DA(ansi::DeviceAttributes::XtVersion) => {
                 const XT_VERSION: &str = "0.0.1";

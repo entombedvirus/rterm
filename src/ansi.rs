@@ -166,10 +166,18 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
                 AnsiToken::SGR(params.collect())
             }
         })),
+        [b'n', rem @ ..] => Some((
+            rem,
+            match params.as_str() {
+                "5" => AnsiToken::DSR(DeviceStatusReport::StatusReport),
+                _unknown => AnsiToken::DSR(DeviceStatusReport::Unknown(params)),
+            },
+        )),
         [b'h', rem @ ..] => Some((
             rem,
             match params.as_str() {
                 "?2004" => AnsiToken::ModeControl(ModeControl::BracketedPasteEnter),
+                "?2026" => AnsiToken::ModeControl(ModeControl::SyncOutputEnter),
                 "?1049" => AnsiToken::ModeControl(ModeControl::AlternateScreenEnter),
                 "?1004" => AnsiToken::ModeControl(ModeControl::FocusTrackEnter),
                 "?7727" => AnsiToken::ModeControl(ModeControl::ApplicationEscEnter),
@@ -180,6 +188,7 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
             rem,
             match params.as_str() {
                 "?2004" => AnsiToken::ModeControl(ModeControl::BracketedPasteExit),
+                "?2026" => AnsiToken::ModeControl(ModeControl::SyncOutputExit),
                 "?1049" => AnsiToken::ModeControl(ModeControl::AlternateScreenExit),
                 "?1004" => AnsiToken::ModeControl(ModeControl::FocusTrackExit),
                 "?7727" => AnsiToken::ModeControl(ModeControl::ApplicationEscExit),
@@ -320,7 +329,14 @@ pub enum AnsiToken {
     SGR(Vec<SgrControl>),
     OSC(OscControl),
     DA(DeviceAttributes),
+    DSR(DeviceStatusReport),
     ModeControl(ModeControl),
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceStatusReport {
+    StatusReport,
     Unknown(String),
 }
 
@@ -342,6 +358,8 @@ pub enum ModeControl {
     FocusTrackExit,
     ApplicationEscEnter,
     ApplicationEscExit,
+    SyncOutputEnter,
+    SyncOutputExit,
     Unknown(String),
 }
 
