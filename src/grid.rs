@@ -36,11 +36,10 @@ impl GridStack {
         self.grids.last_mut().expect("grids is never empty")
     }
 
-    pub fn resize(&mut self, new_num_rows: u32, new_num_cols: u32) -> bool {
-        self.grids
-            .iter_mut()
-            .map(|g| g.resize(new_num_rows, new_num_cols))
-            .any(|needs_update| needs_update)
+    pub fn resize(&mut self, new_num_rows: u32, new_num_cols: u32) {
+        for g in &mut self.grids {
+            g.resize(new_num_rows, new_num_cols);
+        }
     }
 
     pub fn enter_alternate_grid(&mut self) {

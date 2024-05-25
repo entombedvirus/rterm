@@ -30,9 +30,9 @@ pub struct TerminalEmulator {
     config: Config,
     font_manager: FontManager,
     child_process: ChildProcess,
-    pub char_dimensions: Option<egui::Vec2>,
     buffered_input: String,
 
+    previous_winsz: Option<libc::winsize>,
     grids: Arc<Buffer<GridStack>>,
 
     show_settings: bool,
@@ -89,32 +89,17 @@ impl eframe::App for TerminalEmulator {
         CentralPanel::default()
             .frame(egui::Frame::default().fill(ansi::Color::DefaultBg.into()))
             .show(ctx, |ui| -> anyhow::Result<()> {
+                let spacing = ui.spacing_mut();
+                spacing.item_spacing = egui::Vec2::ZERO;
+                spacing.window_margin = egui::Margin::ZERO;
+
                 if self.enable_debug_render {
                     ctx.debug_painter()
                         .debug_rect(ui.max_rect(), Color32::YELLOW, "panel");
                 }
 
-                let spacing = ui.spacing_mut();
-                spacing.item_spacing = egui::Vec2::ZERO;
-                spacing.window_margin = egui::Margin::ZERO;
-
-                let char_dims = self
-                    .char_dimensions
-                    .insert({
-                        let regular_font = egui::FontId::new(
-                            self.config.font_size,
-                            self.font_manager
-                                .get_or_init("regular", &self.config.regular_font),
-                        );
-                        let dims = ctx.fonts(|fonts| {
-                            let width = fonts.glyph_width(&regular_font, 'M');
-                            let height = fonts.row_height(&regular_font);
-                            (width, height).into()
-                        });
-                        // needed to avoid floating point errors when multiplying
-                        ui.painter().round_vec_to_pixels(dims)
-                    })
-                    .clone();
+                let fonts = FontSpec::new(&self.config, &mut self.font_manager);
+                let char_dims = self.compute_char_dims(&ui, &fonts);
 
                 let winsz = pty::compute_winsize(
                     ui.painter().round_to_pixel(ui.available_width()),
@@ -122,12 +107,10 @@ impl eframe::App for TerminalEmulator {
                     char_dims.x,
                     char_dims.y,
                 );
-
-                let pty_fd = self.child_process.pty_fd.as_fd();
-                let needs_signal = self
-                    .grids
-                    .write(|grids| grids.resize(winsz.ws_row as u32, winsz.ws_col as u32));
-                if needs_signal {
+                if self.previous_winsz != Some(winsz) {
+                    self.previous_winsz = Some(winsz);
+                    self.grids
+                        .write(|grids| grids.resize(winsz.ws_row as u32, winsz.ws_col as u32));
                     let delay = Duration::from_millis(100);
                     self.debounce_resize_signal = time::Instant::now().checked_add(delay);
                     ctx.request_repaint_after(delay);
@@ -135,6 +118,7 @@ impl eframe::App for TerminalEmulator {
                     let now = time::Instant::now();
                     if now >= t {
                         log::info!("sending resize signal to pty");
+                        let pty_fd = self.child_process.pty_fd.as_fd();
                         pty::update_pty_window_size(pty_fd, &winsz)
                             .context("update_pty_window_size")?;
                         self.debounce_resize_signal = None;
@@ -155,7 +139,7 @@ impl eframe::App for TerminalEmulator {
 
                 self.read_from_pty(ctx).context("reading from pty failed")?;
                 self.write_to_pty().context("writing to pty failed")?;
-                self.render_grid(ctx, ui, char_dims);
+                self.render_grid(ctx, ui, &fonts, char_dims);
                 Ok(())
             });
     }
@@ -185,7 +169,7 @@ fn render_debug_cell_outlines(
 }
 
 #[derive(Debug)]
-struct FontSpec {
+pub struct FontSpec {
     regular: egui::FontFamily,
     italic: egui::FontFamily,
     bold: egui::FontFamily,
@@ -226,7 +210,6 @@ impl TerminalEmulator {
             child_process,
             grids,
             buffered_input: String::new(),
-            char_dimensions: None,
             enable_debug_render: false,
             show_profiler: false,
             show_settings: false,
@@ -236,16 +219,22 @@ impl TerminalEmulator {
             enable_application_escape: false,
             debounce_resize_signal: None,
             scroll_to: None,
+            previous_winsz: None,
         })
     }
 
-    pub fn render_grid(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, char_dims: egui::Vec2) {
+    pub fn render_grid(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        fonts: &FontSpec,
+        char_dims: egui::Vec2,
+    ) {
         puffin::profile_function!();
 
         let scroll_to = self.scroll_to.take();
         let grids = self.grids.read();
         let grid = grids.current();
-        let fonts = FontSpec::new(&self.config, &mut self.font_manager);
 
         ui.with_layout(egui::Layout::top_down_justified(egui::Align::TOP), |ui| {
             ui.set_height(grid.num_rows() as f32 * char_dims.y);
@@ -284,7 +273,7 @@ impl TerminalEmulator {
                     }
 
                     let cursor_rect = self
-                        .paint_cursor(ui, grid, &visible_rows)
+                        .paint_cursor(grid, char_dims, ui, &visible_rows)
                         .context("paint_cursor failed")?;
                     match scroll_to {
                         Some(ScrollTarget::Cursor) => {
@@ -465,8 +454,9 @@ impl TerminalEmulator {
 
     pub fn paint_cursor(
         &self,
-        ui: &mut egui::Ui,
         grid: &Grid,
+        char_dims: egui::Vec2,
+        ui: &mut egui::Ui,
         visible_rows: &Range<usize>,
     ) -> anyhow::Result<egui::Rect> {
         let (cursor_row_in_screen_space, cursor_col) = grid.cursor_position_for_display();
@@ -474,7 +464,6 @@ impl TerminalEmulator {
             grid.first_visible_line_no() + cursor_row_in_screen_space;
         let num_rows_from_top =
             cursor_row_in_scrollback_space.saturating_sub(visible_rows.start as u32);
-        let char_dims = self.char_dimensions.unwrap_or(egui::vec2(12.0, 12.0));
         let cursor_rect = Rect::from_min_size(
             egui::pos2(
                 cursor_col as f32 * char_dims.x,
@@ -627,6 +616,17 @@ impl TerminalEmulator {
             SetWindowTitle(title) => ctx.send_viewport_cmd(egui::ViewportCommand::Title(title)),
             Unknown(seq) => log::warn!("unknown osc sequence: {seq:?}"),
         }
+    }
+
+    fn compute_char_dims(&self, ui: &egui::Ui, fonts: &FontSpec) -> egui::Vec2 {
+        let regular_font = egui::FontId::new(self.config.font_size, fonts.regular.clone());
+        let dims = ui.ctx().fonts(|fonts| {
+            let width = fonts.glyph_width(&regular_font, 'M');
+            let height = fonts.row_height(&regular_font);
+            (width, height).into()
+        });
+        // needed to avoid floating point errors when multiplying
+        ui.painter().round_vec_to_pixels(dims)
     }
 }
 
