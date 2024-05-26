@@ -1060,14 +1060,16 @@ impl Compactable for Arc<Node> {
 
     fn compact_two(cx: SummarizeContext, a: &mut Self, b: &mut Self) -> bool {
         let (a, b) = (Arc::make_mut(a), Arc::make_mut(b));
-        if a.is_leaf() && b.is_leaf() {
-            Compactable::compact_two(cx, a.child_strings_mut(), b.child_strings_mut());
+        let updated = if a.is_leaf() && b.is_leaf() {
+            Compactable::compact_two(cx, a.child_strings_mut(), b.child_strings_mut())
         } else {
-            Compactable::compact_two(cx, a.child_nodes_mut(), b.child_nodes_mut());
+            Compactable::compact_two(cx, a.child_nodes_mut(), b.child_nodes_mut())
+        };
+        if updated {
+            a.recompute_summaries(cx);
+            b.recompute_summaries(cx);
         }
-        a.recompute_summaries(cx);
-        b.recompute_summaries(cx);
-        !a.has_room_for_children()
+        updated
     }
 }
 
@@ -1087,7 +1089,7 @@ impl Compactable for GridString {
         *b.buf_mut() = temp;
         a.sgr_mut().extend(b.sgr_mut().drain(0..chars_written));
 
-        a.buf_mut().remaining_capacity() == 0 || !b.is_empty()
+        chars_written > 0
     }
 }
 
@@ -1099,8 +1101,9 @@ impl<T, const N: usize> Compactable for ArrayVec<T, N> {
     fn compact_two(_cx: SummarizeContext, a: &mut Self, b: &mut Self) -> bool {
         let room_available = a.remaining_capacity();
         let num_children = b.len();
-        a.extend(b.drain(0..room_available.min(num_children)));
-        a.remaining_capacity() == 0
+        let to_write = room_available.min(num_children);
+        a.extend(b.drain(0..to_write));
+        to_write > 0
     }
 }
 

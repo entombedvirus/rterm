@@ -1,4 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use pprof::criterion::{Output, PProfProfiler};
 use rand::Rng;
 
 const ASCII_PRINTABLE: &[u8] =
@@ -18,10 +19,14 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     let mut grid = rterm::grid::Grid::new(20, 80);
     c.bench_function("write_text_at_cursor", |b| {
         b.iter(|| {
-            grid.write_text_at_cursor(&input);
+            grid.write_text_at_cursor(black_box(&input));
         })
     });
 }
 
-criterion_group!(benches, criterion_benchmark);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+    targets = criterion_benchmark
+}
 criterion_main!(benches);
