@@ -23,3 +23,11 @@ puffin_egui = "0.26.0"
 ropey = "1.6.1"
 serde = { version = "1.0.197", features = ["derive"] }
 toml = "0.8.10"
+
+[dev-dependencies]
+criterion = "0.5.1"
+rand = "0.8.5"
+
+[[bench]]
+name = "tree_bench"
+harness = false

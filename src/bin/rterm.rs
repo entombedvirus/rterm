@@ -1,21 +1,8 @@
 use std::sync::Arc;
 
-use buffer::Buffer;
 use eframe::{App, CreationContext};
-use grid::GridStack;
 pub use puffin_egui::puffin;
-use terminal_emulator::TerminalEmulator;
-
-mod ansi;
-mod buffer;
-mod config;
-mod fonts;
-mod grid;
-mod grid_string;
-mod pty;
-mod terminal_emulator;
-mod terminal_input;
-mod tree;
+use rterm::{buffer::Buffer, grid::GridStack, terminal_emulator::TerminalEmulator, terminal_input};
 
 fn main() {
     env_logger::init();
