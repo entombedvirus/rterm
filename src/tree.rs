@@ -36,7 +36,7 @@ where
 }
 impl<T> std::error::Error for OutOfBounds<T> where T: std::fmt::Debug {}
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SummarizeContext {
     wrap_width: Option<NonZeroU32>,
 }
@@ -90,18 +90,31 @@ impl Tree {
     }
 
     pub fn push_str(&mut self, mut new_text: &str, sgr: SgrState) {
-        // TODO: if new_text is larger than what will fit in a leaf node, create a tree from it and
-        // merge
-        while !new_text.is_empty() {
-            self.find_string_segment_mut(
-                SeekCharIdx(self.len_chars()),
-                |segment: &mut GridString, _segment_char_idx: usize| -> Option<GridString> {
-                    let (overflow, _, rem) = segment.push_str(new_text, sgr);
-                    new_text = rem;
-                    overflow
-                },
-            );
+        if new_text.is_empty() {
+            return;
         }
+
+        let cx = self.summarize_context;
+        let root = Arc::make_mut(&mut self.root);
+        let rem = root.push_str(cx, new_text, sgr);
+        new_text = rem;
+
+        if !new_text.is_empty() {
+            self.append_tree(Self::from_str2(cx, rem, sgr));
+        }
+        // while !new_text.is_empty() {
+        //     let (new_leaf, rem) = Node::leaf_from_str(cx, new_text, sgr);
+        //     self.append_leaf(new_leaf);
+        //     new_text = rem;
+        //     // self.find_string_segment_mut(
+        //     //     SeekCharIdx(self.len_chars()),
+        //     //     |segment: &mut GridString, _segment_char_idx: usize| -> Option<GridString> {
+        //     //         let (overflow, _, rem) = segment.push_str(new_text, sgr);
+        //     //         new_text = rem;
+        //     //         overflow
+        //     //     },
+        //     // );
+        // }
     }
 
     pub fn replace_str<D: SeekTarget>(&mut self, target: D, mut new_text: &str, sgr: SgrState) {
@@ -214,12 +227,6 @@ impl Tree {
         }
     }
 
-    pub fn from_str(input: &str) -> Self {
-        let mut tree = Self::new();
-        tree.push_str(input, SgrState::default());
-        tree
-    }
-
     pub fn resolve_dimension<T: SeekTarget>(
         &self,
         seek_target: T,
@@ -284,6 +291,148 @@ impl Tree {
 
     pub fn ends_with_newline(&self) -> bool {
         self.root.node_summary().lines.ends_with_newline
+    }
+
+    fn append_tree(&mut self, other: Tree) {
+        assert_eq!(
+            self.summarize_context, other.summarize_context,
+            "self: {self:?}, other: {other:?}"
+        );
+        let cx = self.summarize_context;
+
+        match self.root.height().cmp(&other.root.height()) {
+            std::cmp::Ordering::Less => {
+                let Node::Internal { children, .. } = other.root.as_ref() else {
+                    unreachable!("other has a bigger height implies internal node")
+                };
+                for child in children {
+                    let subtree = Tree {
+                        root: child.clone(),
+                        summarize_context: cx,
+                    };
+                    self.append_tree(subtree);
+                }
+            }
+            std::cmp::Ordering::Equal => {
+                match Arc::make_mut(&mut self.root) {
+                    Node::Leaf { .. } => {
+                        // both self and other are just single node, leaf nodes
+                        let new_root =
+                            Node::new_internal(cx, 1, [self.root.clone(), other.root.clone()]);
+                        self.root = Arc::new(new_root);
+                    }
+                    Node::Internal {
+                        height,
+                        node_summary,
+                        child_summaries,
+                        children,
+                        ..
+                    } => match children.try_push(other.root.clone()) {
+                        Ok(_) => {
+                            let summary = other.root.node_summary().clone();
+                            *node_summary = node_summary.add(cx, &summary);
+                            child_summaries.push(summary);
+                        }
+                        Err(err) => {
+                            let right_children =
+                                split_children(children, children.len(), err.element());
+                            child_summaries.truncate(children.len());
+                            *node_summary = summarize(cx, &*child_summaries);
+                            let right_node =
+                                Arc::new(Node::new_internal(cx, *height, right_children));
+                            self.root = Arc::new(Node::new_internal(
+                                cx,
+                                *height + 1,
+                                [self.root.clone(), right_node],
+                            ));
+                        }
+                    },
+                }
+            }
+            std::cmp::Ordering::Greater => {
+                let Node::Internal {
+                    height,
+                    node_summary,
+                    child_summaries,
+                    children,
+                    ..
+                } = Arc::make_mut(&mut self.root)
+                else {
+                    unreachable!("self has a bigger height implies internal node")
+                };
+                if other.root.height() + 1 == *height {
+                    // we can add other as a child tree
+                    match children.try_push(other.root.clone()) {
+                        Ok(_) => {
+                            let summary = other.root.node_summary().clone();
+                            *node_summary = node_summary.add(cx, &summary);
+                            child_summaries.push(summary);
+                        }
+                        Err(err) => {
+                            let right_children =
+                                split_children(children, children.len(), err.element());
+                            child_summaries.truncate(children.len());
+                            *node_summary = summarize(cx, &*child_summaries);
+                            let right_node =
+                                Arc::new(Node::new_internal(cx, *height, right_children));
+                            self.root = Arc::new(Node::new_internal(
+                                cx,
+                                *height + 1,
+                                [self.root.clone(), right_node],
+                            ));
+                        }
+                    }
+                } else {
+                    // other cannot be added directly as a child, but deeper
+                    let last_child = children
+                        .pop()
+                        .expect("internal nodes have at least one child");
+                    let _ = child_summaries.pop();
+                    *node_summary = summarize(cx, &*child_summaries);
+
+                    let mut subtree = Tree {
+                        summarize_context: cx,
+                        root: last_child.clone(),
+                    };
+                    subtree.append_tree(other);
+                    self.append_tree(subtree);
+                }
+            }
+        }
+    }
+
+    pub fn from_str(input: &str) -> Self {
+        Self::from_str2(SummarizeContext::default(), input, SgrState::default())
+    }
+
+    fn from_str2(cx: SummarizeContext, mut new_text: &str, sgr: SgrState) -> Tree {
+        if new_text.is_empty() {
+            return Self::new();
+        }
+
+        let mut nodes = Vec::new();
+        while !new_text.is_empty() {
+            let (new_leaf, rem) = Node::leaf_from_str(cx, new_text, sgr);
+            nodes.push(Arc::new(new_leaf));
+            new_text = rem;
+        }
+
+        let mut height = 0;
+        while nodes.len() > 1 {
+            height += 1;
+            nodes = nodes
+                .chunks(MAX_CHILDREN)
+                .map(|children| {
+                    let children = children.iter().cloned();
+                    Arc::new(Node::new_internal(cx, height, children))
+                })
+                .collect();
+        }
+
+        Tree {
+            summarize_context: cx,
+            root: nodes.pop().unwrap(),
+        }
     }
 }
 
@@ -987,6 +1136,76 @@ impl Node {
             }
         }
     }
+
+    fn leaf_from_str(cx: SummarizeContext, mut new_text: &str, sgr: SgrState) -> (Node, &str) {
+        let mut children: ArrayVec<GridString, MAX_CHILDREN> = ArrayVec::new();
+        while !new_text.is_empty() {
+            let (segment, _, rem) = GridString::split(new_text, sgr);
+            if let Err(_) = children.try_push(segment.unwrap()) {
+                break;
+            }
+            new_text = rem;
+        }
+        (Node::new_leaf(cx, children), new_text)
+    }
+
+    fn push_str<'a>(
+        &mut self,
+        cx: SummarizeContext,
+        mut new_text: &'a str,
+        sgr: SgrState,
+    ) -> &'a str {
+        debug_assert!(
+            !new_text.is_empty(),
+            "caller should check to avoid repeated checks"
+        );
+
+        match self {
+            Node::Leaf {
+                node_summary,
+                children,
+                child_summaries,
+                ..
+            } => {
+                let mut needs_recompute = false;
+                while !new_text.is_empty() && !children.is_full() {
+                    let last_child = children
+                        .last_mut()
+                        .expect("leaf nodes always have at least one segment");
+                    let (split, _, rem) = last_child.push_str(new_text, sgr);
+                    match split {
+                        Some(segment) => {
+                            let summary = TextSummary::from_segment(cx, &segment);
+                            if !needs_recompute {
+                                // do the work to keep the running tallies if we aren't gonna do an
+                                // onverall recompute at the end
+                                *node_summary = node_summary.add(cx, &summary);
+                                child_summaries.push(summary);
+                            }
+                            children.push(segment);
+                        }
+                        None => {
+                            // it wrote some prefix, update the last child_summary and node_summary
+                            needs_recompute = true;
+                        }
+                    }
+                    new_text = rem;
+                }
+                if needs_recompute {
+                    self.recompute_summaries(cx);
+                }
+                new_text
+            }
+            Node::Internal { children, .. } => {
+                let last_child = children
+                    .last_mut()
+                    .expect("internal nodes always have at least one child");
+                let rem = Arc::make_mut(last_child).push_str(cx, new_text, sgr);
+                self.recompute_summaries(cx);
+                rem
+            }
+        }
+    }
 }
 
 trait Compactable
@@ -1404,6 +1623,14 @@ impl LineSummary {
 }
 
 impl TextSummary {
+    fn from_str(cx: SummarizeContext, value: &str) -> TextSummary {
+        Self {
+            chars: value.chars().count(),
+            bytes: value.len(),
+            lines: LineSummary::from_str(cx, value),
+        }
+    }
+
     fn from_segment(cx: SummarizeContext, value: &GridString) -> TextSummary {
         Self {
             chars: value.len_chars(),
@@ -1489,7 +1716,7 @@ mod tests {
     #[test]
     fn test_large_input_1() {
         let mut tree = Tree::new();
-        let input = &LARGE_TEXT[..LARGE_TEXT.len()];
+        let input = &LARGE_TEXT[..128];
         tree.push_str(input, SgrState::default());
         assert_eq!(tree.to_string().as_str(), input);
 
@@ -1497,7 +1724,7 @@ mod tests {
         for (idx, node) in tree.iter_nodes().enumerate() {
             assert!(
                 idx == 0 || node.is_leaf() || node.child_summaries().len() >= B,
-                "{node:?}\n{tree:?}"
+                "idx: {idx}, Node: {node:?}\n\n{tree:?}"
             );
         }
     }

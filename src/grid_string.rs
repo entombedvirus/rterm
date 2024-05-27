@@ -315,7 +315,7 @@ impl GridString {
             })
     }
 
-    fn split(new_text: &str, new_sgr: SgrState) -> (Option<GridString>, usize, &str) {
+    pub fn split(new_text: &str, new_sgr: SgrState) -> (Option<GridString>, usize, &str) {
         let (prefix, suffix) = split_str_at_utf8_boundary(new_text, MAX_BYTES);
         let written = prefix.chars().count();
         let mut overflow = Self::default();

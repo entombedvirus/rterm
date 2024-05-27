@@ -16,9 +16,9 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         .map(char::from)
         .collect();
 
-    let mut grid = rterm::grid::Grid::new(20, 80);
     c.bench_function("write_text_at_cursor", |b| {
         b.iter(|| {
+            let mut grid = rterm::grid::Grid::new(20, 80);
             grid.write_text_at_cursor(black_box(&input));
         })
     });
