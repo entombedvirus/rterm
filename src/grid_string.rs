@@ -138,7 +138,7 @@ impl GridString {
         let mut nwritten = 0;
         let mut rem = new_text;
         for (char_idx, whence) in edited_chars.enumerate() {
-            if let Ok(_) = edited_buf.try_push(whence.char()) {
+            if edited_buf.try_push(whence.char()).is_ok() {
                 new_num_chars += 1;
                 match whence {
                     Whence::OldText(ch) => {
@@ -195,7 +195,7 @@ impl GridString {
         edited_buf
             .try_push_str(old_text_prefix)
             .expect("part of old text should always fit");
-        edited_sgr.extend(self.sgr[..char_idx].into_iter().cloned());
+        edited_sgr.extend(self.sgr[..char_idx].iter().cloned());
 
         let (new_text_prefix, new_text_suffix) =
             split_str_at_utf8_boundary(new_text, edited_buf.remaining_capacity());
@@ -261,7 +261,7 @@ impl GridString {
     pub fn remove_char_range<R: RangeBounds<usize>>(&mut self, char_range: R) -> Result<()> {
         let char_range = resolve_range(char_range, 0..self.len_chars())?;
         let byte_range = self.resolve_char_to_byte_range(char_range.clone())?;
-        let temp = self.buf.clone();
+        let temp = self.buf;
         self.buf.truncate(byte_range.start);
         self.buf.push_str(&temp[byte_range.end..]);
         self.sgr.copy_within(char_range.end.., char_range.start);

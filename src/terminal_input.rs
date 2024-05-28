@@ -121,7 +121,7 @@ pub fn input_loop(
                     let gui_tokens = {
                         let mut tokens = parser.tokens();
                         grids.write(|grids| {
-                            tokens.retain(|token| handle_grid_tokens(grids, token) == false);
+                            tokens.retain(|token| !handle_grid_tokens(grids, token));
                         });
                         tokens
                     };
@@ -161,7 +161,7 @@ fn handle_grid_tokens(grids: &mut GridStack, token: &AnsiToken) -> bool {
             grids.exit_alternate_grid();
         }
         AnsiToken::Text(txt) => {
-            grid.write_text_at_cursor(&txt);
+            grid.write_text_at_cursor(txt);
         }
         AnsiToken::AsciiControl(AsciiControl::Backspace) => {
             grid.move_cursor_relative(0, -1);
@@ -226,7 +226,7 @@ fn handle_grid_tokens(grids: &mut GridStack, token: &AnsiToken) -> bool {
         AnsiToken::EraseControl(EraseControl::FromCursorToEndOfLine) => {
             grid.erase_from_cursor_to_eol();
         }
-        AnsiToken::SGR(params) => {
+        AnsiToken::Sgr(params) => {
             let sgr_state = grid.cursor_format_mut();
             for sgr in params {
                 match sgr {

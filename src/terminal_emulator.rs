@@ -99,7 +99,7 @@ impl eframe::App for TerminalEmulator {
                 }
 
                 let fonts = FontSpec::new(&self.config, &mut self.font_manager);
-                let char_dims = self.compute_char_dims(&ui, &fonts);
+                let char_dims = self.compute_char_dims(ui, &fonts);
 
                 let winsz = pty::compute_winsize(
                     ui.painter().round_to_pixel(ui.available_width()),
@@ -263,7 +263,7 @@ impl TerminalEmulator {
                         let visible_rows = start_row..end_row;
 
                         for line in grid.display_lines(visible_rows.clone()) {
-                            let layout = self.build_line_layout(&fonts, line);
+                            let layout = self.build_line_layout(fonts, line);
                             let galley = ui.fonts(|fonts| {
                                 puffin::profile_scope!("galley_construction");
                                 fonts.layout_job(layout)
@@ -354,7 +354,7 @@ impl TerminalEmulator {
                 if self.enable_bracketed_paste {
                     self.buffered_input.push_str("\x1b[200~");
                 }
-                self.buffered_input.push_str(&txt);
+                self.buffered_input.push_str(txt);
                 if self.enable_bracketed_paste {
                     self.buffered_input.push_str("\x1b[201~");
                 }
@@ -363,7 +363,7 @@ impl TerminalEmulator {
                 if input_state.modifiers.alt {
                     terminal_input::alt(txt, &mut self.buffered_input);
                 } else {
-                    self.buffered_input.push_str(&txt);
+                    self.buffered_input.push_str(txt);
                 };
             }
             egui::Event::Key {
@@ -517,7 +517,7 @@ impl TerminalEmulator {
 
     fn handle_ansi_token(&mut self, ctx: &egui::Context, token: AnsiToken) {
         match token {
-            AnsiToken::OSC(osc_ctrl) => self.handle_osc_token(ctx, osc_ctrl),
+            AnsiToken::Osc(osc_ctrl) => self.handle_osc_token(ctx, osc_ctrl),
             AnsiToken::ModeControl(ansi::ModeControl::BracketedPasteEnter) => {
                 self.enable_bracketed_paste = true
             }
@@ -536,7 +536,7 @@ impl TerminalEmulator {
             AnsiToken::ModeControl(ansi::ModeControl::ApplicationEscExit) => {
                 self.enable_application_escape = false;
             }
-            AnsiToken::DSR(DeviceStatusReport::StatusReport) => {
+            AnsiToken::Dsr(DeviceStatusReport::StatusReport) => {
                 let _ = write!(&mut self.buffered_input, "\x1b[0n");
             }
             AnsiToken::DA(ansi::DeviceAttributes::XtVersion) => {
@@ -648,7 +648,7 @@ impl SettingsState {
         }
     }
 
-    fn get_fonts<'a>(&'a mut self) -> anyhow::Result<Option<&'a [FontDesc]>> {
+    fn get_fonts(&mut self) -> anyhow::Result<Option<&[FontDesc]>> {
         if self.async_font_search_result.is_none() {
             self.async_font_search_result = match self.async_receiver.try_recv() {
                 Ok(res) => Some(res),

@@ -18,7 +18,7 @@ impl Parser {
         }
     }
 
-    pub fn tokens<'a>(&'a mut self) -> VecDeque<AnsiToken> {
+    pub fn tokens(&mut self) -> VecDeque<AnsiToken> {
         std::mem::take(&mut self.parsed_tokens)
     }
 
@@ -129,32 +129,32 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
         })),
         [b'm', rem @ ..] => Some((rem, {
             if params.is_empty() {
-                return Some((rem, AnsiToken::SGR(vec![SgrControl::Reset])));
+                return Some((rem, AnsiToken::Sgr(vec![SgrControl::Reset])));
             }
             if let Some(color_idx_str) = params.strip_prefix("38;5;") {
                 // 256 color mode fg color
                 let color_idx: u8 = color_idx_str.parse().unwrap_or_default();
-                AnsiToken::SGR(vec![SgrControl::ForgroundColor(Color::Indexed(color_idx))])
+                AnsiToken::Sgr(vec![SgrControl::ForgroundColor(Color::Indexed(color_idx))])
             } else if let Some(color_idx_str) = params.strip_prefix("48;5;") {
                 // 256 color mode bg color
                 let color_idx: u8 = color_idx_str.parse().unwrap_or_default();
-                AnsiToken::SGR(vec![SgrControl::BackgroundColor(Color::Indexed(color_idx))])
+                AnsiToken::Sgr(vec![SgrControl::BackgroundColor(Color::Indexed(color_idx))])
             } else if let Some(rgb_str) = params.strip_prefix("38;2;") {
                 // 24 bit color mode fg color
                 let bg_color = Color::from_components_str(rgb_str);
-                AnsiToken::SGR(vec![bg_color
+                AnsiToken::Sgr(vec![bg_color
                     .map(SgrControl::ForgroundColor)
                     .unwrap_or(SgrControl::Unimplemented(params))])
             } else if let Some(rgb_str) = params.strip_prefix("48;2;") {
                 // 24 bit color mode bg color
                 let bg_color = Color::from_components_str(rgb_str);
-                AnsiToken::SGR(vec![bg_color
+                AnsiToken::Sgr(vec![bg_color
                     .map(SgrControl::BackgroundColor)
                     .unwrap_or(SgrControl::Unimplemented(params))])
             } else if params == "39" {
-                AnsiToken::SGR(vec![SgrControl::ResetFgColor])
+                AnsiToken::Sgr(vec![SgrControl::ResetFgColor])
             } else if params == "49" {
-                AnsiToken::SGR(vec![SgrControl::ResetBgColor])
+                AnsiToken::Sgr(vec![SgrControl::ResetBgColor])
             } else {
                 // 16 color mode
                 let params = params.split(';').map(|p| {
@@ -163,14 +163,14 @@ fn parse_csi_escape_sequence(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
                         .and_then(SgrControl::from_params)
                         .unwrap_or(SgrControl::Unimplemented(format!("\u{1b}[{p}m")))
                 });
-                AnsiToken::SGR(params.collect())
+                AnsiToken::Sgr(params.collect())
             }
         })),
         [b'n', rem @ ..] => Some((
             rem,
             match params.as_str() {
-                "5" => AnsiToken::DSR(DeviceStatusReport::StatusReport),
-                _unknown => AnsiToken::DSR(DeviceStatusReport::Unknown(params)),
+                "5" => AnsiToken::Dsr(DeviceStatusReport::StatusReport),
+                _unknown => AnsiToken::Dsr(DeviceStatusReport::Unknown(params)),
             },
         )),
         [b'h', rem @ ..] => Some((
@@ -222,7 +222,7 @@ fn parse_osc_escape_sequence(mut buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
                 break;
             }
             0x1b => {
-                if let Some(0x5c) = rem.get(0) {
+                if let Some(0x5c) = rem.first() {
                     terminated = true;
                     buf = &buf[1..];
                     break;
@@ -238,16 +238,16 @@ fn parse_osc_escape_sequence(mut buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
         return None;
     }
     let token = match ctrl_buf.as_slice() {
-        [] => AnsiToken::OSC(OscControl::Reset),
+        [] => AnsiToken::Osc(OscControl::Reset),
         // ESC ]0;this is the window title BEL
-        [b'0', b';', title_bytes @ ..] => AnsiToken::OSC(OscControl::SetWindowTitle(
+        [b'0', b';', title_bytes @ ..] => AnsiToken::Osc(OscControl::SetWindowTitle(
             String::from_utf8_lossy(title_bytes).to_string(),
         )),
         // [2024-03-24T19:58:46Z DEBUG rterm::terminal_input] read 56 bytes from pty: Ok("\u{1b}[?1049h\u{1b}[H\u{1b}[2J\u{1b}[?2004h\u{1b}[1;1H\u{1b}[c\u{1b}[>c\u{1b}[>q\u{1b}]10;?\u{1b }\\\u{1b}]11;?\u{1b}\\")
         // [2024-03-24T19:58:46Z DEBUG rterm::terminal_input] parsed_tokens: [ModeControl(AlternateScreenEnter), CursorControl(MoveTo { line: 1, col: 1 }), EraseControl(Screen), ModeCont rol(BracketedPasteEnter), CursorControl(MoveTo { line: 1, col: 1 }), Unknown("\u{1b}[c"), Unknown("\u{1b}[>c"), Unknown("\u{1b}[>q"), OSC(Unknown([49, 48, 59, 63])), OSC(Unkno wn([49, 49, 59, 63]))]
-        [b'1', b'0', b';', b'?'] => AnsiToken::OSC(OscControl::GetDefaultFgColor),
-        [b'1', b'1', b';', b'?'] => AnsiToken::OSC(OscControl::GetDefaultBgColor),
-        _ => AnsiToken::OSC(OscControl::Unknown(ctrl_buf)),
+        [b'1', b'0', b';', b'?'] => AnsiToken::Osc(OscControl::GetDefaultFgColor),
+        [b'1', b'1', b';', b'?'] => AnsiToken::Osc(OscControl::GetDefaultBgColor),
+        _ => AnsiToken::Osc(OscControl::Unknown(ctrl_buf)),
     };
 
     Some((buf, token))
@@ -309,7 +309,7 @@ fn parse_normal_text(buf: &[u8]) -> Option<(&[u8], AnsiToken)> {
     }
 }
 
-fn extract_param<'a>(params: &'a str, num: usize) -> Option<usize> {
+fn extract_param(params: &str, num: usize) -> Option<usize> {
     let p = params.split(';').nth(num)?;
     if p.is_empty() {
         None
@@ -326,10 +326,10 @@ pub enum AnsiToken {
     AsciiControl(AsciiControl),
     CursorControl(CursorControl),
     EraseControl(EraseControl),
-    SGR(Vec<SgrControl>),
-    OSC(OscControl),
+    Sgr(Vec<SgrControl>),
+    Osc(OscControl),
     DA(DeviceAttributes),
-    DSR(DeviceStatusReport),
+    Dsr(DeviceStatusReport),
     ModeControl(ModeControl),
     Unknown(String),
 }
@@ -440,7 +440,7 @@ pub enum OscControl {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AsciiControl {
-    NULL = 0,
+    Null = 0,
     StartOfHeading,
     StartOfText,
     EndOfText,
@@ -534,7 +534,7 @@ pub enum Color {
     DefaultFg,
     DefaultBg,
     Indexed(u8),
-    TrueColor(u8, u8, u8),
+    Rgb(u8, u8, u8),
 }
 
 static COLOR_LUT: [egui::Color32; 256] = Color::initialize_indexed_lut();
@@ -637,7 +637,7 @@ impl Color {
             .collect::<Result<Vec<u8>, _>>()
             .ok()
             .and_then(|components| match components.as_slice() {
-                [r, g, b] => Some(Color::TrueColor(*r, *g, *b)),
+                [r, g, b] => Some(Color::Rgb(*r, *g, *b)),
                 _ => None,
             })
     }
@@ -649,7 +649,7 @@ impl From<Color> for egui::Color32 {
             Color::DefaultFg => egui::Color32::LIGHT_GRAY,
             Color::DefaultBg => egui::Color32::BLACK,
             Color::Indexed(i) => COLOR_LUT[i as usize],
-            Color::TrueColor(r, g, b) => egui::Color32::from_rgb(r, g, b),
+            Color::Rgb(r, g, b) => egui::Color32::from_rgb(r, g, b),
 
             Color::Black => COLOR_LUT[0],
             Color::Red => COLOR_LUT[1],
@@ -716,17 +716,17 @@ mod tests {
         ];
         let expected = [
             vec![
-                AnsiToken::SGR(vec![SgrControl::Bold]),
+                AnsiToken::Sgr(vec![SgrControl::Bold]),
                 AnsiToken::Text('%'.to_string()),
-                AnsiToken::SGR(vec![SgrControl::Bold]),
-                AnsiToken::SGR(vec![SgrControl::Reset]),
+                AnsiToken::Sgr(vec![SgrControl::Bold]),
+                AnsiToken::Sgr(vec![SgrControl::Reset]),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::Text(' '.to_string()),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
             ],
             vec![
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
-                AnsiToken::SGR(vec![SgrControl::Reset]),
+                AnsiToken::Sgr(vec![SgrControl::Reset]),
                 AnsiToken::EraseControl(FromCursorToEndOfScreen),
                 AnsiToken::Text("$ ".to_string()),
             ],
@@ -735,7 +735,7 @@ mod tests {
                 AnsiToken::Unknown("\u{1b}[?2004h".to_string()),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
-                AnsiToken::SGR(vec![SgrControl::Reset]),
+                AnsiToken::Sgr(vec![SgrControl::Reset]),
                 AnsiToken::EraseControl(FromCursorToEndOfScreen),
                 AnsiToken::Text("$ ".to_string()),
             ],
@@ -774,7 +774,7 @@ mod tests {
         parser.push_bytes(stream);
         assert_eq!(
             parser.next(),
-            Some(AnsiToken::SGR(vec![
+            Some(AnsiToken::Sgr(vec![
                 Bold,
                 ForgroundColor(Color::Red),
                 Unimplemented("\u{1b}[2m".to_string())
@@ -808,7 +808,7 @@ mod tests {
         assert_eq!(parser.next(), None);
 
         parser.push_bytes(&payload[3..]);
-        assert_eq!(parser.next(), Some(AnsiToken::SGR(vec![SgrControl::Bold])));
+        assert_eq!(parser.next(), Some(AnsiToken::Sgr(vec![SgrControl::Bold])));
         assert_eq!(parser.next(), Some(AnsiToken::Text("llo".to_string())));
     }
 }
