@@ -100,12 +100,9 @@ impl Tree {
         new_text = rem;
 
         if !new_text.is_empty() {
-            self.append_tree(Self::from_str2(cx, rem, sgr));
+            self.append_tree(Self::from_str2(cx, new_text, sgr));
         }
         // while !new_text.is_empty() {
-        //     let (new_leaf, rem) = Node::leaf_from_str(cx, new_text, sgr);
-        //     self.append_leaf(new_leaf);
-        //     new_text = rem;
         //     // self.find_string_segment_mut(
         //     //     SeekCharIdx(self.len_chars()),
         //     //     |segment: &mut GridString, _segment_char_idx: usize| -> Option<GridString> {
@@ -316,7 +313,7 @@ impl Tree {
             std::cmp::Ordering::Equal => {
                 match Arc::make_mut(&mut self.root) {
                     Node::Leaf { .. } => {
-                        // both self and other are just single node, leaf nodes
+                        // both self and other are just single leaf nodes
                         let new_root =
                             Node::new_internal(cx, 1, [self.root.clone(), other.root.clone()]);
                         self.root = Arc::new(new_root);
@@ -327,26 +324,32 @@ impl Tree {
                         child_summaries,
                         children,
                         ..
-                    } => match children.try_push(other.root.clone()) {
-                        Ok(_) => {
+                    } => {
+                        let Node::Internal {
+                            children: other_children,
+                            child_summaries: other_child_summaries,
+                            ..
+                        } = other.root.as_ref()
+                        else {
+                            unreachable!(
+                                "other is also an internal node because the height matches"
+                            )
+                        };
+                        if children.remaining_capacity() >= other_children.len() {
+                            // will fit: combine children
+                            children.extend(other_children.iter().cloned());
+                            child_summaries.extend(other_child_summaries.iter().cloned());
                             let summary = other.root.node_summary().clone();
                             *node_summary = node_summary.add(cx, &summary);
-                            child_summaries.push(summary);
-                        }
-                        Err(err) => {
-                            let right_children =
-                                split_children(children, children.len(), err.element());
-                            child_summaries.truncate(children.len());
-                            *node_summary = summarize(cx, &*child_summaries);
-                            let right_node =
-                                Arc::new(Node::new_internal(cx, *height, right_children));
+                        } else {
+                            // won't fit: split the root node
                             self.root = Arc::new(Node::new_internal(
                                 cx,
                                 *height + 1,
-                                [self.root.clone(), right_node],
+                                [self.root.clone(), other.root.clone()],
                             ));
                         }
-                    },
+                    }
                 }
             }
             std::cmp::Ordering::Greater => {
@@ -1656,6 +1659,8 @@ impl<'a> From<&'a GridString> for TextSummary {
 
 #[cfg(test)]
 mod tests {
+    use egui::TextBuffer;
+
     use crate::terminal_emulator::SgrState;
 
     use self::iter::Cursor;
@@ -1719,7 +1724,11 @@ mod tests {
         let input = &LARGE_TEXT[..128];
         tree.push_str(input, SgrState::default());
         assert_eq!(tree.to_string().as_str(), input);
+        assert_invariants(&tree);
+    }
 
+    #[track_caller]
+    fn assert_invariants(tree: &Tree) {
         // all levels other than the root should have at least B children
         for (idx, node) in tree.iter_nodes().enumerate() {
             assert!(
@@ -2123,5 +2132,54 @@ mod tests {
         assert_eq!(tree.get_char(6), Some('w'));
         assert_eq!(tree.get_char(10), Some('d'));
         assert_eq!(tree.get_char(11), None);
+    }
+
+    #[test]
+    fn test_append_tree_1() {
+        // merging two leaf node only trees
+        let mut t1 = Tree::from_str("abcd");
+        let t2 = Tree::from_str("efgh");
+        t1.append_tree(t2);
+        assert_eq!(t1.to_string().as_str(), "abcdefgh");
+        assert_invariants(&t1);
+    }
+
+    #[test]
+    fn test_append_tree_2() {
+        // merging equal height, non-leaf trees
+        let mut t1 = Tree::from_str("abcd".repeat(20).as_str());
+        let t2 = Tree::from_str("efgh".repeat(20).as_str());
+        t1.append_tree(t2);
+
+        let mut expected = "abcd".repeat(20);
+        expected.extend(std::iter::repeat("efgh").take(20));
+        assert_eq!(t1.to_string().as_str(), expected);
+        assert_invariants(&t1);
+    }
+
+    #[test]
+    fn test_append_tree_3() {
+        // merging bigger tree with smaller tree
+        let mut t1 = Tree::from_str("abcd".repeat(100).as_str());
+        let t2 = Tree::from_str("efgh".repeat(10).as_str());
+        t1.append_tree(t2);
+
+        let mut expected = "abcd".repeat(100);
+        expected.extend(std::iter::repeat("efgh").take(10));
+        assert_eq!(t1.to_string().as_str(), expected);
+        assert_invariants(&t1);
+    }
+
+    #[test]
+    fn test_append_tree_4() {
+        // merging smaller tree with bigger tree
+        let mut t1 = Tree::from_str("abcd".repeat(10).as_str());
+        let t2 = Tree::from_str("efgh".repeat(100).as_str());
+        t1.append_tree(t2);
+
+        let mut expected = "abcd".repeat(10);
+        expected.extend(std::iter::repeat("efgh").take(100));
+        assert_eq!(t1.to_string().as_str(), expected);
+        assert_invariants(&t1);
     }
 }
