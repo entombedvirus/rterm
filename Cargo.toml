@@ -4,17 +4,31 @@ version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[profile.release]
+debug = true
 
 [dependencies]
 anyhow = "1.0.79"
+arrayvec = "0.7.4"
 bytes = "1.5.0"
 core-foundation = "0.9.4"
 core-text = "20.1.0"
-eframe = { version = "0.26.2", features = ["persistence"] }
-egui = { version = "0.26.2", features = ["persistence"] }
+eframe = { version = "0.26.2", features = ["persistence", "puffin"] }
+egui = { version = "0.26.2", features = ["persistence", "puffin"] }
 env_logger = "0.11.1"
 libc = "0.2.153"
 log = "0.4.20"
 nix = {version = "0.27.1", features = ["process", "term", "fs", "ioctl"]}
+puffin_egui = "0.26.0"
+ropey = "1.6.1"
 serde = { version = "1.0.197", features = ["derive"] }
 toml = "0.8.10"
+
+[dev-dependencies]
+criterion = "0.5.1"
+pprof = { version = "0.13.0", features = ["criterion", "flamegraph"] }
+rand = "0.8.5"
+
+[[bench]]
+name = "tree_bench"
+harness = false

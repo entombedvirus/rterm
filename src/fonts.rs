@@ -1,5 +1,6 @@
 use std::{fs, path::PathBuf, sync::mpsc};
 
+use crate::puffin;
 use anyhow::Context;
 
 #[derive(Debug)]
@@ -33,6 +34,7 @@ impl FontManager {
         font_family_name: &str,
         font_postscript_name: &str,
     ) -> egui::FontFamily {
+        puffin::profile_function!();
         let key = egui::FontFamily::Name(font_family_name.into());
         let needs_init = self
             .font_defs
