@@ -685,6 +685,7 @@ mod tests {
     use super::*;
     use CursorControl::*;
     use EraseControl::*;
+    use ModeControl::*;
 
     #[test]
     fn test_utf8_decoding() -> anyhow::Result<()> {
@@ -732,7 +733,7 @@ mod tests {
             ],
             vec![
                 AnsiToken::EraseControl(FromCursorToEndOfLine),
-                AnsiToken::Unknown("\u{1b}[?2004h".to_string()),
+                AnsiToken::ModeControl(BracketedPasteEnter),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::AsciiControl(AsciiControl::CarriageReturn),
                 AnsiToken::Sgr(vec![SgrControl::Reset]),
