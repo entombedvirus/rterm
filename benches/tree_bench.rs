@@ -19,12 +19,14 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("write_text_at_cursor_20x80", |b| {
         b.iter(|| {
             let mut grid = rterm::grid::Grid::new(20, 80);
+            grid.max_scrollback_lines(5000);
             grid.write_text_at_cursor(black_box(&input));
         })
     });
     c.bench_function("write_text_at_cursor_200x80", |b| {
         b.iter(|| {
             let mut grid = rterm::grid::Grid::new(200, 80);
+            grid.max_scrollback_lines(5000);
             grid.write_text_at_cursor(black_box(&input));
         })
     });

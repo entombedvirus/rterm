@@ -11,10 +11,10 @@ use arrayvec::{ArrayString, ArrayVec};
 
 use crate::terminal_emulator::SgrState;
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(test))]
 pub const MAX_BYTES: usize = 32;
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 pub const MAX_BYTES: usize = 8;
 
 type Result<T> = std::result::Result<T, GridStringError>;

@@ -477,11 +477,7 @@ impl TerminalEmulator {
 
     fn build_line_layout(&self, fonts: &FontSpec, line: grid::DisplayLine) -> LayoutJob {
         puffin::profile_function!("build_line_layout");
-        let mut layout = LayoutJob::default();
-        layout.break_on_newline = false;
-        layout.wrap = egui::text::TextWrapping::no_max_width();
-        layout.text = line.padded_text;
-        layout.sections = line
+        let sections = line
             .format_attributes
             .into_iter()
             .map(|attrs| egui::text::LayoutSection {
@@ -490,8 +486,13 @@ impl TerminalEmulator {
                 format: self.build_text_format(fonts, &attrs.sgr_state),
             })
             .collect();
-
-        layout
+        LayoutJob {
+            text: line.padded_text,
+            sections,
+            wrap: egui::text::TextWrapping::no_max_width(),
+            break_on_newline: false,
+            ..Default::default()
+        }
     }
 
     fn build_text_format(&self, fonts: &FontSpec, format: &SgrState) -> egui::text::TextFormat {

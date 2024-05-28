@@ -11,7 +11,12 @@ use crate::{
     terminal_emulator::SgrState,
 };
 
+#[cfg(test)]
 const B: usize = 3;
+
+#[cfg(not(test))]
+const B: usize = 8;
+
 pub const MAX_CHILDREN: usize = B * 2;
 pub const MIN_CHILDREN: usize = B;
 
@@ -813,6 +818,8 @@ mod iter {
 
     impl<'a> std::iter::FusedIterator for StringIter<'a> {}
 }
+
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum Node {
     Leaf {
