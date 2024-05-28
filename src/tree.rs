@@ -205,7 +205,7 @@ impl Tree {
         ))
     }
 
-    fn find_string_segment_mut<'a, D: SeekTarget>(
+    fn find_string_segment_mut<D: SeekTarget>(
         &mut self,
         seek_target: D,
         edit_op: impl FnMut(&mut GridString, usize) -> Option<GridString>,
@@ -483,7 +483,7 @@ mod iter {
             }
 
             if self.cursor.is_none() {
-                let mut cursor = Cursor::new(&self.tree);
+                let mut cursor = Cursor::new(self.tree);
                 cursor
                     .seek_to_char(SeekSoftWrapPosition::new(self.target_line_range.start, 0))
                     .ok()?;
@@ -939,7 +939,7 @@ impl Node {
 
         match seek_target.cmp_summary(cx, &end) {
             std::cmp::Ordering::Less => {
-                for (child_idx, child_summary) in self.child_summaries().into_iter().enumerate() {
+                for (child_idx, child_summary) in self.child_summaries().iter().enumerate() {
                     let next_sum = running_sum.add(cx, child_summary);
                     if seek_target.cmp_summary(cx, &next_sum) == std::cmp::Ordering::Less {
                         return Some((child_idx, running_sum));
@@ -958,7 +958,7 @@ impl Node {
                     running_sum = running_sum.add(cx, child_summary);
                 }
                 let child_idx = self.child_summaries().len() - 1;
-                return Some((child_idx, running_sum));
+                Some((child_idx, running_sum))
             }
             std::cmp::Ordering::Greater => None,
         }
@@ -1022,7 +1022,7 @@ impl Node {
                     let overflow_pos = child_idx + 1;
                     children
                         .try_insert(overflow_pos, overflow)
-                        .and_then(|()| Ok(None))
+                        .map(|()| None)
                         .unwrap_or_else(|err| -> Option<Arc<Node>> {
                             match Compactable::compact_items_with_seam(cx, children, overflow_pos) {
                                 Some(new_overflow_pos) => {
@@ -1055,7 +1055,7 @@ impl Node {
                         let split_node_pos = child_idx + 1;
                         children
                             .try_insert(split_node_pos, split_node)
-                            .and_then(|()| Ok(None))
+                            .map(|()| None)
                             .unwrap_or_else(|err| {
                                 match Compactable::compact_items_with_seam(
                                     cx,
@@ -1098,7 +1098,7 @@ impl Node {
         mut running_sum: TextSummary,
         seek_target: T,
     ) -> Result<usize, OutOfBounds<T>> {
-        for (child_idx, child_summary) in self.child_summaries().into_iter().enumerate() {
+        for (child_idx, child_summary) in self.child_summaries().iter().enumerate() {
             let next_sum = running_sum.add(cx, child_summary);
             if seek_target.cmp_summary(cx, &next_sum) == std::cmp::Ordering::Less {
                 return match self {
@@ -1144,7 +1144,7 @@ impl Node {
         let mut children: ArrayVec<GridString, MAX_CHILDREN> = ArrayVec::new();
         while !new_text.is_empty() {
             let (segment, _, rem) = GridString::split(new_text, sgr);
-            if let Err(_) = children.try_push(segment.unwrap()) {
+            if children.try_push(segment.unwrap()).is_err() {
                 break;
             }
             new_text = rem;
@@ -1659,14 +1659,12 @@ impl<'a> From<&'a GridString> for TextSummary {
 
 #[cfg(test)]
 mod tests {
-    use egui::TextBuffer;
-
     use crate::terminal_emulator::SgrState;
 
     use self::iter::Cursor;
 
     use super::*;
-    const LARGE_TEXT: &'static str = include_str!("tree.rs");
+    const LARGE_TEXT: &str = include_str!("tree.rs");
 
     #[test]
     fn test_text_summary_1() {
@@ -1741,7 +1739,7 @@ mod tests {
     #[test]
     fn test_large_input_2() {
         let mut tree = Tree::new();
-        let input = &LARGE_TEXT[..];
+        let input = LARGE_TEXT;
         for line in input.split_inclusive('\n').rev() {
             tree.insert_str(SeekCharIdx(0), line, SgrState::default());
         }

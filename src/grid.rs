@@ -129,11 +129,11 @@ impl Grid {
     }
 
     pub fn num_rows(&self) -> u32 {
-        self.num_screen_rows.0 as u32
+        self.num_screen_rows.0
     }
 
     pub fn num_cols(&self) -> u32 {
-        self.num_screen_cols.0 as u32
+        self.num_screen_cols.0
     }
 
     // in range num_rows..=max_scrollback_rows
@@ -280,7 +280,7 @@ impl Grid {
                 .resolve_dimension(edit_pos)
                 .expect("sync_buffer_to_cursor_position to ensure that cursor_pos is valid");
             let edit_pos_end = {
-                let mut pos = edit_pos.clone();
+                let mut pos = edit_pos;
                 pos.col_idx += edit_len;
                 pos.line_idx += pos.col_idx / self.num_cols();
                 pos.col_idx %= self.num_cols();
@@ -333,7 +333,7 @@ impl Grid {
             mut last_valid_position,
             mut last_char_idx,
             ..
-        }) = self.text.resolve_dimension(desired_pos.clone())
+        }) = self.text.resolve_dimension(desired_pos)
         {
             if let Some(lines_to_add) = desired_pos
                 .line_idx
@@ -355,12 +355,7 @@ impl Grid {
                 &self.blank_line[..n as usize],
                 SgrState::default(),
             );
-            let after = self.text.to_string();
 
-            if !self.text.resolve_dimension(desired_pos).is_ok() {
-                // break point
-                let _ = after.len();
-            }
             debug_assert!(self.text.resolve_dimension(desired_pos).is_ok());
             self.cursor_state
                 .clamp_position(self.num_rows(), self.num_cols());
@@ -368,7 +363,7 @@ impl Grid {
     }
 
     pub fn pause_rendering(&mut self) {
-        self.frozen_text = Some((self.text.clone(), self.cursor_state.clone()));
+        self.frozen_text = Some((self.text.clone(), self.cursor_state));
     }
 
     pub fn resume_rendering(&mut self) {
@@ -378,10 +373,10 @@ impl Grid {
     // scan the rope counting the number of display lines (with soft-wrapping) until
     // we reach the beginning of query_range. Then take query_range.len() number of lines.
     // Note that a display line may begin the middle of a rope line because of soft-wrapping.
-    pub fn display_lines<'a, R: RangeBounds<u32>>(
-        &'a self,
+    pub fn display_lines<R: RangeBounds<u32>>(
+        &self,
         query_range: R,
-    ) -> impl Iterator<Item = DisplayLine> + 'a {
+    ) -> impl Iterator<Item = DisplayLine> + '_ {
         puffin::profile_function!();
         let text = self
             .frozen_text
@@ -400,7 +395,7 @@ impl Grid {
                 let mut format_attributes = vec![];
                 let mut cur = None;
                 for (sgr_state, ch) in display_slice.sgr.into_iter().zip(padded_text.chars()) {
-                    let state = cur.get_or_insert_with(|| FormatAttribute {
+                    let state = cur.get_or_insert(FormatAttribute {
                         sgr_state,
                         byte_range: 0..0,
                     });
@@ -451,14 +446,14 @@ impl Grid {
 
     pub fn erase_from_cursor_to_eol(&mut self) {
         let cursor_pos = self.screen_to_buffer_pos();
-        if let Err(_) = self.text.resolve_dimension(cursor_pos.clone()) {
+        if self.text.resolve_dimension(cursor_pos).is_err() {
             // cursor is already outside anywhere we have text anyway.
             // Nothing to erase in this case.
             return;
         }
 
         let mut next_line = tree::SeekSoftWrapPosition::new(cursor_pos.line_idx + 1, 0);
-        if let Err(err) = self.text.resolve_dimension(next_line.clone()) {
+        if let Err(err) = self.text.resolve_dimension(next_line) {
             next_line = err.last_valid_position;
         }
         self.text.remove_range(cursor_pos..next_line);
@@ -490,7 +485,7 @@ impl Grid {
             .and_then(|prev_idx| self.text.get_char(prev_idx))
             .is_some_and(|prev_ch| prev_ch != '\n')
         {
-            n = n + 1;
+            n += 1;
         }
         self.text
             .insert_str(pos, "\n".repeat(n as usize).as_str(), SgrState::default());
@@ -1049,11 +1044,11 @@ drwxr-xr-x@  7 rravi  staff    224 Apr 14 15:11 target
         assert_eq!(&line, expected);
     }
 
-    fn grid_feed_input<'a, I: IntoIterator<Item = S>, S: AsRef<str>>(grid: &mut Grid, parts: I) {
+    fn grid_feed_input<I: IntoIterator<Item = S>, S: AsRef<str>>(grid: &mut Grid, parts: I) {
         for p in parts {
             for line in p.as_ref().split_inclusive('\n') {
-                if line.ends_with('\n') {
-                    grid.write_text_at_cursor(&line[..line.len() - 1]);
+                if let Some(stripped) = line.strip_suffix('\n') {
+                    grid.write_text_at_cursor(stripped);
                     let (row, _) = grid.cursor_position();
                     grid.move_cursor(row, 0); // \r
                     grid.insert_linebreak_if_needed(); // \n
